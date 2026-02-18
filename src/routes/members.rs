@@ -94,7 +94,30 @@ pub async fn update_member(
     auth: AuthUser,
     Json(input): Json<UpdateMember>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "manage_nicknames").await?;
+    // Nickname changes require manage_nicknames
+    if input.nickname.is_some() {
+        require_permission(&state.db, &space_id, &auth, "manage_nicknames").await?;
+    }
+
+    // Role changes require manage_roles + hierarchy checks
+    if let Some(ref roles) = input.roles {
+        require_permission(&state.db, &space_id, &auth, "manage_roles").await?;
+        require_hierarchy(&state.db, &space_id, &auth.user_id, &user_id).await?;
+        // Verify each role being assigned is below the actor's highest role
+        for role_id in roles {
+            let role = db::roles::get_role_row(&state.db, role_id).await?;
+            require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
+        }
+    }
+
+    // Mute/deafen require their respective permissions
+    if input.mute.is_some() {
+        require_permission(&state.db, &space_id, &auth, "mute_members").await?;
+    }
+    if input.deaf.is_some() {
+        require_permission(&state.db, &space_id, &auth, "deafen_members").await?;
+    }
+
     let row = db::members::update_member(&state.db, &space_id, &user_id, &input).await?;
     let role_ids = db::members::get_member_role_ids(&state.db, &space_id, &user_id).await?;
     Ok(Json(
@@ -107,7 +130,7 @@ pub async fn kick_member(
     Path((space_id, user_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "kick_members").await?;
+    require_permission(&state.db, &space_id, &auth, "kick_members").await?;
     require_hierarchy(&state.db, &space_id, &auth.user_id, &user_id).await?;
     db::members::remove_member(&state.db, &space_id, &user_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
@@ -119,7 +142,7 @@ pub async fn update_own_member(
     auth: AuthUser,
     Json(input): Json<UpdateMember>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "change_nickname").await?;
+    require_permission(&state.db, &space_id, &auth, "change_nickname").await?;
     let limited = UpdateMember {
         nickname: input.nickname,
         roles: None,
@@ -138,7 +161,7 @@ pub async fn add_role(
     Path((space_id, user_id, role_id)): Path<(String, String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "manage_roles").await?;
+    require_permission(&state.db, &space_id, &auth, "manage_roles").await?;
     let role = db::roles::get_role_row(&state.db, &role_id).await?;
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
     db::members::add_role_to_member(&state.db, &space_id, &user_id, &role_id).await?;
@@ -150,7 +173,7 @@ pub async fn remove_role(
     Path((space_id, user_id, role_id)): Path<(String, String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "manage_roles").await?;
+    require_permission(&state.db, &space_id, &auth, "manage_roles").await?;
     let role = db::roles::get_role_row(&state.db, &role_id).await?;
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
     db::members::remove_role_from_member(&state.db, &space_id, &user_id, &role_id).await?;

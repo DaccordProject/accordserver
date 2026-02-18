@@ -18,7 +18,7 @@ pub async fn list_bans(
     Path(space_id): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "ban_members").await?;
+    require_permission(&state.db, &space_id, &auth, "ban_members").await?;
     let bans = db::bans::list_bans(&state.db, &space_id).await?;
     let data: Vec<serde_json::Value> = bans
         .iter()
@@ -40,7 +40,7 @@ pub async fn get_ban(
     Path((space_id, user_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "ban_members").await?;
+    require_permission(&state.db, &space_id, &auth, "ban_members").await?;
     let ban = db::bans::get_ban(&state.db, &space_id, &user_id).await?;
     Ok(Json(serde_json::json!({
         "data": {
@@ -59,7 +59,7 @@ pub async fn create_ban(
     auth: AuthUser,
     body: Option<Json<CreateBanBody>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "ban_members").await?;
+    require_permission(&state.db, &space_id, &auth, "ban_members").await?;
     require_hierarchy(&state.db, &space_id, &auth.user_id, &user_id).await?;
     let reason = body.and_then(|b| b.reason.clone());
     let ban = db::bans::create_ban(
@@ -86,7 +86,7 @@ pub async fn delete_ban(
     Path((space_id, user_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "ban_members").await?;
+    require_permission(&state.db, &space_id, &auth, "ban_members").await?;
     db::bans::delete_ban(&state.db, &space_id, &user_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }

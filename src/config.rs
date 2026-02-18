@@ -35,6 +35,7 @@ pub struct Config {
     pub sfu: Option<SfuConfig>,
     pub voice_backend: VoiceBackend,
     pub livekit: Option<LiveKitConfig>,
+    pub storage_path: std::path::PathBuf,
 }
 
 impl Config {
@@ -103,6 +104,10 @@ impl Config {
             None
         };
 
+        let storage_path = std::env::var("ACCORD_STORAGE_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("./cdn"));
+
         Self {
             port: std::env::var("PORT")
                 .ok()
@@ -117,6 +122,7 @@ impl Config {
             sfu,
             voice_backend,
             livekit,
+            storage_path,
         }
     }
 }

@@ -153,11 +153,16 @@ pub async fn delete_role(pool: &SqlitePool, role_id: &str) -> Result<(), AppErro
     Ok(())
 }
 
-pub async fn reorder_roles(pool: &SqlitePool, updates: &[(String, i64)]) -> Result<(), AppError> {
+pub async fn reorder_roles(
+    pool: &SqlitePool,
+    space_id: &str,
+    updates: &[(String, i64)],
+) -> Result<(), AppError> {
     for (id, position) in updates {
-        sqlx::query("UPDATE roles SET position = ? WHERE id = ?")
+        sqlx::query("UPDATE roles SET position = ? WHERE id = ? AND space_id = ?")
             .bind(position)
             .bind(id)
+            .bind(space_id)
             .execute(pool)
             .await?;
     }

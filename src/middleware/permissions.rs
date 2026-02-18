@@ -20,6 +20,7 @@ pub const DEFAULT_EVERYONE_PERMISSIONS: &[&str] = &[
     "attach_files",
     "use_external_emojis",
     "stream",
+    "use_soundboard",
 ];
 
 /// Permissions granted to the default Moderator role.
@@ -87,6 +88,7 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "manage_roles",
     "manage_webhooks",
     "manage_emojis",
+    "manage_soundboard",
     "view_audit_log",
     "priority_speaker",
 ];
@@ -181,14 +183,16 @@ async fn resolve_member_permissions_inner(
 }
 
 /// Check that a user has a specific permission in a space.
+/// Instance admins (`auth.is_admin`) bypass all permission checks.
 /// Returns `Forbidden` if the user lacks the permission or is not a member.
 pub async fn require_permission(
     pool: &SqlitePool,
     space_id: &str,
-    user_id: &str,
+    auth: &AuthUser,
     perm: &str,
 ) -> Result<(), AppError> {
-    let perms = resolve_member_permissions(pool, space_id, user_id).await?;
+    let perms =
+        resolve_member_permissions_with_admin(pool, space_id, &auth.user_id, auth.is_admin).await?;
     if !has_permission(&perms, perm) {
         return Err(AppError::Forbidden(format!("missing permission: {perm}")));
     }
@@ -201,7 +205,11 @@ pub async fn require_membership(
     space_id: &str,
     user_id: &str,
 ) -> Result<(), AppError> {
-    require_permission(pool, space_id, user_id, "view_channel").await
+    let perms = resolve_member_permissions(pool, space_id, user_id).await?;
+    if !has_permission(&perms, "view_channel") {
+        return Err(AppError::Forbidden("missing permission: view_channel".into()));
+    }
+    Ok(())
 }
 
 /// Resolve effective permissions for a user in a specific channel,

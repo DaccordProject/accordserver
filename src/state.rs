@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use sqlx::SqlitePool;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::Instant;
@@ -38,4 +39,5 @@ pub struct AppState {
     pub voice_backend: VoiceBackend,
     pub livekit_client: Option<LiveKitClient>,
     pub rate_limits: Arc<DashMap<String, RateLimitBucket>>,
+    pub storage_path: PathBuf,
 }
