@@ -10,4 +10,5 @@ pub mod sfu_runtime;
 pub mod slug;
 pub mod snowflake;
 pub mod state;
+pub mod storage;
 pub mod voice;

@@ -10,6 +10,7 @@ pub mod message;
 pub mod permission;
 pub mod presence;
 pub mod role;
+pub mod soundboard;
 pub mod space;
 pub mod user;
 pub mod voice;

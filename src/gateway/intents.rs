@@ -3,6 +3,7 @@ pub const ALL_INTENTS: &[&str] = &[
     "spaces",
     "moderation",
     "emojis",
+    "soundboard",
     "voice_states",
     "messages",
     "message_reactions",
@@ -39,7 +40,10 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
         "voice.state_update" | "voice.server_update" | "voice.signal" => Some("voice_states"),
         "ban.create" | "ban.delete" => Some("moderation"),
         "invite.create" | "invite.delete" => Some("spaces"),
-        "emoji.update" => Some("emojis"),
+        "emoji.create" | "emoji.update" | "emoji.delete" => Some("emojis"),
+        "soundboard.create" | "soundboard.update" | "soundboard.delete" | "soundboard.play" => {
+            Some("soundboard")
+        }
         "interaction.create" => None, // always delivered
         _ => None,
     }

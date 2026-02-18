@@ -40,6 +40,8 @@ pub const ALL_PERMISSIONS: &[&str] = &[
     "manage_roles",
     "manage_webhooks",
     "manage_emojis",
+    "manage_soundboard",
+    "use_soundboard",
     "use_commands",
     "manage_events",
     "manage_threads",

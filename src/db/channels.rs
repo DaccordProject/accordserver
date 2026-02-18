@@ -155,12 +155,14 @@ pub async fn delete_channel(pool: &SqlitePool, channel_id: &str) -> Result<(), A
 
 pub async fn reorder_channels(
     pool: &SqlitePool,
+    space_id: &str,
     updates: &[(String, i64)],
 ) -> Result<(), AppError> {
     for (id, position) in updates {
-        sqlx::query("UPDATE channels SET position = ? WHERE id = ?")
+        sqlx::query("UPDATE channels SET position = ? WHERE id = ? AND space_id = ?")
             .bind(position)
             .bind(id)
+            .bind(space_id)
             .execute(pool)
             .await?;
     }

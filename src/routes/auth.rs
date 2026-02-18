@@ -72,9 +72,9 @@ pub async fn register(
         .as_deref()
         .unwrap_or(username);
 
-    // First registered (non-bot) user becomes admin
+    // First registered (non-bot, non-system) user becomes admin
     let user_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE bot = false")
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE bot = false AND system = false")
             .fetch_one(&state.db)
             .await
             .map_err(AppError::from)?;

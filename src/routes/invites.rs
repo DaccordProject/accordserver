@@ -5,7 +5,7 @@ use crate::db;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::middleware::permissions::{
-    require_channel_permission, require_membership, require_permission,
+    require_channel_permission, require_permission,
 };
 use crate::models::invite::CreateInvite;
 use crate::state::AppState;
@@ -29,7 +29,7 @@ pub async fn delete_invite(
     require_permission(
         &state.db,
         &invite.space_id,
-        &auth.user_id,
+        &auth,
         "manage_channels",
     )
     .await?;
@@ -63,7 +63,7 @@ pub async fn list_space_invites(
     Path(space_id): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_membership(&state.db, &space_id, &auth.user_id).await?;
+    require_permission(&state.db, &space_id, &auth, "manage_channels").await?;
     let invites = db::invites::list_space_invites(&state.db, &space_id).await?;
     Ok(Json(serde_json::json!({ "data": invites })))
 }
@@ -73,7 +73,7 @@ pub async fn list_channel_invites(
     Path(channel_id): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "view_channel").await?;
+    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_channels").await?;
     let invites = db::invites::list_channel_invites(&state.db, &channel_id).await?;
     Ok(Json(serde_json::json!({ "data": invites })))
 }
@@ -103,7 +103,7 @@ pub async fn create_space_invite(
     auth: AuthUser,
     Json(input): Json<CreateInvite>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "create_invites").await?;
+    require_permission(&state.db, &space_id, &auth, "create_invites").await?;
     let _space = db::spaces::get_space_row(&state.db, &space_id).await?;
     let invite =
         db::invites::create_invite(&state.db, &space_id, None, &auth.user_id, &input).await?;

@@ -12,6 +12,7 @@ pub enum AppError {
     Unauthorized(String),
     Forbidden(String),
     Conflict(String),
+    PayloadTooLarge(String),
     RateLimited { retry_after: u64 },
 }
 
@@ -25,6 +26,7 @@ impl AppError {
             AppError::Unauthorized(_) => "unauthorized",
             AppError::Forbidden(_) => "forbidden",
             AppError::Conflict(_) => "already_exists",
+            AppError::PayloadTooLarge(_) => "payload_too_large",
             AppError::RateLimited { .. } => "rate_limited",
         }
     }
@@ -38,6 +40,7 @@ impl AppError {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         }
     }
@@ -57,6 +60,7 @@ impl AppError {
             AppError::Unauthorized(msg) => msg.clone(),
             AppError::Forbidden(msg) => msg.clone(),
             AppError::Conflict(msg) => msg.clone(),
+            AppError::PayloadTooLarge(msg) => msg.clone(),
             AppError::RateLimited { retry_after } => {
                 format!("rate limited, retry after {retry_after}s")
             }

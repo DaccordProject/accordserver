@@ -8,6 +8,7 @@ pub mod messages;
 pub mod permission_overwrites;
 pub mod roles;
 pub mod sfu;
+pub mod soundboard;
 pub mod spaces;
 pub mod users;
 

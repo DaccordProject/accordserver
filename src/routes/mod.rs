@@ -12,6 +12,7 @@ pub mod messages;
 mod reactions;
 mod roles;
 mod sfu;
+mod soundboard;
 pub mod spaces;
 mod test_seed;
 mod users;
@@ -21,6 +22,7 @@ use axum::middleware as axum_mw;
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::middleware::rate_limit::rate_limit_middleware;
@@ -30,11 +32,13 @@ use crate::state::AppState;
 /// layers that need `State<AppState>` (e.g. rate limiter) can be wired up.
 pub fn router(state: AppState) -> Router {
     let api = api_routes(&state);
+    let cdn_service = ServeDir::new(&state.storage_path);
 
     Router::new()
         .route("/health", get(health::health))
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/test/seed", post(test_seed::seed))
+        .nest_service("/cdn", cdn_service)
         .nest("/api/v1", api)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -91,6 +95,11 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/spaces/{space_id}/members/{user_id}/roles/{role_id}",
             put(members::add_role).delete(members::remove_role),
+        )
+        // Message search
+        .route(
+            "/spaces/{space_id}/messages/search",
+            get(messages::search_messages),
         )
         // Bans
         .route("/spaces/{space_id}/bans", get(bans::list_bans))
@@ -192,6 +201,21 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(emojis::get_emoji)
                 .patch(emojis::update_emoji)
                 .delete(emojis::delete_emoji),
+        )
+        // Soundboard
+        .route(
+            "/spaces/{space_id}/soundboard",
+            get(soundboard::list_sounds).post(soundboard::create_sound),
+        )
+        .route(
+            "/spaces/{space_id}/soundboard/{sound_id}",
+            get(soundboard::get_sound)
+                .patch(soundboard::update_sound)
+                .delete(soundboard::delete_sound),
+        )
+        .route(
+            "/spaces/{space_id}/soundboard/{sound_id}/play",
+            post(soundboard::play_sound),
         )
         // Voice
         .route("/voice/info", get(voice::voice_info))

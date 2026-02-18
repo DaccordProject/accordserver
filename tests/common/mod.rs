@@ -7,6 +7,7 @@ use accordserver::middleware::auth::{create_token_hash, generate_token};
 use accordserver::models::user::{CreateUser, User};
 use accordserver::routes;
 use accordserver::state::AppState;
+use accordserver::storage;
 use axum::body::Body;
 use dashmap::DashMap;
 use http::{Method, Request};
@@ -52,6 +53,12 @@ impl TestServer {
 
         let (dispatcher, gateway_tx) = Dispatcher::new();
 
+        let storage_path = storage::temp_storage_path();
+        // Create storage subdirectories
+        for subdir in &["emojis", "sounds"] {
+            std::fs::create_dir_all(storage_path.join(subdir)).ok();
+        }
+
         let state = AppState {
             db: pool,
             sfu_nodes: Arc::new(DashMap::new()),
@@ -62,6 +69,7 @@ impl TestServer {
             voice_backend: VoiceBackend::Custom,
             livekit_client: None,
             rate_limits: Arc::new(DashMap::new()),
+            storage_path,
         };
 
         Self { state }
@@ -218,11 +226,60 @@ impl TestServer {
         channel.id
     }
 
+    /// Create a voice channel in the given space. Returns the channel ID.
+    pub async fn create_voice_channel(&self, space_id: &str, name: &str) -> String {
+        let channel = db::channels::create_channel(
+            self.pool(),
+            space_id,
+            &accordserver::models::channel::CreateChannel {
+                name: name.to_string(),
+                channel_type: "voice".to_string(),
+                topic: None,
+                parent_id: None,
+                nsfw: None,
+                bitrate: None,
+                user_limit: None,
+                rate_limit: None,
+                position: None,
+            },
+        )
+        .await
+        .expect("failed to create test voice channel");
+        channel.id
+    }
+
     /// Add a user as a member of a space.
     pub async fn add_member(&self, space_id: &str, user_id: &str) {
         db::members::add_member(self.pool(), space_id, user_id)
             .await
             .expect("failed to add test member");
+    }
+
+    /// Create a role in a space via the DB. Returns the role ID.
+    pub async fn create_role(
+        &self,
+        space_id: &str,
+        name: &str,
+        permissions: &[&str],
+    ) -> String {
+        let input = accordserver::models::role::CreateRole {
+            name: name.to_string(),
+            color: None,
+            hoist: None,
+            permissions: Some(permissions.iter().map(|s| s.to_string()).collect()),
+            mentionable: None,
+        };
+        let row = db::roles::create_role(self.pool(), space_id, &input)
+            .await
+            .expect("failed to create test role");
+        row.id
+    }
+
+    /// Assign a role to a member via the DB.
+    pub async fn assign_role(&self, space_id: &str, user_id: &str, role_id: &str) {
+        db::members::add_role_to_member(self.pool(), space_id, user_id, role_id)
+            .await
+            .expect("failed to assign test role");
     }
 
     /// Create an admin user with a token. Sets `is_admin = true` on the user.

@@ -47,7 +47,7 @@ pub async fn update_space(
     auth: AuthUser,
     Json(input): Json<UpdateSpace>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "manage_space").await?;
+    require_permission(&state.db, &space_id, &auth, "manage_space").await?;
     let space = db::spaces::update_space(&state.db, &space_id, &input).await?;
     Ok(Json(serde_json::json!({ "data": space })))
 }
@@ -88,7 +88,7 @@ pub async fn create_channel(
     auth: AuthUser,
     Json(input): Json<CreateChannel>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "manage_channels").await?;
+    require_permission(&state.db, &space_id, &auth, "manage_channels").await?;
     let channel = db::channels::create_channel(&state.db, &space_id, &input).await?;
     // Newly created channel has no overwrites
     Ok(Json(
@@ -102,9 +102,9 @@ pub async fn reorder_channels(
     auth: AuthUser,
     Json(input): Json<Vec<ChannelPositionUpdate>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_permission(&state.db, &space_id, &auth.user_id, "manage_channels").await?;
+    require_permission(&state.db, &space_id, &auth, "manage_channels").await?;
     let updates: Vec<(String, i64)> = input.into_iter().map(|u| (u.id, u.position)).collect();
-    db::channels::reorder_channels(&state.db, &updates).await?;
+    db::channels::reorder_channels(&state.db, &space_id, &updates).await?;
     let channels = db::channels::list_channels_in_space(&state.db, &space_id).await?;
     let data = channels_to_json_async(&state.db, &channels).await?;
     Ok(Json(serde_json::json!({ "data": data })))

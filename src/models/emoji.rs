@@ -10,6 +10,8 @@ pub struct Emoji {
     pub require_colons: bool,
     pub role_ids: Vec<String>,
     pub creator_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -86,6 +86,15 @@ async fn run_main_server(config: Config) {
         accordserver::voice::livekit::LiveKitClient::new(&lk.url, &lk.api_key, &lk.api_secret)
     });
 
+    // Create storage directories
+    let storage_path = config.storage_path.clone();
+    for subdir in &["emojis", "sounds"] {
+        let dir = storage_path.join(subdir);
+        if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+            tracing::error!("failed to create storage directory {:?}: {:?}", dir, e);
+        }
+    }
+
     let state = AppState {
         db,
         sfu_nodes: sfu_nodes.clone(),
@@ -96,6 +105,7 @@ async fn run_main_server(config: Config) {
         voice_backend: config.voice_backend.clone(),
         livekit_client,
         rate_limits: Arc::new(DashMap::new()),
+        storage_path,
     };
 
     // Spawn stale-node reaper only when using custom SFU backend
