@@ -1,0 +1,9 @@
+target/
+*.db
+*.db-shm
+*.db-wal
+.env
+.git/
+AGENTS.db
+AGENTS.local.db
+CLAUDE.md
