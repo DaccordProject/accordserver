@@ -9,7 +9,9 @@ COPY Cargo.toml Cargo.lock ./
 # Create a dummy main to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs
 COPY build.rs ./
-RUN cargo build --release && rm -rf src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && rm -rf src
 
 # Copy the real source code and migrations
 COPY src/ src/
@@ -21,7 +23,9 @@ ENV GIT_SHA=${GIT_SHA}
 
 # Touch files so cargo rebuilds the actual source
 RUN touch src/main.rs src/lib.rs
-RUN cargo build --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && cp /app/target/release/accordserver /app/accordserver
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -33,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/accordserver ./
+COPY --from=builder /app/accordserver ./
 COPY migrations/ migrations/
 
 ENV PORT=39099
