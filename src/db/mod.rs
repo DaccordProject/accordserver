@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod auth;
 pub mod bans;
 pub mod channels;

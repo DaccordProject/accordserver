@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 serde = { version = "1", features = ["derive"] }

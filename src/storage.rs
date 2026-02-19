@@ -4,6 +4,7 @@ use crate::error::AppError;
 
 pub const MAX_EMOJI_SIZE: usize = 256 * 1024; // 256 KB
 pub const MAX_SOUND_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+pub const MAX_ATTACHMENT_SIZE: usize = 25 * 1024 * 1024; // 25 MB
 
 pub const ALLOWED_IMAGE_TYPES: &[&str] = &["image/png", "image/gif", "image/webp"];
 pub const ALLOWED_AUDIO_TYPES: &[&str] = &["audio/ogg", "audio/mpeg", "audio/wav"];
@@ -115,6 +116,52 @@ pub async fn save_base64_audio(
 
     let relative_url = format!("/cdn/sounds/{space_id}/{filename}");
     Ok((relative_url, content_type, size))
+}
+
+/// Save an uploaded attachment file to disk.
+/// Returns `(relative_url, file_size)`.
+pub async fn save_attachment(
+    storage_path: &Path,
+    channel_id: &str,
+    message_id: &str,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<(String, usize), AppError> {
+    if bytes.len() > MAX_ATTACHMENT_SIZE {
+        return Err(AppError::PayloadTooLarge(format!(
+            "attachment exceeds maximum size of {} MB",
+            MAX_ATTACHMENT_SIZE / (1024 * 1024)
+        )));
+    }
+
+    let dir = storage_path
+        .join("attachments")
+        .join(channel_id)
+        .join(message_id);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to create attachment directory: {e}")))?;
+
+    let safe_filename = sanitize_filename(filename);
+    let file_path = dir.join(&safe_filename);
+    let size = bytes.len();
+    tokio::fs::write(&file_path, bytes)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to write attachment file: {e}")))?;
+
+    let relative_url = format!("/cdn/attachments/{channel_id}/{message_id}/{safe_filename}");
+    Ok((relative_url, size))
+}
+
+/// Sanitize a filename to prevent directory traversal and other issues.
+fn sanitize_filename(name: &str) -> String {
+    let name = name.replace(['/', '\\', '\0'], "_");
+    let name = name.trim_start_matches('.');
+    if name.is_empty() {
+        "attachment".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// Delete a file given its relative path (e.g. `/cdn/emojis/123/456.png`).
