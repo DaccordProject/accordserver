@@ -141,6 +141,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(messages::list_messages).post(messages::create_message),
         )
         .route(
+            "/channels/{channel_id}/messages/upload",
+            post(messages::create_message_multipart),
+        )
+        .route(
             "/channels/{channel_id}/messages/{message_id}",
             get(messages::get_message)
                 .patch(messages::update_message)
@@ -256,6 +260,8 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/interactions/{interaction_id}/{token}/callback",
             post(interactions::interaction_callback),
         )
+        // Version
+        .route("/version", get(health::version))
         // Gateway info (authenticated)
         .route("/gateway/bot", get(gateway::get_gateway_bot))
         // Rate limit on all API routes

@@ -8,11 +8,16 @@ COPY Cargo.toml Cargo.lock ./
 
 # Create a dummy main to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs
+COPY build.rs ./
 RUN cargo build --release && rm -rf src
 
 # Copy the real source code and migrations
 COPY src/ src/
 COPY migrations/ migrations/
+
+# Pass git SHA as a build arg since .git is not copied
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
 
 # Touch files so cargo rebuilds the actual source
 RUN touch src/main.rs src/lib.rs
