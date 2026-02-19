@@ -68,6 +68,33 @@ Required when `ACCORD_MODE=sfu`:
 | `ACCORD_SFU_ENDPOINT` | Publicly reachable address for clients |
 | `ACCORD_SFU_HEARTBEAT_INTERVAL` | Seconds between heartbeats (default: `25`) |
 
+## Docker
+
+The server image is published to GHCR:
+
+```
+ghcr.io/daccordproject/accordserver
+```
+
+### Docker Compose
+
+```yaml
+services:
+  accordserver:
+    image: ghcr.io/daccordproject/accordserver:latest
+    ports:
+      - "39099:39099"
+    volumes:
+      - accord-data:/app
+    environment:
+      PORT: 39099
+      DATABASE_URL: sqlite:accord.db?mode=rwc
+      RUST_LOG: accordserver=debug,tower_http=debug
+
+volumes:
+  accord-data:
+```
+
 ## Architecture
 
 Single-binary Axum application that runs in two modes:
