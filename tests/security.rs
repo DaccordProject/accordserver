@@ -1531,3 +1531,41 @@ async fn test_invalid_audio_type_rejected() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_owner_can_update_channel() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // Alice (space owner) updates her channel → should succeed
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/channels/{channel_id}"),
+        &alice.auth_header(),
+        &json!({ "name": "renamed-channel", "topic": "new topic" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "space owner should be able to update channel");
+}
+
+#[tokio::test]
+async fn test_instance_admin_can_update_channel() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let admin = server.create_admin_with_token("admin").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &admin.user.id).await;
+
+    // Admin (instance admin, not space owner) updates the channel → should succeed
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/channels/{channel_id}"),
+        &admin.auth_header(),
+        &json!({ "name": "admin-renamed", "topic": "admin topic" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "instance admin should be able to update channel");
+}

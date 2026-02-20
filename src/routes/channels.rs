@@ -48,7 +48,7 @@ pub async fn update_channel(
     } else if existing.channel_type == "dm" {
         return Err(AppError::BadRequest("cannot rename a 1:1 DM".into()));
     } else {
-        require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_channels")
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_channels")
             .await?;
     }
     let channel = db::channels::update_channel(&state.db, &channel_id, &input).await?;
@@ -145,7 +145,7 @@ pub async fn delete_channel(
         return Ok(Json(serde_json::json!({ "data": null })));
     }
 
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_channels").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_channels").await?;
     db::channels::delete_channel(&state.db, &channel_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }
@@ -155,7 +155,7 @@ pub async fn list_overwrites(
     Path(channel_id): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_roles").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_roles").await?;
     let overwrites = db::permission_overwrites::list_overwrites(&state.db, &channel_id).await?;
     Ok(Json(serde_json::json!({ "data": overwrites })))
 }
@@ -166,7 +166,7 @@ pub async fn upsert_overwrite(
     auth: AuthUser,
     Json(input): Json<UpsertOverwriteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_roles").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_roles").await?;
 
     // Validate overwrite_type
     if input.overwrite_type != "role" && input.overwrite_type != "member" {
@@ -198,7 +198,7 @@ pub async fn delete_overwrite(
     Path((channel_id, overwrite_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_roles").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_roles").await?;
     db::permission_overwrites::delete_overwrite(&state.db, &channel_id, &overwrite_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }

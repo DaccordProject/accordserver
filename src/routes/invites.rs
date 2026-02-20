@@ -73,7 +73,7 @@ pub async fn list_channel_invites(
     Path(channel_id): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_channels").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_channels").await?;
     let invites = db::invites::list_channel_invites(&state.db, &channel_id).await?;
     Ok(Json(serde_json::json!({ "data": invites })))
 }
@@ -85,7 +85,7 @@ pub async fn create_channel_invite(
     Json(input): Json<CreateInvite>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let space_id =
-        require_channel_permission(&state.db, &channel_id, &auth.user_id, "create_invites").await?;
+        require_channel_permission(&state.db, &channel_id, &auth, "create_invites").await?;
     let invite = db::invites::create_invite(
         &state.db,
         &space_id,

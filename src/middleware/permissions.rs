@@ -330,23 +330,27 @@ pub async fn require_dm_access(
 
 /// Check that a user has a specific permission for a channel.
 /// Uses `resolve_channel_permissions` which accounts for overwrites.
+/// Instance admins (`auth.is_admin`) bypass all permission checks.
 /// For DM/group_dm channels, checks participant access instead.
 /// Returns the space_id on success (empty string for DMs).
 pub async fn require_channel_permission(
     pool: &SqlitePool,
     channel_id: &str,
-    user_id: &str,
+    auth: &AuthUser,
     perm: &str,
 ) -> Result<String, AppError> {
     let channel = db::channels::get_channel_row(pool, channel_id).await?;
     if channel.channel_type == "dm" || channel.channel_type == "group_dm" {
-        require_dm_access(pool, channel_id, user_id).await?;
+        require_dm_access(pool, channel_id, &auth.user_id).await?;
         return Ok(String::new());
     }
     let space_id = channel
         .space_id
         .ok_or_else(|| AppError::BadRequest("channel has no space".to_string()))?;
-    let perms = resolve_channel_permissions(pool, channel_id, &space_id, user_id).await?;
+    if auth.is_admin {
+        return Ok(space_id);
+    }
+    let perms = resolve_channel_permissions(pool, channel_id, &space_id, &auth.user_id).await?;
     if !has_permission(&perms, perm) {
         return Err(AppError::Forbidden(format!("missing permission: {perm}")));
     }
@@ -360,7 +364,14 @@ pub async fn require_channel_membership(
     channel_id: &str,
     user_id: &str,
 ) -> Result<String, AppError> {
-    require_channel_permission(pool, channel_id, user_id, "view_channel").await
+    // Membership checks use a synthetic non-admin AuthUser since instance
+    // admins still need explicit membership for view access.
+    let auth = AuthUser {
+        user_id: user_id.to_string(),
+        is_bot: false,
+        is_admin: false,
+    };
+    require_channel_permission(pool, channel_id, &auth, "view_channel").await
 }
 
 /// Returns a user's highest role position in a space.

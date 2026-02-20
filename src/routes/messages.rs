@@ -105,7 +105,7 @@ pub async fn create_message(
     auth: AuthUser,
     Json(input): Json<CreateMessage>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "send_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
     let msg = db::messages::create_message(
         &state.db,
@@ -185,7 +185,7 @@ pub async fn create_message_multipart(
     auth: AuthUser,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "send_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
 
     let mut payload_json: Option<CreateMessage> = None;
     let mut files: Vec<(String, String, Vec<u8>)> = Vec::new(); // (filename, content_type, bytes)
@@ -349,7 +349,7 @@ pub async fn delete_message(
     }
     // Author can always delete their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
-        require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_messages")
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages")
             .await?;
     }
 
@@ -391,7 +391,7 @@ pub async fn bulk_delete_messages(
     auth: AuthUser,
     Json(input): Json<BulkDeleteMessages>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     if input.messages.len() > 100 {
         return Err(AppError::BadRequest(
             "cannot bulk delete more than 100 messages".to_string(),
@@ -417,7 +417,7 @@ pub async fn pin_message(
     Path((channel_id, message_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     db::messages::pin_message(&state.db, &channel_id, &message_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }
@@ -427,7 +427,7 @@ pub async fn unpin_message(
     Path((channel_id, message_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     db::messages::unpin_message(&state.db, &channel_id, &message_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }
@@ -437,7 +437,7 @@ pub async fn typing_indicator(
     Path(channel_id): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "send_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
         let event = serde_json::json!({
