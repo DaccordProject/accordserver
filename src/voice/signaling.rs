@@ -35,6 +35,7 @@ pub async fn relay_signal(
     if let Some(ref tx) = *state.gateway_tx.read().await {
         let _ = tx.send(GatewayBroadcast {
             space_id: Some(space_id),
+            target_user_ids: None,
             event,
             intent: "voice_states".to_string(),
         });

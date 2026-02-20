@@ -59,7 +59,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(users::get_current_user).patch(users::update_current_user),
         )
         .route("/users/@me/spaces", get(users::get_current_user_spaces))
-        .route("/users/@me/channels", get(users::get_current_user_channels))
+        .route(
+            "/users/@me/channels",
+            get(users::get_current_user_channels).post(users::create_dm_channel),
+        )
         .route("/users/{user_id}", get(users::get_user))
         // Spaces
         .route("/spaces/public", get(spaces::list_public_spaces))
@@ -126,6 +129,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(channels::get_channel)
                 .patch(channels::update_channel)
                 .delete(channels::delete_channel),
+        )
+        .route(
+            "/channels/{channel_id}/recipients/{user_id}",
+            put(channels::add_recipient).delete(channels::remove_recipient),
         )
         .route(
             "/channels/{channel_id}/permissions",

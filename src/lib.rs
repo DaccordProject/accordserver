@@ -11,4 +11,5 @@ pub mod slug;
 pub mod snowflake;
 pub mod state;
 pub mod storage;
+pub mod unfurl;
 pub mod voice;

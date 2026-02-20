@@ -169,9 +169,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             } => {
                 if let Some(broadcast) = broadcast {
                     // Check if this session should receive this event
-                    let should_receive = match &broadcast.space_id {
-                        Some(sid) => space_ids.contains(sid),
-                        None => true, // DM or global event
+                    let should_receive = match (&broadcast.target_user_ids, &broadcast.space_id) {
+                        (Some(targets), _) => targets.contains(&user_id),
+                        (None, Some(sid)) => space_ids.contains(sid),
+                        (None, None) => true, // global event
                     };
 
                     if should_receive {
@@ -236,6 +237,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     if let Some(ref gtx) = *state.gateway_tx.read().await {
                                                         let _ = gtx.send(GatewayBroadcast {
                                                             space_id: Some(vsu.space_id.clone()),
+                                                            target_user_ids: None,
                                                             event,
                                                             intent: "voice_states".to_string(),
                                                         });
@@ -313,6 +315,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                         if let Some(ref gtx) = *state.gateway_tx.read().await {
                                                             let _ = gtx.send(GatewayBroadcast {
                                                                 space_id: old_vs.space_id.clone(),
+                                                                target_user_ids: None,
                                                                 event,
                                                                 intent: "voice_states".to_string(),
                                                             });
@@ -382,6 +385,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             if let Some(ref gtx) = *state.gateway_tx.read().await {
                 let _ = gtx.send(GatewayBroadcast {
                     space_id: Some(sid.clone()),
+                    target_user_ids: None,
                     event,
                     intent: "voice_states".to_string(),
                 });

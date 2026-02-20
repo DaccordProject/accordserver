@@ -65,6 +65,7 @@ pub async fn create_sound(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: Some(space_id),
+            target_user_ids: None,
             event,
             intent: "soundboard".to_string(),
         });
@@ -94,6 +95,7 @@ pub async fn update_sound(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: Some(space_id),
+            target_user_ids: None,
             event,
             intent: "soundboard".to_string(),
         });
@@ -128,6 +130,7 @@ pub async fn delete_sound(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: Some(space_id),
+            target_user_ids: None,
             event,
             intent: "soundboard".to_string(),
         });
@@ -159,6 +162,7 @@ pub async fn play_sound(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: Some(space_id),
+            target_user_ids: None,
             event,
             intent: "soundboard".to_string(),
         });
