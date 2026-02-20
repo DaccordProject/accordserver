@@ -193,6 +193,7 @@ async fn broadcast_voice_state_update(state: &AppState, space_id: &str, voice_st
     if let Some(ref tx) = *state.gateway_tx.read().await {
         let _ = tx.send(GatewayBroadcast {
             space_id: Some(space_id.to_string()),
+            target_user_ids: None,
             event,
             intent: "voice_states".to_string(),
         });

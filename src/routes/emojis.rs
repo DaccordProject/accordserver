@@ -85,6 +85,7 @@ pub async fn create_emoji(
             });
             let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
                 space_id: Some(space_id),
+                target_user_ids: None,
                 event,
                 intent: "emojis".to_string(),
             });
@@ -105,6 +106,7 @@ pub async fn create_emoji(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: Some(space_id),
+            target_user_ids: None,
             event,
             intent: "emojis".to_string(),
         });
@@ -134,6 +136,7 @@ pub async fn update_emoji(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: Some(space_id),
+            target_user_ids: None,
             event,
             intent: "emojis".to_string(),
         });
@@ -168,6 +171,7 @@ pub async fn delete_emoji(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: Some(space_id),
+            target_user_ids: None,
             event,
             intent: "emojis".to_string(),
         });

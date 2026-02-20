@@ -314,9 +314,24 @@ pub async fn resolve_channel_permissions(
     Ok(perms)
 }
 
+/// Check that a user is a participant in a DM channel.
+pub async fn require_dm_access(
+    pool: &SqlitePool,
+    channel_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
+    if !db::dm_participants::is_participant(pool, channel_id, user_id).await? {
+        return Err(AppError::Forbidden(
+            "you are not a participant in this DM".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Check that a user has a specific permission for a channel.
 /// Uses `resolve_channel_permissions` which accounts for overwrites.
-/// Returns the space_id on success.
+/// For DM/group_dm channels, checks participant access instead.
+/// Returns the space_id on success (empty string for DMs).
 pub async fn require_channel_permission(
     pool: &SqlitePool,
     channel_id: &str,
@@ -324,6 +339,10 @@ pub async fn require_channel_permission(
     perm: &str,
 ) -> Result<String, AppError> {
     let channel = db::channels::get_channel_row(pool, channel_id).await?;
+    if channel.channel_type == "dm" || channel.channel_type == "group_dm" {
+        require_dm_access(pool, channel_id, user_id).await?;
+        return Ok(String::new());
+    }
     let space_id = channel
         .space_id
         .ok_or_else(|| AppError::BadRequest("channel has no space".to_string()))?;

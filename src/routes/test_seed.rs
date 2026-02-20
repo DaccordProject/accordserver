@@ -12,6 +12,7 @@ use crate::middleware::auth::{create_token_hash, generate_token};
 use crate::models::channel::CreateChannel;
 use crate::models::space::{CreateSpace, SpaceRow};
 use crate::models::user::{CreateUser, User};
+use crate::snowflake;
 use crate::state::AppState;
 
 pub async fn seed(State(state): State<AppState>) -> impl IntoResponse {
@@ -93,17 +94,19 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
         .await?;
     }
 
-    // 5. Ensure bot is a member of the space
-    let bot_is_member: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM members WHERE user_id = ? AND space_id = ?",
-    )
-    .bind(&bot_user_id)
-    .bind(&space.id)
-    .fetch_one(pool)
-    .await?;
+    // 5. Ensure both the user and the bot are members of the space
+    for uid in [&user.id, &bot_user_id] {
+        let is_member: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM members WHERE user_id = ? AND space_id = ?",
+        )
+        .bind(uid)
+        .bind(&space.id)
+        .fetch_one(pool)
+        .await?;
 
-    if bot_is_member == 0 {
-        db::members::add_member(pool, &space.id, &bot_user_id).await?;
+        if is_member == 0 {
+            db::members::add_member(pool, &space.id, uid).await?;
+        }
     }
 
     // 6. Build response with all channels
@@ -177,6 +180,11 @@ async fn find_or_create_user(
 }
 
 /// Returns (Application, bot_user_id, fresh_bot_token).
+///
+/// Handles repeated calls gracefully: if the application already exists it
+/// reuses it and rotates the token.  If a prior seed's application was
+/// deleted (e.g. by a test) but the bot *user* still exists, the bot user
+/// is reused instead of hitting a UNIQUE-constraint violation on `username`.
 async fn find_or_create_application(
     pool: &SqlitePool,
     owner_id: &str,
@@ -191,23 +199,78 @@ async fn find_or_create_application(
     .fetch_optional(pool)
     .await?;
 
-    match existing {
-        Some((app_id, bot_user_id)) => {
-            let app = db::auth::get_application(pool, &app_id).await?;
-            let token = db::auth::reset_bot_token(pool, &app_id).await?;
-            Ok((app, bot_user_id, token))
+    if let Some((app_id, bot_user_id)) = existing {
+        let app = db::auth::get_application(pool, &app_id).await?;
+        let token = db::auth::reset_bot_token(pool, &app_id).await?;
+        return Ok((app, bot_user_id, token));
+    }
+
+    // No application found — the bot user may still exist from a previous
+    // seed whose application row was removed.  Reuse it to avoid a UNIQUE
+    // violation on users.username.
+    let bot_username = format!("{name} Bot");
+    let existing_bot_id: Option<String> =
+        sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+            .bind(&bot_username)
+            .fetch_optional(pool)
+            .await?;
+
+    let bot_user_id = match existing_bot_id {
+        Some(id) => {
+            sqlx::query("UPDATE users SET bot = 1 WHERE id = ?")
+                .bind(&id)
+                .execute(pool)
+                .await?;
+            id
         }
         None => {
-            let (app, token) =
-                db::auth::create_application(pool, owner_id, name, description).await?;
-            let bot_user_id: String =
-                sqlx::query_scalar("SELECT bot_user_id FROM applications WHERE id = ?")
-                    .bind(&app.id)
-                    .fetch_one(pool)
-                    .await?;
-            Ok((app, bot_user_id, token))
+            let bot_user = db::users::create_user(
+                pool,
+                &CreateUser {
+                    username: bot_username,
+                    display_name: Some(format!("{name} Bot")),
+                },
+            )
+            .await?;
+            sqlx::query("UPDATE users SET bot = 1 WHERE id = ?")
+                .bind(&bot_user.id)
+                .execute(pool)
+                .await?;
+            bot_user.id
         }
-    }
+    };
+
+    // Clean up any orphaned application rows pointing to this bot user
+    sqlx::query("DELETE FROM applications WHERE bot_user_id = ?")
+        .bind(&bot_user_id)
+        .execute(pool)
+        .await?;
+
+    // Create the application
+    let app_id = snowflake::generate();
+    sqlx::query(
+        "INSERT INTO applications (id, name, description, owner_id, bot_user_id) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&app_id)
+    .bind(name)
+    .bind(description)
+    .bind(owner_id)
+    .bind(&bot_user_id)
+    .execute(pool)
+    .await?;
+
+    let token = generate_token();
+    let token_hash = create_token_hash(&token);
+
+    sqlx::query("INSERT INTO bot_tokens (token_hash, application_id, user_id) VALUES (?, ?, ?)")
+        .bind(&token_hash)
+        .bind(&app_id)
+        .bind(&bot_user_id)
+        .execute(pool)
+        .await?;
+
+    let app = db::auth::get_application(pool, &app_id).await?;
+    Ok((app, bot_user_id, token))
 }
 
 async fn find_or_create_space(

@@ -111,7 +111,7 @@ pub async fn reorder_channels(
 }
 
 /// Build channel JSON for external callers (e.g. channels.rs).
-/// Loads overwrites from the DB.
+/// Loads overwrites from the DB. For DM/group_dm channels, includes recipients.
 pub async fn channel_row_to_json_pub(
     pool: &sqlx::SqlitePool,
     row: &ChannelRow,
@@ -119,7 +119,17 @@ pub async fn channel_row_to_json_pub(
     let overwrites = db::permission_overwrites::list_overwrites(pool, &row.id)
         .await
         .unwrap_or_default();
-    channel_row_to_json_with_overwrites(row, &overwrites)
+    let mut json = channel_row_to_json_with_overwrites(row, &overwrites);
+    if row.channel_type == "dm" || row.channel_type == "group_dm" {
+        let users = db::dm_participants::get_participant_users(pool, &row.id)
+            .await
+            .unwrap_or_default();
+        json.as_object_mut().unwrap().insert(
+            "recipients".to_string(),
+            serde_json::to_value(&users).unwrap_or_default(),
+        );
+    }
+    json
 }
 
 fn channel_row_to_json_with_overwrites(

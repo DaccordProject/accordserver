@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct GatewayBroadcast {
     pub space_id: Option<String>,
+    /// When set, only sessions belonging to these user IDs receive the event.
+    /// Used for DM/group_dm channel events that have no space_id.
+    pub target_user_ids: Option<Vec<String>>,
     pub event: serde_json::Value,
     pub intent: String,
 }

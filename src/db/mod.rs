@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod auth;
 pub mod bans;
 pub mod channels;
+pub mod dm_participants;
 pub mod emojis;
 pub mod invites;
 pub mod members;

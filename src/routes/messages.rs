@@ -126,9 +126,50 @@ pub async fn create_message(
             "data": json
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: channel.space_id,
+            space_id: channel.space_id.clone(),
+            target_user_ids: None,
             event,
             intent: "messages".to_string(),
+        });
+    }
+
+    // Spawn URL unfurling in the background -- if the message has no embeds
+    // already and its content contains URLs, fetch OpenGraph metadata and
+    // update the message with generated embeds.
+    if input.embeds.as_ref().map_or(true, |e| e.is_empty()) {
+        let content = input.content.clone();
+        let msg_id = msg.id.clone();
+        let space_id = channel.space_id.clone();
+        let db = state.db.clone();
+        let gateway_tx = state.gateway_tx.clone();
+        tokio::spawn(async move {
+            let embeds = crate::unfurl::unfurl_message_urls(&content).await;
+            if embeds.is_empty() {
+                return;
+            }
+            let update = UpdateMessage {
+                content: None,
+                embeds: Some(embeds),
+            };
+            if let Ok(updated_msg) = db::messages::update_message(&db, &msg_id, &update).await {
+                let attachments = db::attachments::get_attachments_for_message(&db, &msg_id)
+                    .await
+                    .unwrap_or_default();
+                let json = message_row_to_json_with_attachments(&updated_msg, &attachments, None);
+                if let Some(ref dispatcher) = *gateway_tx.read().await {
+                    let event = serde_json::json!({
+                        "op": 0,
+                        "type": "message.update",
+                        "data": json
+                    });
+                    let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+                        space_id,
+                        target_user_ids: None,
+                        event,
+                        intent: "messages".to_string(),
+                    });
+                }
+            }
         });
     }
 
@@ -246,6 +287,7 @@ pub async fn create_message_multipart(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id,
+            target_user_ids: None,
             event,
             intent: "messages".to_string(),
         });
@@ -287,6 +329,7 @@ pub async fn update_message(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id,
+            target_user_ids: None,
             event,
             intent: "messages".to_string(),
         });
@@ -333,6 +376,7 @@ pub async fn delete_message(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id.clone(),
+            target_user_ids: None,
             event,
             intent: "messages".to_string(),
         });
@@ -407,6 +451,7 @@ pub async fn typing_indicator(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id,
+            target_user_ids: None,
             event,
             intent: "message_typing".to_string(),
         });
