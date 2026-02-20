@@ -11,7 +11,7 @@ pub async fn add_reaction(
     Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "add_reactions").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "add_reactions").await?;
     sqlx::query(
         "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)",
     )
@@ -46,7 +46,7 @@ pub async fn remove_user_reaction(
     Path((channel_id, message_id, emoji, user_id)): Path<(String, String, String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     sqlx::query("DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?")
         .bind(&message_id)
         .bind(&user_id)
@@ -80,7 +80,7 @@ pub async fn remove_all_reactions(
     Path((channel_id, message_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     sqlx::query("DELETE FROM reactions WHERE message_id = ?")
         .bind(&message_id)
         .execute(&state.db)
@@ -94,7 +94,7 @@ pub async fn remove_all_reactions_emoji(
     Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "manage_messages").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     sqlx::query("DELETE FROM reactions WHERE message_id = ? AND emoji_name = ?")
         .bind(&message_id)
         .bind(&emoji)

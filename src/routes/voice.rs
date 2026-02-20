@@ -58,7 +58,7 @@ pub async fn get_voice_status(
     Path(channel_id): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "view_channel").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "view_channel").await?;
     let states = voice::state::get_channel_voice_states(&state, &channel_id);
     Ok(Json(serde_json::json!({ "data": states })))
 }
@@ -75,7 +75,7 @@ pub async fn join_voice(
     auth: AuthUser,
     Json(input): Json<JoinVoiceRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "connect").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "connect").await?;
 
     // Look up channel to confirm it exists and get space_id
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
@@ -142,7 +142,7 @@ pub async fn leave_voice(
     Path(channel_id): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth.user_id, "connect").await?;
+    require_channel_permission(&state.db, &channel_id, &auth, "connect").await?;
     let old_state = voice::state::leave_voice_channel(&state, &auth.user_id);
 
     if let Some(ref vs) = old_state {
