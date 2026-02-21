@@ -161,6 +161,14 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/channels/{channel_id}/messages/bulk-delete",
             post(messages::bulk_delete_messages),
         )
+        .route(
+            "/channels/{channel_id}/messages/{message_id}/threads",
+            get(messages::get_thread_info),
+        )
+        .route(
+            "/channels/{channel_id}/threads",
+            get(messages::list_active_threads),
+        )
         .route("/channels/{channel_id}/pins", get(messages::list_pins))
         .route(
             "/channels/{channel_id}/pins/{message_id}",

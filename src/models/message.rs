@@ -25,6 +25,8 @@ pub struct Message {
     pub reply_to: Option<String>,
     pub flags: i64,
     pub webhook_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub reply_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +62,7 @@ pub struct MessageRow {
     pub reply_to: Option<String>,
     pub flags: i64,
     pub webhook_id: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +71,7 @@ pub struct CreateMessage {
     pub tts: Option<bool>,
     pub embeds: Option<Vec<Embed>>,
     pub reply_to: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -97,9 +97,9 @@ pub async fn update_channel(
         sets.push("topic = ?".to_string());
         str_values.push(Some(topic.clone()));
     }
-    if let Some(ref parent_id) = input.parent_id {
+    if let Some(parent_id) = &input.parent_id {
         sets.push("parent_id = ?".to_string());
-        str_values.push(Some(parent_id.clone()));
+        str_values.push(parent_id.clone());
     }
 
     if let Some(position) = input.position {

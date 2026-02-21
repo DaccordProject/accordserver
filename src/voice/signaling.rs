@@ -27,7 +27,7 @@ pub async fn relay_signal(
             "user_id": user_id,
             "session_id": session_id,
             "channel_id": voice_state.channel_id,
-            "signal_type": signal_type,
+            "type": signal_type,
             "payload": payload
         }
     });

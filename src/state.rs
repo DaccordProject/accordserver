@@ -9,6 +9,7 @@ use crate::config::VoiceBackend;
 use crate::gateway::dispatcher::Dispatcher;
 use crate::gateway::events::GatewayBroadcast;
 use crate::models::voice::VoiceState;
+use crate::voice::embedded_sfu::EmbeddedSfu;
 use crate::voice::livekit::LiveKitClient;
 
 #[derive(Clone)]
@@ -38,6 +39,7 @@ pub struct AppState {
     pub test_mode: bool,
     pub voice_backend: VoiceBackend,
     pub livekit_client: Option<LiveKitClient>,
+    pub embedded_sfu: Option<Arc<EmbeddedSfu>>,
     pub rate_limits: Arc<DashMap<String, RateLimitBucket>>,
     pub storage_path: PathBuf,
 }

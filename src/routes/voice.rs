@@ -124,13 +124,11 @@ pub async fn join_voice(
             })))
         }
         VoiceBackend::Custom => {
-            let sfu_endpoint =
-                voice::sfu::allocate_node(&state, None).map(|node| node.endpoint.clone());
             Ok(Json(serde_json::json!({
                 "data": {
                     "voice_state": voice_state,
                     "backend": "custom",
-                    "sfu_endpoint": sfu_endpoint
+                    "sfu_endpoint": "gateway"
                 }
             })))
         }
@@ -163,11 +161,18 @@ pub async fn leave_voice(
             broadcast_voice_state_update(&state, space_id, &left_state).await;
         }
 
-        // LiveKit cleanup
-        if state.voice_backend == VoiceBackend::LiveKit {
-            if let (Some(ref lk), Some(ref channel_id)) = (&state.livekit_client, &vs.channel_id) {
-                lk.remove_participant(channel_id, &auth.user_id).await;
-                lk.delete_room_if_empty(channel_id).await;
+        // Backend cleanup
+        match state.voice_backend {
+            VoiceBackend::LiveKit => {
+                if let (Some(ref lk), Some(ref channel_id)) = (&state.livekit_client, &vs.channel_id) {
+                    lk.remove_participant(channel_id, &auth.user_id).await;
+                    lk.delete_room_if_empty(channel_id).await;
+                }
+            }
+            VoiceBackend::Custom => {
+                if let (Some(ref sfu), Some(ref channel_id)) = (&state.embedded_sfu, &vs.channel_id) {
+                    sfu.remove_peer(channel_id, &auth.user_id).await;
+                }
             }
         }
     }

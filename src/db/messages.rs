@@ -25,10 +25,11 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> MessageRow {
         reply_to: row.get("reply_to"),
         flags: row.get("flags"),
         webhook_id: row.get("webhook_id"),
+        thread_id: row.get("thread_id"),
     }
 }
 
-const SELECT_MESSAGES: &str = "SELECT id, channel_id, space_id, author_id, content, type, created_at, edited_at, tts, pinned, mention_everyone, mentions, mention_roles, embeds, reply_to, flags, webhook_id FROM messages";
+const SELECT_MESSAGES: &str = "SELECT id, channel_id, space_id, author_id, content, type, created_at, edited_at, tts, pinned, mention_everyone, mentions, mention_roles, embeds, reply_to, flags, webhook_id, thread_id FROM messages";
 
 pub async fn get_message_row(pool: &SqlitePool, message_id: &str) -> Result<MessageRow, AppError> {
     let row = sqlx::query(&format!("{SELECT_MESSAGES} WHERE id = ?"))
@@ -45,24 +46,53 @@ pub async fn list_messages(
     channel_id: &str,
     after: Option<&str>,
     limit: i64,
+    thread_id: Option<&str>,
 ) -> Result<Vec<MessageRow>, AppError> {
-    let rows = if let Some(after_id) = after {
-        sqlx::query(&format!(
-            "{SELECT_MESSAGES} WHERE channel_id = ? AND id > ? ORDER BY id ASC LIMIT ?"
-        ))
-        .bind(channel_id)
-        .bind(after_id)
-        .bind(limit + 1)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query(&format!(
-            "{SELECT_MESSAGES} WHERE channel_id = ? ORDER BY id DESC LIMIT ?"
-        ))
-        .bind(channel_id)
-        .bind(limit + 1)
-        .fetch_all(pool)
-        .await?
+    let rows = match (after, thread_id) {
+        (Some(after_id), Some(tid)) => {
+            // Thread replies after a cursor
+            sqlx::query(&format!(
+                "{SELECT_MESSAGES} WHERE channel_id = ? AND thread_id = ? AND id > ? ORDER BY id ASC LIMIT ?"
+            ))
+            .bind(channel_id)
+            .bind(tid)
+            .bind(after_id)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await?
+        }
+        (None, Some(tid)) => {
+            // Thread replies (oldest first)
+            sqlx::query(&format!(
+                "{SELECT_MESSAGES} WHERE channel_id = ? AND thread_id = ? ORDER BY id ASC LIMIT ?"
+            ))
+            .bind(channel_id)
+            .bind(tid)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await?
+        }
+        (Some(after_id), None) => {
+            // Main channel feed after a cursor (exclude thread replies)
+            sqlx::query(&format!(
+                "{SELECT_MESSAGES} WHERE channel_id = ? AND thread_id IS NULL AND id > ? ORDER BY id ASC LIMIT ?"
+            ))
+            .bind(channel_id)
+            .bind(after_id)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await?
+        }
+        (None, None) => {
+            // Main channel feed (exclude thread replies)
+            sqlx::query(&format!(
+                "{SELECT_MESSAGES} WHERE channel_id = ? AND thread_id IS NULL ORDER BY id DESC LIMIT ?"
+            ))
+            .bind(channel_id)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await?
+        }
     };
 
     Ok(rows.into_iter().map(row_to_message).collect())
@@ -79,7 +109,7 @@ pub async fn create_message(
     let embeds_json = serde_json::to_string(&input.embeds.as_deref().unwrap_or(&[])).unwrap();
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, space_id, author_id, content, tts, embeds, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO messages (id, channel_id, space_id, author_id, content, tts, embeds, reply_to, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(channel_id)
@@ -89,6 +119,7 @@ pub async fn create_message(
     .bind(input.tts.unwrap_or(false))
     .bind(&embeds_json)
     .bind(&input.reply_to)
+    .bind(&input.thread_id)
     .execute(pool)
     .await?;
 
@@ -257,12 +288,105 @@ pub async fn list_pinned_messages(
     channel_id: &str,
 ) -> Result<Vec<MessageRow>, AppError> {
     let rows = sqlx::query(
-        "SELECT m.id, m.channel_id, m.space_id, m.author_id, m.content, m.type, m.created_at, m.edited_at, m.tts, m.pinned, m.mention_everyone, m.mentions, m.mention_roles, m.embeds, m.reply_to, m.flags, m.webhook_id FROM messages m INNER JOIN pinned_messages p ON m.id = p.message_id WHERE p.channel_id = ? ORDER BY p.pinned_at DESC"
+        "SELECT m.id, m.channel_id, m.space_id, m.author_id, m.content, m.type, m.created_at, m.edited_at, m.tts, m.pinned, m.mention_everyone, m.mentions, m.mention_roles, m.embeds, m.reply_to, m.flags, m.webhook_id, m.thread_id FROM messages m INNER JOIN pinned_messages p ON m.id = p.message_id WHERE p.channel_id = ? ORDER BY p.pinned_at DESC"
     )
     .bind(channel_id)
     .fetch_all(pool)
     .await?;
 
+    Ok(rows.into_iter().map(row_to_message).collect())
+}
+
+/// Returns the number of thread replies for a given parent message ID.
+pub async fn get_thread_reply_count(
+    pool: &SqlitePool,
+    parent_message_id: &str,
+) -> Result<i64, AppError> {
+    let row = sqlx::query("SELECT COUNT(*) as cnt FROM messages WHERE thread_id = ?")
+        .bind(parent_message_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(row.get::<i64, _>("cnt"))
+}
+
+/// Returns reply counts for multiple parent message IDs in a single query.
+/// Result maps parent_message_id -> reply_count.
+pub async fn get_thread_reply_counts(
+    pool: &SqlitePool,
+    message_ids: &[String],
+) -> Result<HashMap<String, i64>, AppError> {
+    if message_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders: Vec<&str> = message_ids.iter().map(|_| "?").collect();
+    let in_clause = placeholders.join(", ");
+    let sql = format!(
+        "SELECT thread_id, COUNT(*) as cnt FROM messages WHERE thread_id IN ({in_clause}) GROUP BY thread_id"
+    );
+    let mut q = sqlx::query(&sql);
+    for id in message_ids {
+        q = q.bind(id);
+    }
+    let rows = q.fetch_all(pool).await?;
+    let mut result = HashMap::new();
+    for row in &rows {
+        let tid: String = row.get("thread_id");
+        let cnt: i64 = row.get("cnt");
+        result.insert(tid, cnt);
+    }
+    Ok(result)
+}
+
+/// Returns thread metadata for a parent message: reply count, last reply timestamp,
+/// and participant user IDs.
+pub async fn get_thread_metadata(
+    pool: &SqlitePool,
+    parent_message_id: &str,
+) -> Result<serde_json::Value, AppError> {
+    let count_row = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM messages WHERE thread_id = ?"
+    )
+    .bind(parent_message_id)
+    .fetch_one(pool)
+    .await?;
+    let reply_count: i64 = count_row.get("cnt");
+
+    let last_reply_row = sqlx::query(
+        "SELECT created_at FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 1"
+    )
+    .bind(parent_message_id)
+    .fetch_optional(pool)
+    .await?;
+    let last_reply_at: Option<String> = last_reply_row.map(|r| r.get("created_at"));
+
+    let participant_rows = sqlx::query(
+        "SELECT DISTINCT author_id FROM messages WHERE thread_id = ?"
+    )
+    .bind(parent_message_id)
+    .fetch_all(pool)
+    .await?;
+    let participants: Vec<String> = participant_rows.iter().map(|r| r.get("author_id")).collect();
+
+    Ok(serde_json::json!({
+        "reply_count": reply_count,
+        "last_reply_at": last_reply_at,
+        "participants": participants,
+    }))
+}
+
+/// Lists parent messages that have at least one thread reply in a channel.
+pub async fn list_active_threads(
+    pool: &SqlitePool,
+    channel_id: &str,
+) -> Result<Vec<MessageRow>, AppError> {
+    let sql = format!(
+        "{SELECT_MESSAGES} WHERE channel_id = ? AND id IN (SELECT DISTINCT thread_id FROM messages WHERE thread_id IS NOT NULL AND channel_id = ?) ORDER BY id DESC"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(channel_id)
+        .bind(channel_id)
+        .fetch_all(pool)
+        .await?;
     Ok(rows.into_iter().map(row_to_message).collect())
 }
 

@@ -20,6 +20,7 @@ const MAX_ATTACHMENTS: usize = 10;
 pub struct ListMessagesQuery {
     pub after: Option<String>,
     pub limit: Option<i64>,
+    pub thread_id: Option<String>,
 }
 
 pub async fn list_messages(
@@ -47,7 +48,7 @@ pub async fn list_messages(
     }
     let limit = params.limit.unwrap_or(50).min(100);
     let mut rows =
-        db::messages::list_messages(&state.db, &channel_id, params.after.as_deref(), limit).await?;
+        db::messages::list_messages(&state.db, &channel_id, params.after.as_deref(), limit, params.thread_id.as_deref()).await?;
 
     let has_more = rows.len() as i64 > limit;
     if has_more {
@@ -573,6 +574,31 @@ pub async fn search_messages(
     Ok(Json(response))
 }
 
+pub async fn get_thread_info(
+    state: State<AppState>,
+    Path((channel_id, message_id)): Path<(String, String)>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_channel_membership(&state.db, &channel_id, &auth.user_id).await?;
+    let msg = db::messages::get_message_row(&state.db, &message_id).await?;
+    if msg.channel_id != channel_id {
+        return Err(AppError::NotFound("unknown_message".to_string()));
+    }
+    let metadata = db::messages::get_thread_metadata(&state.db, &message_id).await?;
+    Ok(Json(serde_json::json!({ "data": metadata })))
+}
+
+pub async fn list_active_threads(
+    state: State<AppState>,
+    Path(channel_id): Path<String>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_channel_membership(&state.db, &channel_id, &auth.user_id).await?;
+    let rows = db::messages::list_active_threads(&state.db, &channel_id).await?;
+    let messages = messages_to_json(&state.db, &rows, Some(&auth.user_id)).await?;
+    Ok(Json(serde_json::json!({ "data": messages })))
+}
+
 // --- JSON serialization helpers ---
 
 pub fn message_row_to_json(row: &MessageRow) -> serde_json::Value {
@@ -583,6 +609,15 @@ pub fn message_row_to_json_with_attachments(
     row: &MessageRow,
     attachments: &[Attachment],
     reactions: Option<&Vec<ReactionAggregate>>,
+) -> serde_json::Value {
+    message_row_to_json_full(row, attachments, reactions, None)
+}
+
+pub fn message_row_to_json_full(
+    row: &MessageRow,
+    attachments: &[Attachment],
+    reactions: Option<&Vec<ReactionAggregate>>,
+    reply_count: Option<i64>,
 ) -> serde_json::Value {
     let mentions: Vec<String> = serde_json::from_str(&row.mentions).unwrap_or_default();
     let mention_roles: Vec<String> = serde_json::from_str(&row.mention_roles).unwrap_or_default();
@@ -629,12 +664,14 @@ pub fn message_row_to_json_with_attachments(
         "reactions": reactions_json,
         "reply_to": row.reply_to,
         "flags": row.flags,
-        "webhook_id": row.webhook_id
+        "webhook_id": row.webhook_id,
+        "thread_id": row.thread_id,
+        "reply_count": reply_count.unwrap_or(0)
     })
 }
 
 /// Converts a batch of message rows to JSON, enriching each with its
-/// reactions and attachments.
+/// reactions, attachments, and thread reply counts.
 pub async fn messages_to_json(
     pool: &sqlx::SqlitePool,
     rows: &[MessageRow],
@@ -644,6 +681,7 @@ pub async fn messages_to_json(
     let reactions_map =
         db::messages::get_reactions_for_messages(pool, &ids, current_user_id).await?;
     let attachments_map = db::attachments::get_attachments_for_messages(pool, &ids).await?;
+    let reply_counts = db::messages::get_thread_reply_counts(pool, &ids).await?;
     Ok(rows
         .iter()
         .map(|row| {
@@ -651,7 +689,8 @@ pub async fn messages_to_json(
                 .get(&row.id)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
-            message_row_to_json_with_attachments(row, atts, reactions_map.get(&row.id))
+            let count = reply_counts.get(&row.id).copied();
+            message_row_to_json_full(row, atts, reactions_map.get(&row.id), count)
         })
         .collect())
 }
