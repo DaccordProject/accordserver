@@ -85,10 +85,10 @@ services:
     ports:
       - "39099:39099"
     volumes:
-      - accord-data:/app
+      - accord-data:/app/data
     environment:
       PORT: 39099
-      DATABASE_URL: sqlite:accord.db?mode=rwc
+      DATABASE_URL: sqlite:/app/data/accord.db?mode=rwc
       RUST_LOG: accordserver=debug,tower_http=debug
 
 volumes:
