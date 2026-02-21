@@ -19,9 +19,8 @@ COPY migrations/ migrations/
 ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
 
-# Touch files so cargo rebuilds the actual source
-RUN touch src/main.rs src/lib.rs
-RUN cargo build --release && cp /app/target/release/accordserver /app/accordserver
+# Build the real binary (no caching to ensure version is always correct)
+RUN cargo build --release && cp target/release/accordserver /app/accordserver
 
 # Runtime stage
 FROM debian:bookworm-slim
