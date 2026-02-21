@@ -34,9 +34,10 @@ WORKDIR /app
 
 COPY --from=builder /app/accordserver ./
 COPY migrations/ migrations/
+RUN mkdir -p /app/data
 
 ENV PORT=39099
-ENV DATABASE_URL=sqlite:accord.db?mode=rwc
+ENV DATABASE_URL=sqlite:/app/data/accord.db?mode=rwc
 ENV RUST_LOG=accordserver=debug,tower_http=debug
 
 EXPOSE 39099
