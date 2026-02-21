@@ -69,7 +69,7 @@ pub struct UpdateChannel {
     pub name: Option<String>,
     pub topic: Option<String>,
     pub position: Option<i64>,
-    pub parent_id: Option<String>,
+    pub parent_id: Option<Option<String>>,
     pub nsfw: Option<bool>,
     pub rate_limit: Option<i64>,
     pub bitrate: Option<i64>,

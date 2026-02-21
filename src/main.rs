@@ -95,15 +95,29 @@ async fn run_main_server(config: Config) {
         }
     }
 
+    let gateway_tx_arc = Arc::new(RwLock::new(Some(gateway_tx)));
+
+    // Create embedded SFU for custom voice backend
+    let embedded_sfu = if config.voice_backend == VoiceBackend::Custom {
+        let sfu = accordserver::voice::embedded_sfu::EmbeddedSfu::new(
+            Arc::clone(&gateway_tx_arc),
+        );
+        tracing::info!("embedded WebRTC SFU initialized");
+        Some(sfu)
+    } else {
+        None
+    };
+
     let state = AppState {
         db,
         sfu_nodes: sfu_nodes.clone(),
         voice_states: Arc::new(DashMap::new()),
         dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
-        gateway_tx: Arc::new(RwLock::new(Some(gateway_tx))),
+        gateway_tx: gateway_tx_arc,
         test_mode: config.test_mode,
         voice_backend: config.voice_backend.clone(),
         livekit_client,
+        embedded_sfu,
         rate_limits: Arc::new(DashMap::new()),
         storage_path,
     };

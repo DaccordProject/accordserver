@@ -276,8 +276,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                             }
                                                         }
                                                         VoiceBackend::Custom => {
-                                                            let sfu_endpoint = crate::voice::sfu::allocate_node(&state, None)
-                                                                .map(|n| n.endpoint.clone());
                                                             serde_json::json!({
                                                                 "op": events::opcode::EVENT,
                                                                 "type": "voice.server_update",
@@ -285,7 +283,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                                     "space_id": vsu.space_id,
                                                                     "channel_id": channel_id,
                                                                     "backend": "custom",
-                                                                    "endpoint": sfu_endpoint
+                                                                    "endpoint": "gateway"
                                                                 }
                                                             })
                                                         }
@@ -321,13 +319,22 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                             });
                                                         }
 
-                                                        // LiveKit cleanup
-                                                        if state.voice_backend == VoiceBackend::LiveKit {
-                                                            if let (Some(ref lk), Some(ref ch_id)) =
-                                                                (&state.livekit_client, &old_vs.channel_id)
-                                                            {
-                                                                lk.remove_participant(ch_id, &user_id).await;
-                                                                lk.delete_room_if_empty(ch_id).await;
+                                                        // Backend cleanup
+                                                        match state.voice_backend {
+                                                            VoiceBackend::LiveKit => {
+                                                                if let (Some(ref lk), Some(ref ch_id)) =
+                                                                    (&state.livekit_client, &old_vs.channel_id)
+                                                                {
+                                                                    lk.remove_participant(ch_id, &user_id).await;
+                                                                    lk.delete_room_if_empty(ch_id).await;
+                                                                }
+                                                            }
+                                                            VoiceBackend::Custom => {
+                                                                if let (Some(ref sfu), Some(ref ch_id)) =
+                                                                    (&state.embedded_sfu, &old_vs.channel_id)
+                                                                {
+                                                                    sfu.remove_peer(ch_id, &user_id).await;
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -337,15 +344,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     }
                                 }
                                 op if op == events::opcode::VOICE_SIGNAL => {
-                                    // Only relay signals for custom SFU backend;
+                                    // Only handle signals for custom SFU backend;
                                     // LiveKit handles its own signaling.
                                     if state.voice_backend == VoiceBackend::Custom {
                                         if let Some(data) = gw_msg.data {
                                             if let Ok(signal) = serde_json::from_value::<VoiceSignalData>(data) {
-                                                crate::voice::signaling::relay_signal(
-                                                    &state, &user_id, &session_id,
-                                                    &signal.signal_type, &signal.payload,
-                                                ).await;
+                                                if let Some(ref sfu) = state.embedded_sfu {
+                                                    // Route to embedded SFU
+                                                    if let Some(vs) = crate::voice::state::get_user_voice_state(&state, &user_id) {
+                                                        if let (Some(ref ch_id), Some(ref sp_id)) = (&vs.channel_id, &vs.space_id) {
+                                                            sfu.handle_signal(
+                                                                &user_id, &session_id,
+                                                                ch_id, sp_id,
+                                                                &signal.signal_type, &signal.payload,
+                                                            ).await;
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Fallback: relay signals peer-to-peer
+                                                    crate::voice::signaling::relay_signal(
+                                                        &state, &user_id, &session_id,
+                                                        &signal.signal_type, &signal.payload,
+                                                    ).await;
+                                                }
                                             }
                                         }
                                     }
@@ -392,11 +413,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
 
-        // LiveKit cleanup on disconnect
-        if state.voice_backend == VoiceBackend::LiveKit {
-            if let (Some(ref lk), Some(ref ch_id)) = (&state.livekit_client, &old_vs.channel_id) {
-                lk.remove_participant(ch_id, &user_id).await;
-                lk.delete_room_if_empty(ch_id).await;
+        // Backend cleanup on disconnect
+        match state.voice_backend {
+            VoiceBackend::LiveKit => {
+                if let (Some(ref lk), Some(ref ch_id)) = (&state.livekit_client, &old_vs.channel_id) {
+                    lk.remove_participant(ch_id, &user_id).await;
+                    lk.delete_room_if_empty(ch_id).await;
+                }
+            }
+            VoiceBackend::Custom => {
+                if let (Some(ref sfu), Some(ref ch_id)) = (&state.embedded_sfu, &old_vs.channel_id) {
+                    sfu.remove_peer(ch_id, &user_id).await;
+                }
             }
         }
     }

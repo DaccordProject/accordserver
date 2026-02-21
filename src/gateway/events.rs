@@ -76,6 +76,7 @@ pub struct VoiceStateUpdateData {
 /// VOICE_SIGNAL (opcode 11) payload data.
 #[derive(Debug, Deserialize)]
 pub struct VoiceSignalData {
+    #[serde(rename = "type")]
     pub signal_type: String,
     pub payload: serde_json::Value,
 }
