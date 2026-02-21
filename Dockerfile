@@ -9,9 +9,7 @@ COPY Cargo.toml Cargo.lock ./
 # Create a dummy main to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs
 COPY build.rs ./
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    cargo build --release && rm -rf src
+RUN cargo build --release && rm -rf src
 
 # Copy the real source code and migrations
 COPY src/ src/
@@ -23,9 +21,7 @@ ENV GIT_SHA=${GIT_SHA}
 
 # Touch files so cargo rebuilds the actual source
 RUN touch src/main.rs src/lib.rs
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    cargo build --release && cp /app/target/release/accordserver /app/accordserver
+RUN cargo build --release && cp /app/target/release/accordserver /app/accordserver
 
 # Runtime stage
 FROM debian:bookworm-slim
