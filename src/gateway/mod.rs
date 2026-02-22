@@ -117,7 +117,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         "data": {
             "session_id": session_id,
             "user_id": user_id,
-            "spaces": space_ids.iter().collect::<Vec<_>>()
+            "spaces": space_ids.iter().collect::<Vec<_>>(),
+            "api_version": "v1",
+            "server_version": env!("CARGO_PKG_VERSION")
         }
     });
     if ws_sink
