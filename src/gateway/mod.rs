@@ -11,12 +11,11 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 
-use crate::config::VoiceBackend;
 use crate::db;
 use crate::middleware::auth as auth_resolve;
 use crate::state::AppState;
 use events::{
-    GatewayBroadcast, GatewayMessage, IdentifyData, VoiceSignalData, VoiceStateUpdateData,
+    GatewayBroadcast, GatewayMessage, IdentifyData, VoiceStateUpdateData,
 };
 use heartbeat::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
 use session::GatewaySession;
@@ -246,49 +245,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     }
 
                                                     // Send voice.server_update directly to this session
-                                                    let server_update = match state.voice_backend {
-                                                        VoiceBackend::LiveKit => {
-                                                            if let Some(ref lk) = state.livekit_client {
-                                                                let _ = lk.ensure_room(&channel_id).await;
-                                                                match lk.generate_token(&user_id, &channel_id) {
-                                                                    Ok(token) => serde_json::json!({
-                                                                        "op": events::opcode::EVENT,
-                                                                        "type": "voice.server_update",
-                                                                        "data": {
-                                                                            "space_id": vsu.space_id,
-                                                                            "channel_id": channel_id,
-                                                                            "backend": "livekit",
-                                                                            "url": lk.url(),
-                                                                            "token": token
-                                                                        }
-                                                                    }),
-                                                                    Err(_) => serde_json::json!({
-                                                                        "op": events::opcode::EVENT,
-                                                                        "type": "voice.server_update",
-                                                                        "data": {
-                                                                            "space_id": vsu.space_id,
-                                                                            "channel_id": channel_id,
-                                                                            "backend": "livekit",
-                                                                            "error": "failed to generate token"
-                                                                        }
-                                                                    }),
-                                                                }
-                                                            } else {
-                                                                continue;
+                                                    let lk = &state.livekit_client;
+                                                    if !state.test_mode {
+                                                        let _ = lk.ensure_room(&channel_id).await;
+                                                    }
+                                                    let server_update = match lk.generate_token(&user_id, &channel_id) {
+                                                        Ok(token) => serde_json::json!({
+                                                            "op": events::opcode::EVENT,
+                                                            "type": "voice.server_update",
+                                                            "data": {
+                                                                "space_id": vsu.space_id,
+                                                                "channel_id": channel_id,
+                                                                "backend": "livekit",
+                                                                "url": lk.url(),
+                                                                "token": token
                                                             }
-                                                        }
-                                                        VoiceBackend::Custom => {
-                                                            serde_json::json!({
-                                                                "op": events::opcode::EVENT,
-                                                                "type": "voice.server_update",
-                                                                "data": {
-                                                                    "space_id": vsu.space_id,
-                                                                    "channel_id": channel_id,
-                                                                    "backend": "custom",
-                                                                    "endpoint": "gateway"
-                                                                }
-                                                            })
-                                                        }
+                                                        }),
+                                                        Err(_) => serde_json::json!({
+                                                            "op": events::opcode::EVENT,
+                                                            "type": "voice.server_update",
+                                                            "data": {
+                                                                "space_id": vsu.space_id,
+                                                                "channel_id": channel_id,
+                                                                "backend": "livekit",
+                                                                "error": "failed to generate token"
+                                                            }
+                                                        }),
                                                     };
                                                     let _ = tx.send(server_update.to_string());
                                                 } else {
@@ -321,22 +303,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                             });
                                                         }
 
-                                                        // Backend cleanup
-                                                        match state.voice_backend {
-                                                            VoiceBackend::LiveKit => {
-                                                                if let (Some(ref lk), Some(ref ch_id)) =
-                                                                    (&state.livekit_client, &old_vs.channel_id)
-                                                                {
-                                                                    lk.remove_participant(ch_id, &user_id).await;
-                                                                    lk.delete_room_if_empty(ch_id).await;
-                                                                }
-                                                            }
-                                                            VoiceBackend::Custom => {
-                                                                if let (Some(ref sfu), Some(ref ch_id)) =
-                                                                    (&state.embedded_sfu, &old_vs.channel_id)
-                                                                {
-                                                                    sfu.remove_peer(ch_id, &user_id).await;
-                                                                }
+                                                        // LiveKit cleanup
+                                                        if let Some(ref ch_id) = old_vs.channel_id {
+                                                            if !state.test_mode {
+                                                                state.livekit_client.remove_participant(ch_id, &user_id).await;
+                                                                state.livekit_client.delete_room_if_empty(ch_id).await;
                                                             }
                                                         }
                                                     }
@@ -346,32 +317,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     }
                                 }
                                 op if op == events::opcode::VOICE_SIGNAL => {
-                                    // Only handle signals for custom SFU backend;
+                                    // Custom signals are only for custom SFU, which we removed.
                                     // LiveKit handles its own signaling.
-                                    if state.voice_backend == VoiceBackend::Custom {
-                                        if let Some(data) = gw_msg.data {
-                                            if let Ok(signal) = serde_json::from_value::<VoiceSignalData>(data) {
-                                                if let Some(ref sfu) = state.embedded_sfu {
-                                                    // Route to embedded SFU
-                                                    if let Some(vs) = crate::voice::state::get_user_voice_state(&state, &user_id) {
-                                                        if let (Some(ref ch_id), Some(ref sp_id)) = (&vs.channel_id, &vs.space_id) {
-                                                            sfu.handle_signal(
-                                                                &user_id, &session_id,
-                                                                ch_id, sp_id,
-                                                                &signal.signal_type, &signal.payload,
-                                                            ).await;
-                                                        }
-                                                    }
-                                                } else {
-                                                    // Fallback: relay signals peer-to-peer
-                                                    crate::voice::signaling::relay_signal(
-                                                        &state, &user_id, &session_id,
-                                                        &signal.signal_type, &signal.payload,
-                                                    ).await;
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
                                 _ => {}
                             }
@@ -415,18 +362,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
 
-        // Backend cleanup on disconnect
-        match state.voice_backend {
-            VoiceBackend::LiveKit => {
-                if let (Some(ref lk), Some(ref ch_id)) = (&state.livekit_client, &old_vs.channel_id) {
-                    lk.remove_participant(ch_id, &user_id).await;
-                    lk.delete_room_if_empty(ch_id).await;
-                }
-            }
-            VoiceBackend::Custom => {
-                if let (Some(ref sfu), Some(ref ch_id)) = (&state.embedded_sfu, &old_vs.channel_id) {
-                    sfu.remove_peer(ch_id, &user_id).await;
-                }
+        // LiveKit cleanup on disconnect
+        if let Some(ref ch_id) = old_vs.channel_id {
+            if !state.test_mode {
+                state.livekit_client.remove_participant(ch_id, &user_id).await;
+                state.livekit_client.delete_room_if_empty(ch_id).await;
             }
         }
     }

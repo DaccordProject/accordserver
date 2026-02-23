@@ -217,7 +217,8 @@ async fn test_ws_voice_state_update_join() {
     let json = found.expect("should receive voice.server_update");
     assert_eq!(json["data"]["space_id"], space_id);
     assert_eq!(json["data"]["channel_id"], vc_id);
-    assert_eq!(json["data"]["backend"], "custom");
+    assert_eq!(json["data"]["backend"], "livekit");
+    assert!(json["data"]["token"].as_str().is_some());
 
     ws.close(None).await.unwrap();
 }
@@ -383,66 +384,6 @@ async fn test_ws_voice_state_update_with_self_mute_deaf() {
     assert!(vs.self_deaf);
 
     ws.close(None).await.unwrap();
-}
-
-#[tokio::test]
-async fn test_ws_voice_signal_relay() {
-    let (server, ws_url) = spawn_test_server().await;
-    let alice = server.create_user_with_token("alice").await;
-    let bob = server.create_user_with_token("bob").await;
-    let space_id = server.create_space(&alice.user.id, "VoiceSpace").await;
-    server.add_member(&space_id, &bob.user.id).await;
-    let vc_id = server.create_voice_channel(&space_id, "voice-chat").await;
-
-    let mut ws_alice = connect_and_identify(&ws_url, &alice.gateway_token()).await;
-    let mut ws_bob = connect_and_identify(&ws_url, &bob.gateway_token()).await;
-
-    // Alice joins voice
-    let vsu = serde_json::json!({
-        "op": 9,
-        "data": {
-            "space_id": space_id,
-            "channel_id": vc_id,
-            "self_mute": false,
-            "self_deaf": false
-        }
-    });
-    ws_alice
-        .send(Message::Text(vsu.to_string().into()))
-        .await
-        .unwrap();
-
-    // Consume Alice's voice.server_update
-    let (found, _) = recv_event_type(&mut ws_alice, "voice.server_update", 3).await;
-    assert!(found.is_some(), "Alice should receive voice.server_update");
-
-    // Consume Bob's voice.state_update broadcast (Alice joined)
-    let (found, _) = recv_event_type(&mut ws_bob, "voice.state_update", 3).await;
-    assert!(found.is_some(), "Bob should receive voice.state_update");
-
-    // Alice sends VOICE_SIGNAL (opcode 11)
-    let signal = serde_json::json!({
-        "op": 11,
-        "data": {
-            "signal_type": "offer",
-            "payload": { "sdp": "test-sdp-data" }
-        }
-    });
-    ws_alice
-        .send(Message::Text(signal.to_string().into()))
-        .await
-        .unwrap();
-
-    // Bob should receive the relayed voice.signal event
-    let (found, _) = recv_event_type(&mut ws_bob, "voice.signal", 3).await;
-    let json = found.expect("Bob should receive voice.signal");
-    assert_eq!(json["data"]["user_id"], alice.user.id);
-    assert_eq!(json["data"]["signal_type"], "offer");
-    assert_eq!(json["data"]["payload"]["sdp"], "test-sdp-data");
-    assert_eq!(json["data"]["channel_id"], vc_id);
-
-    ws_alice.close(None).await.unwrap();
-    ws_bob.close(None).await.unwrap();
 }
 
 #[tokio::test]

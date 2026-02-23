@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use accordserver::config::VoiceBackend;
 use accordserver::db;
 use accordserver::gateway::dispatcher::Dispatcher;
 use accordserver::middleware::auth::{create_token_hash, generate_token};
@@ -8,6 +7,7 @@ use accordserver::models::user::{CreateUser, User};
 use accordserver::routes;
 use accordserver::state::AppState;
 use accordserver::storage;
+use accordserver::voice::livekit::LiveKitClient;
 use axum::body::Body;
 use dashmap::DashMap;
 use http::{Method, Request};
@@ -59,15 +59,19 @@ impl TestServer {
             std::fs::create_dir_all(storage_path.join(subdir)).ok();
         }
 
+        let livekit_client = LiveKitClient::new(
+            "http://localhost:7880",
+            "devkey",
+            "secret",
+        );
+
         let state = AppState {
             db: pool,
-            sfu_nodes: Arc::new(DashMap::new()),
             voice_states: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
             gateway_tx: Arc::new(RwLock::new(Some(gateway_tx))),
-            test_mode: false,
-            voice_backend: VoiceBackend::Custom,
-            livekit_client: None,
+            test_mode: true,
+            livekit_client,
             rate_limits: Arc::new(DashMap::new()),
             storage_path,
         };

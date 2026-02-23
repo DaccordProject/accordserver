@@ -1,7 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::config::VoiceBackend;
 use crate::db;
 use crate::error::AppError;
 use crate::gateway::events::GatewayBroadcast;
@@ -17,39 +16,12 @@ pub async fn list_voice_regions(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_membership(&state.db, &space_id, &auth.user_id).await?;
-    let regions = match state.voice_backend {
-        VoiceBackend::LiveKit => {
-            vec![serde_json::json!({
-                "id": "livekit",
-                "name": "LiveKit",
-                "optimal": true,
-                "custom": false
-            })]
-        }
-        VoiceBackend::Custom => {
-            let mut regions = Vec::new();
-            for entry in state.sfu_nodes.iter() {
-                let node = entry.value();
-                if node.status == "online" {
-                    regions.push(serde_json::json!({
-                        "id": node.region,
-                        "name": node.region,
-                        "optimal": false,
-                        "custom": false
-                    }));
-                }
-            }
-            if regions.is_empty() {
-                regions.push(serde_json::json!({
-                    "id": "us-east",
-                    "name": "US East",
-                    "optimal": true,
-                    "custom": false
-                }));
-            }
-            regions
-        }
-    };
+    let regions = vec![serde_json::json!({
+        "id": "livekit",
+        "name": "LiveKit",
+        "optimal": true,
+        "custom": false
+    })];
     Ok(Json(serde_json::json!({ "data": regions })))
 }
 
@@ -106,33 +78,19 @@ pub async fn join_voice(
     // Broadcast voice.state_update to space
     broadcast_voice_state_update(&state, space_id, &voice_state).await;
 
-    match state.voice_backend {
-        VoiceBackend::LiveKit => {
-            let lk = state
-                .livekit_client
-                .as_ref()
-                .ok_or_else(|| AppError::Internal("LiveKit client not configured".to_string()))?;
-            lk.ensure_room(&channel_id).await?;
-            let token = lk.generate_token(&auth.user_id, &channel_id)?;
-            Ok(Json(serde_json::json!({
-                "data": {
-                    "voice_state": voice_state,
-                    "backend": "livekit",
-                    "livekit_url": lk.url(),
-                    "token": token
-                }
-            })))
-        }
-        VoiceBackend::Custom => {
-            Ok(Json(serde_json::json!({
-                "data": {
-                    "voice_state": voice_state,
-                    "backend": "custom",
-                    "sfu_endpoint": "gateway"
-                }
-            })))
-        }
+    let lk = &state.livekit_client;
+    if !state.test_mode {
+        lk.ensure_room(&channel_id).await?;
     }
+    let token = lk.generate_token(&auth.user_id, &channel_id)?;
+    Ok(Json(serde_json::json!({
+        "data": {
+            "voice_state": voice_state,
+            "backend": "livekit",
+            "livekit_url": lk.url(),
+            "token": token
+        }
+    })))
 }
 
 pub async fn leave_voice(
@@ -161,18 +119,11 @@ pub async fn leave_voice(
             broadcast_voice_state_update(&state, space_id, &left_state).await;
         }
 
-        // Backend cleanup
-        match state.voice_backend {
-            VoiceBackend::LiveKit => {
-                if let (Some(ref lk), Some(ref channel_id)) = (&state.livekit_client, &vs.channel_id) {
-                    lk.remove_participant(channel_id, &auth.user_id).await;
-                    lk.delete_room_if_empty(channel_id).await;
-                }
-            }
-            VoiceBackend::Custom => {
-                if let (Some(ref sfu), Some(ref channel_id)) = (&state.embedded_sfu, &vs.channel_id) {
-                    sfu.remove_peer(channel_id, &auth.user_id).await;
-                }
+        // LiveKit cleanup
+        if let Some(ref channel_id) = vs.channel_id {
+            if !state.test_mode {
+                state.livekit_client.remove_participant(channel_id, &auth.user_id).await;
+                state.livekit_client.delete_room_if_empty(channel_id).await;
             }
         }
     }
@@ -180,12 +131,8 @@ pub async fn leave_voice(
     Ok(Json(serde_json::json!({ "data": { "ok": true } })))
 }
 
-pub async fn voice_info(state: State<AppState>) -> Json<serde_json::Value> {
-    let backend = match state.voice_backend {
-        VoiceBackend::LiveKit => "livekit",
-        VoiceBackend::Custom => "custom",
-    };
-    Json(serde_json::json!({ "backend": backend }))
+pub async fn voice_info(_state: State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "backend": "livekit" }))
 }
 
 async fn broadcast_voice_state_update(state: &AppState, space_id: &str, voice_state: &VoiceState) {
