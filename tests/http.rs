@@ -136,6 +136,7 @@ async fn test_message_search_content() {
         tts: None,
         embeds: None,
         reply_to: None,
+        thread_id: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -152,6 +153,7 @@ async fn test_message_search_content() {
         tts: None,
         embeds: None,
         reply_to: None,
+        thread_id: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -193,6 +195,7 @@ async fn test_message_search_author_filter() {
         tts: None,
         embeds: None,
         reply_to: None,
+        thread_id: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -210,6 +213,7 @@ async fn test_message_search_author_filter() {
         tts: None,
         embeds: None,
         reply_to: None,
+        thread_id: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -251,6 +255,7 @@ async fn test_message_search_pinned_filter() {
         tts: None,
         embeds: None,
         reply_to: None,
+        thread_id: None,
     };
     let created = accordserver::db::messages::create_message(
         server.pool(),
@@ -267,6 +272,7 @@ async fn test_message_search_pinned_filter() {
         tts: None,
         embeds: None,
         reply_to: None,
+        thread_id: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -312,6 +318,7 @@ async fn test_message_search_pagination() {
             tts: None,
             embeds: None,
             reply_to: None,
+            thread_id: None,
         };
         accordserver::db::messages::create_message(
             server.pool(),
@@ -726,7 +733,7 @@ async fn test_voice_info_returns_backend() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = parse_body(response).await;
-    assert_eq!(body["backend"], "custom");
+    assert_eq!(body["backend"], "livekit");
 }
 
 #[tokio::test]
@@ -746,11 +753,12 @@ async fn test_voice_join_voice_channel_success() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = parse_body(response).await;
     let data = &body["data"];
-    assert_eq!(data["backend"], "custom");
+    assert_eq!(data["backend"], "livekit");
     assert_eq!(data["voice_state"]["user_id"], alice.user.id);
     assert_eq!(data["voice_state"]["channel_id"], vc_id);
     assert_eq!(data["voice_state"]["self_mute"], false);
     assert_eq!(data["voice_state"]["self_deaf"], false);
+    assert!(data["token"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -923,8 +931,7 @@ async fn test_voice_regions_returns_data() {
     let body = parse_body(response).await;
     let regions = body["data"].as_array().unwrap();
     assert!(!regions.is_empty());
-    // Default custom backend with no SFU nodes returns a default region
-    assert_eq!(regions[0]["id"], "us-east");
+    assert_eq!(regions[0]["id"], "livekit");
 }
 
 #[tokio::test]

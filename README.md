@@ -90,6 +90,20 @@ services:
       PORT: 39099
       DATABASE_URL: sqlite:/app/data/accord.db?mode=rwc
       RUST_LOG: accordserver=debug,tower_http=debug
+      LIVEKIT_URL: http://livekit:7880
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      ACCORD_VOICE_BACKEND: livekit
+    depends_on:
+      - livekit
+
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --dev --keys '{"devkey": "secret"}'
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
 
 volumes:
   accord-data:

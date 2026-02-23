@@ -11,7 +11,6 @@ mod members;
 pub mod messages;
 mod reactions;
 mod roles;
-mod sfu;
 mod soundboard;
 pub mod spaces;
 mod test_seed;
@@ -251,10 +250,6 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/channels/{channel_id}/voice/leave",
             delete(voice::leave_voice),
         )
-        // SFU node management (internal/admin)
-        .route("/sfu/nodes", post(sfu::register_node).get(sfu::list_nodes))
-        .route("/sfu/nodes/{node_id}/heartbeat", post(sfu::heartbeat))
-        .route("/sfu/nodes/{node_id}", delete(sfu::deregister_node))
         // Applications
         .route("/applications", post(applications::create_application))
         .route(

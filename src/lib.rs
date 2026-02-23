@@ -5,8 +5,6 @@ pub mod gateway;
 pub mod middleware;
 pub mod models;
 pub mod routes;
-pub mod sfu_client;
-pub mod sfu_runtime;
 pub mod slug;
 pub mod snowflake;
 pub mod state;
