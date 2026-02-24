@@ -257,6 +257,17 @@ pub async fn list_space_ids_for_user(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
+pub async fn list_member_ids_for_space(
+    pool: &SqlitePool,
+    space_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query_as::<_, (String,)>("SELECT user_id FROM members WHERE space_id = ?")
+        .bind(space_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
 pub async fn get_space_by_slug(pool: &SqlitePool, slug: &str) -> Result<SpaceRow, AppError> {
     let row = sqlx::query(&format!("{SELECT_SPACES} WHERE slug = ?"))
         .bind(slug)

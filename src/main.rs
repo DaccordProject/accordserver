@@ -107,6 +107,7 @@ async fn run_main_server(config: Config) {
     let state = AppState {
         db,
         voice_states: Arc::new(DashMap::new()),
+        presences: Arc::new(DashMap::new()),
         dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
         gateway_tx: gateway_tx_arc,
         test_mode: config.test_mode,
