@@ -45,6 +45,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Wait for IDENTIFY
     let session_id;
     let user_id;
+    let is_bot;
+    let is_admin;
     let user_intents: Vec<String>;
     let space_ids: HashSet<String>;
 
@@ -73,10 +75,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 if let Some(data) = gw_msg.data {
                                     if let Ok(identify) = serde_json::from_value::<IdentifyData>(data) {
                                         // Resolve token
-                                        let auth_user = resolve_token(&state, &identify.token).await;
-                                        match auth_user {
-                                            Some(uid) => {
-                                                user_id = uid;
+                                        let resolved = resolve_token(&state, &identify.token).await;
+                                        match resolved {
+                                            Some(auth) => {
+                                                user_id = auth.user_id;
+                                                is_bot = auth.is_bot;
+                                                is_admin = auth.is_admin;
                                                 user_intents = identify.intents;
                                                 session_id = crate::snowflake::generate();
 
@@ -221,13 +225,40 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         if let Ok(vsu) = serde_json::from_value::<VoiceStateUpdateData>(data) {
                                             if space_ids.contains(&vsu.space_id) {
                                                 if let Some(channel_id) = vsu.channel_id {
+                                                    // Validate channel type and permissions
+                                                    let auth_user = crate::middleware::auth::AuthUser {
+                                                        user_id: user_id.clone(),
+                                                        is_bot,
+                                                        is_admin,
+                                                    };
+                                                    let channel = match crate::db::channels::get_channel_row(&state.db, &channel_id).await {
+                                                        Ok(ch) => ch,
+                                                        Err(_) => continue,
+                                                    };
+                                                    if channel.channel_type != "voice" {
+                                                        continue;
+                                                    }
+                                                    if crate::middleware::permissions::require_channel_permission(
+                                                        &state.db, &channel_id, &auth_user, "connect",
+                                                    ).await.is_err() {
+                                                        continue;
+                                                    }
+
                                                     // Join/move voice channel
                                                     let self_mute = vsu.self_mute.unwrap_or(false);
                                                     let self_deaf = vsu.self_deaf.unwrap_or(false);
-                                                    let (voice_state, _prev) = crate::voice::state::join_voice_channel(
+                                                    let (voice_state, prev) = crate::voice::state::join_voice_channel(
                                                         &state, &user_id, &vsu.space_id, &channel_id,
                                                         &session_id, self_mute, self_deaf,
                                                     );
+
+                                                    // Clean up old LiveKit room if the user moved channels
+                                                    if let Some(ref prev_ch) = prev {
+                                                        if !state.test_mode {
+                                                            state.livekit_client.remove_participant(prev_ch, &user_id).await;
+                                                            state.livekit_client.delete_room_if_empty(prev_ch).await;
+                                                        }
+                                                    }
 
                                                     // Broadcast voice.state_update to the space
                                                     let event = serde_json::json!({
@@ -249,7 +280,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     if !state.test_mode {
                                                         let _ = lk.ensure_room(&channel_id).await;
                                                     }
-                                                    let server_update = match lk.generate_token(&user_id, &channel_id) {
+                                                    let display_name = crate::db::users::get_user(&state.db, &user_id)
+                                                        .await
+                                                        .ok()
+                                                        .and_then(|u| u.display_name.or(Some(u.username)))
+                                                        .unwrap_or_else(|| user_id.clone());
+                                                    let server_update = match lk.generate_token(&user_id, &display_name, &channel_id) {
                                                         Ok(token) => serde_json::json!({
                                                             "op": events::opcode::EVENT,
                                                             "type": "voice.server_update",
@@ -373,9 +409,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 }
 
-async fn resolve_token(state: &AppState, token: &str) -> Option<String> {
+struct ResolvedAuth {
+    user_id: String,
+    is_bot: bool,
+    is_admin: bool,
+}
+
+async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
     // Token format: "Bot xxx" or "Bearer xxx"
-    if let Some(tok) = token.strip_prefix("Bot ") {
+    let (user_id, is_bot) = if let Some(tok) = token.strip_prefix("Bot ") {
         let token_hash = auth_resolve::create_token_hash(tok);
         let row =
             sqlx::query_as::<_, (String,)>("SELECT user_id FROM bot_tokens WHERE token_hash = ?")
@@ -383,7 +425,7 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<String> {
                 .fetch_optional(&state.db)
                 .await
                 .ok()??;
-        Some(row.0)
+        (row.0, true)
     } else if let Some(tok) = token.strip_prefix("Bearer ") {
         let token_hash = auth_resolve::create_token_hash(tok);
         let row =
@@ -392,8 +434,15 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<String> {
                 .fetch_optional(&state.db)
                 .await
                 .ok()??;
-        Some(row.0)
+        (row.0, false)
     } else {
-        None
-    }
+        return None;
+    };
+
+    let is_admin = crate::db::users::get_user(&state.db, &user_id)
+        .await
+        .map(|u| u.is_admin)
+        .unwrap_or(false);
+
+    Some(ResolvedAuth { user_id, is_bot, is_admin })
 }

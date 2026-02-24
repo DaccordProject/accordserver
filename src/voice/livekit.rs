@@ -35,14 +35,22 @@ impl LiveKitClient {
         format!("channel_{channel_id}")
     }
 
-    pub fn generate_token(&self, user_id: &str, channel_id: &str) -> Result<String, AppError> {
+    pub fn generate_token(
+        &self,
+        user_id: &str,
+        display_name: &str,
+        channel_id: &str,
+    ) -> Result<String, AppError> {
         let room_name = Self::room_name(channel_id);
         AccessToken::with_api_key(&self.api_key, &self.api_secret)
             .with_identity(user_id)
-            .with_name(user_id)
+            .with_name(display_name)
             .with_grants(VideoGrants {
                 room_join: true,
                 room: room_name,
+                can_publish: true,
+                can_subscribe: true,
+                can_publish_data: true,
                 ..Default::default()
             })
             .to_jwt()

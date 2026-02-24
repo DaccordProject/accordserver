@@ -65,7 +65,7 @@ pub async fn join_voice(
     let self_mute = input.self_mute.unwrap_or(false);
     let self_deaf = input.self_deaf.unwrap_or(false);
 
-    let (voice_state, _previous_channel) = voice::state::join_voice_channel(
+    let (voice_state, previous_channel) = voice::state::join_voice_channel(
         &state,
         &auth.user_id,
         space_id,
@@ -75,6 +75,14 @@ pub async fn join_voice(
         self_deaf,
     );
 
+    // Clean up old LiveKit room if the user moved channels
+    if let Some(ref prev_ch) = previous_channel {
+        if !state.test_mode {
+            state.livekit_client.remove_participant(prev_ch, &auth.user_id).await;
+            state.livekit_client.delete_room_if_empty(prev_ch).await;
+        }
+    }
+
     // Broadcast voice.state_update to space
     broadcast_voice_state_update(&state, space_id, &voice_state).await;
 
@@ -82,7 +90,9 @@ pub async fn join_voice(
     if !state.test_mode {
         lk.ensure_room(&channel_id).await?;
     }
-    let token = lk.generate_token(&auth.user_id, &channel_id)?;
+    let user = db::users::get_user(&state.db, &auth.user_id).await?;
+    let display_name = user.display_name.as_deref().unwrap_or(&user.username);
+    let token = lk.generate_token(&auth.user_id, display_name, &channel_id)?;
     Ok(Json(serde_json::json!({
         "data": {
             "voice_state": voice_state,
