@@ -7,6 +7,7 @@ use tokio::time::Instant;
 
 use crate::gateway::dispatcher::Dispatcher;
 use crate::gateway::events::GatewayBroadcast;
+use crate::models::presence::Presence;
 use crate::models::voice::VoiceState;
 use crate::voice::livekit::LiveKitClient;
 
@@ -21,6 +22,7 @@ pub struct RateLimitBucket {
 pub struct AppState {
     pub db: SqlitePool,
     pub voice_states: Arc<DashMap<String, VoiceState>>,
+    pub presences: Arc<DashMap<String, Presence>>,
     pub dispatcher: Arc<RwLock<Option<Dispatcher>>>,
     pub gateway_tx: Arc<RwLock<Option<broadcast::Sender<GatewayBroadcast>>>>,
     pub test_mode: bool,

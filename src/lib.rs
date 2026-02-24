@@ -4,6 +4,7 @@ pub mod error;
 pub mod gateway;
 pub mod middleware;
 pub mod models;
+pub mod presence;
 pub mod routes;
 pub mod slug;
 pub mod snowflake;

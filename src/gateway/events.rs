@@ -63,6 +63,13 @@ pub struct IdentifyData {
     pub presence: Option<serde_json::Value>,
 }
 
+/// PRESENCE_UPDATE (opcode 8) payload data.
+#[derive(Debug, Deserialize)]
+pub struct PresenceUpdateData {
+    pub status: String,
+    pub activity: Option<serde_json::Value>,
+}
+
 /// VOICE_STATE_UPDATE (opcode 9) payload data.
 #[derive(Debug, Deserialize)]
 pub struct VoiceStateUpdateData {

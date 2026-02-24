@@ -15,7 +15,8 @@ use crate::db;
 use crate::middleware::auth as auth_resolve;
 use crate::state::AppState;
 use events::{
-    GatewayBroadcast, GatewayMessage, IdentifyData, VoiceStateUpdateData,
+    GatewayBroadcast, GatewayMessage, IdentifyData, PresenceUpdateData,
+    VoiceStateUpdateData,
 };
 use heartbeat::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
 use session::GatewaySession;
@@ -112,6 +113,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
+    // Set user presence to online
+    crate::presence::set_presence(&state, &user_id, "online", vec![]);
+
+    // Collect presences of online members in the user's spaces
+    let mut all_member_ids = std::collections::HashSet::new();
+    for sid in &space_ids {
+        if let Ok(members) = db::spaces::list_member_ids_for_space(&state.db, sid).await {
+            for mid in members {
+                all_member_ids.insert(mid);
+            }
+        }
+    }
+    let presences = crate::presence::get_space_presences(&state, &all_member_ids);
+    let presences_json: Vec<serde_json::Value> = presences
+        .iter()
+        .map(|p| serde_json::to_value(p).unwrap_or_default())
+        .collect();
+
     // Send READY event
     let ready = serde_json::json!({
         "op": events::opcode::EVENT,
@@ -121,6 +140,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             "session_id": session_id,
             "user_id": user_id,
             "spaces": space_ids.iter().collect::<Vec<_>>(),
+            "presences": presences_json,
             "api_version": "v1",
             "server_version": env!("CARGO_PKG_VERSION")
         }
@@ -145,6 +165,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     if let Some(ref dispatcher) = *state.dispatcher.read().await {
         dispatcher.register_session(session);
+    }
+
+    // Broadcast presence.update (online) to all spaces
+    if let Some(ref gtx) = *state.gateway_tx.read().await {
+        let presence_data = serde_json::json!({
+            "user_id": user_id,
+            "status": "online",
+            "client_status": { "desktop": "online" },
+            "activities": []
+        });
+        for sid in &space_ids {
+            let event = serde_json::json!({
+                "op": events::opcode::EVENT,
+                "type": "presence.update",
+                "data": presence_data
+            });
+            let _ = gtx.send(GatewayBroadcast {
+                space_id: Some(sid.clone()),
+                target_user_ids: None,
+                event,
+                intent: "presences".to_string(),
+            });
+        }
     }
 
     // Subscribe to broadcasts
@@ -218,6 +261,47 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     });
                                     if ws_sink.send(Message::Text(ack.to_string().into())).await.is_err() {
                                         break;
+                                    }
+                                }
+                                op if op == events::opcode::PRESENCE_UPDATE => {
+                                    if let Some(data) = gw_msg.data {
+                                        if let Ok(psu) = serde_json::from_value::<PresenceUpdateData>(data) {
+                                            let valid_statuses = ["online", "idle", "dnd", "invisible"];
+                                            let status = if valid_statuses.contains(&psu.status.as_str()) {
+                                                psu.status.as_str()
+                                            } else {
+                                                "online"
+                                            };
+                                            let activities = match psu.activity {
+                                                Some(a) => vec![a],
+                                                None => vec![],
+                                            };
+                                            crate::presence::set_presence(&state, &user_id, status, activities.clone());
+
+                                            // Broadcast to all spaces
+                                            if let Some(ref gtx) = *state.gateway_tx.read().await {
+                                                let broadcast_status = if status == "invisible" { "offline" } else { status };
+                                                let presence_data = serde_json::json!({
+                                                    "user_id": user_id,
+                                                    "status": broadcast_status,
+                                                    "client_status": { "desktop": broadcast_status },
+                                                    "activities": activities
+                                                });
+                                                for sid in &space_ids {
+                                                    let event = serde_json::json!({
+                                                        "op": events::opcode::EVENT,
+                                                        "type": "presence.update",
+                                                        "data": presence_data
+                                                    });
+                                                    let _ = gtx.send(GatewayBroadcast {
+                                                        space_id: Some(sid.clone()),
+                                                        target_user_ids: None,
+                                                        event,
+                                                        intent: "presences".to_string(),
+                                                    });
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 op if op == events::opcode::VOICE_STATE_UPDATE => {
@@ -413,6 +497,34 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Cleanup: remove session from dispatcher
     if let Some(ref dispatcher) = *state.dispatcher.read().await {
         dispatcher.remove_session(&session_id);
+    }
+
+    // Cleanup: set presence to offline if no other sessions for this user
+    if !crate::presence::user_has_other_sessions(&state, &user_id, &session_id).await {
+        crate::presence::remove_presence(&state, &user_id);
+
+        // Broadcast presence.update (offline) to all spaces
+        if let Some(ref gtx) = *state.gateway_tx.read().await {
+            let presence_data = serde_json::json!({
+                "user_id": user_id,
+                "status": "offline",
+                "client_status": {},
+                "activities": []
+            });
+            for sid in &space_ids {
+                let event = serde_json::json!({
+                    "op": events::opcode::EVENT,
+                    "type": "presence.update",
+                    "data": presence_data
+                });
+                let _ = gtx.send(GatewayBroadcast {
+                    space_id: Some(sid.clone()),
+                    target_user_ids: None,
+                    event,
+                    intent: "presences".to_string(),
+                });
+            }
+        }
     }
 }
 
