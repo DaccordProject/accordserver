@@ -59,12 +59,12 @@ impl TestServer {
             std::fs::create_dir_all(storage_path.join(subdir)).ok();
         }
 
-        let livekit_client = LiveKitClient::new(
+        let livekit_client = Some(LiveKitClient::new(
             "http://localhost:7880",
             "ws://localhost:7880",
             "devkey",
             "secret",
-        );
+        ));
 
         let state = AppState {
             db: pool,

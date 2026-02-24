@@ -23,7 +23,10 @@ async fn main() {
 
 fn print_banner(config: &Config) {
     let version = env!("CARGO_PKG_VERSION");
-    let voice = format!("livekit ({}, ext: {})", config.livekit.internal_url, config.livekit.external_url);
+    let voice = match &config.livekit {
+        Some(lk) => format!("livekit ({}, ext: {})", lk.internal_url, lk.external_url),
+        None => "disabled".to_string(),
+    };
 
     eprintln!();
     eprintln!("  \x1b[1;36maccord\x1b[0m \x1b[2mv{version}\x1b[0m");
@@ -41,18 +44,54 @@ fn print_banner(config: &Config) {
 }
 
 async fn run_main_server(config: Config) {
+    // Ensure the database directory exists before opening the pool.
+    // The default DATABASE_URL uses a relative `data/` subfolder to keep
+    // the database separate from the application binary.
+    if let Some(path) = config.database_url
+        .strip_prefix("sqlite:")
+        .and_then(|s| s.split('?').next())
+    {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    tracing::error!("failed to create database directory {:?}: {:?}", parent, e);
+                }
+            }
+        }
+    }
+
     let db = accordserver::db::create_pool(&config.database_url)
         .await
         .expect("failed to create database pool");
 
     let (dispatcher, gateway_tx) = Dispatcher::new();
 
-    let livekit_client = accordserver::voice::livekit::LiveKitClient::new(
-        &config.livekit.internal_url,
-        &config.livekit.external_url,
-        &config.livekit.api_key,
-        &config.livekit.api_secret,
-    );
+    let livekit_client = match config.livekit.as_ref() {
+        Some(lk) => {
+            let client = accordserver::voice::livekit::LiveKitClient::new(
+                &lk.internal_url,
+                &lk.external_url,
+                &lk.api_key,
+                &lk.api_secret,
+            );
+            match client.check_connectivity().await {
+                Ok(()) => {
+                    eprintln!("  \x1b[32m✓ livekit reachable\x1b[0m");
+                }
+                Err(e) => {
+                    eprintln!();
+                    eprintln!("  \x1b[31m✗ livekit preflight failed\x1b[0m");
+                    eprintln!("    {e}");
+                    eprintln!();
+                    eprintln!("  Voice will not work until LiveKit is reachable.");
+                    eprintln!("  Check LIVEKIT_INTERNAL_URL and ensure the LiveKit server is running.");
+                    eprintln!();
+                }
+            }
+            Some(client)
+        }
+        None => None,
+    };
 
     // Create storage directories
     let storage_path = config.storage_path.clone();

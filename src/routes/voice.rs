@@ -75,18 +75,20 @@ pub async fn join_voice(
         self_deaf,
     );
 
+    let lk = state.livekit_client.as_ref()
+        .ok_or_else(|| AppError::BadRequest("voice_not_configured".to_string()))?;
+
     // Clean up old LiveKit room if the user moved channels
     if let Some(ref prev_ch) = previous_channel {
         if !state.test_mode {
-            state.livekit_client.remove_participant(prev_ch, &auth.user_id).await;
-            state.livekit_client.delete_room_if_empty(prev_ch).await;
+            lk.remove_participant(prev_ch, &auth.user_id).await;
+            lk.delete_room_if_empty(prev_ch).await;
         }
     }
 
     // Broadcast voice.state_update to space
     broadcast_voice_state_update(&state, space_id, &voice_state).await;
 
-    let lk = &state.livekit_client;
     if !state.test_mode {
         lk.ensure_room(&channel_id).await?;
     }
@@ -132,8 +134,10 @@ pub async fn leave_voice(
         // LiveKit cleanup
         if let Some(ref channel_id) = vs.channel_id {
             if !state.test_mode {
-                state.livekit_client.remove_participant(channel_id, &auth.user_id).await;
-                state.livekit_client.delete_room_if_empty(channel_id).await;
+                if let Some(ref lk) = state.livekit_client {
+                    lk.remove_participant(channel_id, &auth.user_id).await;
+                    lk.delete_room_if_empty(channel_id).await;
+                }
             }
         }
     }
@@ -141,8 +145,9 @@ pub async fn leave_voice(
     Ok(Json(serde_json::json!({ "data": { "ok": true } })))
 }
 
-pub async fn voice_info(_state: State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "backend": "livekit" }))
+pub async fn voice_info(state: State<AppState>) -> Json<serde_json::Value> {
+    let backend = if state.livekit_client.is_some() { "livekit" } else { "none" };
+    Json(serde_json::json!({ "backend": backend }))
 }
 
 async fn broadcast_voice_state_update(state: &AppState, space_id: &str, voice_state: &VoiceState) {

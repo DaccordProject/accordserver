@@ -10,28 +10,29 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub test_mode: bool,
-    pub livekit: LiveKitConfig,
+    pub livekit: Option<LiveKitConfig>,
     pub storage_path: std::path::PathBuf,
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        let internal_url = std::env::var("LIVEKIT_INTERNAL_URL")
+        let livekit = std::env::var("LIVEKIT_INTERNAL_URL")
             .or_else(|_| std::env::var("LIVEKIT_URL"))
-            .expect("LIVEKIT_INTERNAL_URL or LIVEKIT_URL is required");
-        let external_url = std::env::var("LIVEKIT_EXTERNAL_URL")
-            .unwrap_or_else(|_| internal_url.clone());
-        let api_key = std::env::var("LIVEKIT_API_KEY")
-            .expect("LIVEKIT_API_KEY is required");
-        let api_secret = std::env::var("LIVEKIT_API_SECRET")
-            .expect("LIVEKIT_API_SECRET is required");
-            
-        let livekit = LiveKitConfig {
-            internal_url,
-            external_url,
-            api_key,
-            api_secret,
-        };
+            .ok()
+            .map(|internal_url| {
+                let external_url = std::env::var("LIVEKIT_EXTERNAL_URL")
+                    .unwrap_or_else(|_| internal_url.clone());
+                let api_key = std::env::var("LIVEKIT_API_KEY")
+                    .expect("LIVEKIT_API_KEY is required when LIVEKIT_URL is set");
+                let api_secret = std::env::var("LIVEKIT_API_SECRET")
+                    .expect("LIVEKIT_API_SECRET is required when LIVEKIT_URL is set");
+                LiveKitConfig {
+                    internal_url,
+                    external_url,
+                    api_key,
+                    api_secret,
+                }
+            });
 
         let storage_path = std::env::var("ACCORD_STORAGE_PATH")
             .map(std::path::PathBuf::from)
@@ -43,7 +44,7 @@ impl Config {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(39099),
             database_url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "sqlite:accord.db?mode=rwc".to_string()),
+                .unwrap_or_else(|_| "sqlite:data/accord.db?mode=rwc".to_string()),
             test_mode: std::env::var("ACCORD_TEST_MODE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
@@ -71,10 +72,10 @@ mod tests {
 
     #[test]
     #[serial]
-    #[should_panic(expected = "LIVEKIT_INTERNAL_URL or LIVEKIT_URL is required")]
     fn test_missing_livekit() {
         clear_env();
-        Config::from_env();
+        let config = Config::from_env();
+        assert!(config.livekit.is_none());
     }
 
     #[test]
@@ -85,14 +86,15 @@ mod tests {
         std::env::set_var("LIVEKIT_EXTERNAL_URL", "wss://livekit.example.com");
         std::env::set_var("LIVEKIT_API_KEY", "my-api-key");
         std::env::set_var("LIVEKIT_API_SECRET", "my-api-secret");
-        
+
         let config = Config::from_env();
         assert_eq!(config.port, 39099);
-        assert_eq!(config.database_url, "sqlite:accord.db?mode=rwc");
-        
-        assert_eq!(config.livekit.internal_url, "http://livekit:7880");
-        assert_eq!(config.livekit.external_url, "wss://livekit.example.com");
-        assert_eq!(config.livekit.api_key, "my-api-key");
-        assert_eq!(config.livekit.api_secret, "my-api-secret");
+        assert_eq!(config.database_url, "sqlite:data/accord.db?mode=rwc");
+
+        let lk = config.livekit.unwrap();
+        assert_eq!(lk.internal_url, "http://livekit:7880");
+        assert_eq!(lk.external_url, "wss://livekit.example.com");
+        assert_eq!(lk.api_key, "my-api-key");
+        assert_eq!(lk.api_secret, "my-api-secret");
     }
 }
