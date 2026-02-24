@@ -20,7 +20,7 @@ Accord is a chat/voice server backend for a Godot game client. It's a Rust web s
 
 ### General
 - `PORT` — server port (default: `3000`)
-- `DATABASE_URL` — SQLite connection string (default: `sqlite:accord.db?mode=rwc`)
+- `DATABASE_URL` — SQLite connection string (default: `sqlite:data/accord.db?mode=rwc`). The `data/` subdirectory is created automatically at startup. This keeps database files separate from the application binary. In Docker, the Dockerfile default is `sqlite:/app/data/accord.db?mode=rwc`; mount a volume at `/app/data` to persist across container restarts.
 - `RUST_LOG` — tracing filter (default: `accordserver=debug,tower_http=debug`)
 
 ### LiveKit Configuration

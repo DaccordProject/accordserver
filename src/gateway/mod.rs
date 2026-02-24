@@ -255,8 +255,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     // Clean up old LiveKit room if the user moved channels
                                                     if let Some(ref prev_ch) = prev {
                                                         if !state.test_mode {
-                                                            state.livekit_client.remove_participant(prev_ch, &user_id).await;
-                                                            state.livekit_client.delete_room_if_empty(prev_ch).await;
+                                                            if let Some(ref lk) = state.livekit_client {
+                                                                lk.remove_participant(prev_ch, &user_id).await;
+                                                                lk.delete_room_if_empty(prev_ch).await;
+                                                            }
                                                         }
                                                     }
 
@@ -276,39 +278,40 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     }
 
                                                     // Send voice.server_update directly to this session
-                                                    let lk = &state.livekit_client;
-                                                    if !state.test_mode {
-                                                        let _ = lk.ensure_room(&channel_id).await;
+                                                    if let Some(ref lk) = state.livekit_client {
+                                                        if !state.test_mode {
+                                                            let _ = lk.ensure_room(&channel_id).await;
+                                                        }
+                                                        let display_name = crate::db::users::get_user(&state.db, &user_id)
+                                                            .await
+                                                            .ok()
+                                                            .and_then(|u| u.display_name.or(Some(u.username)))
+                                                            .unwrap_or_else(|| user_id.clone());
+                                                        let server_update = match lk.generate_token(&user_id, &display_name, &channel_id) {
+                                                            Ok(token) => serde_json::json!({
+                                                                "op": events::opcode::EVENT,
+                                                                "type": "voice.server_update",
+                                                                "data": {
+                                                                    "space_id": vsu.space_id,
+                                                                    "channel_id": channel_id,
+                                                                    "backend": "livekit",
+                                                                    "url": lk.external_url(),
+                                                                    "token": token
+                                                                }
+                                                            }),
+                                                            Err(_) => serde_json::json!({
+                                                                "op": events::opcode::EVENT,
+                                                                "type": "voice.server_update",
+                                                                "data": {
+                                                                    "space_id": vsu.space_id,
+                                                                    "channel_id": channel_id,
+                                                                    "backend": "livekit",
+                                                                    "error": "failed to generate token"
+                                                                }
+                                                            }),
+                                                        };
+                                                        let _ = tx.send(server_update.to_string());
                                                     }
-                                                    let display_name = crate::db::users::get_user(&state.db, &user_id)
-                                                        .await
-                                                        .ok()
-                                                        .and_then(|u| u.display_name.or(Some(u.username)))
-                                                        .unwrap_or_else(|| user_id.clone());
-                                                    let server_update = match lk.generate_token(&user_id, &display_name, &channel_id) {
-                                                        Ok(token) => serde_json::json!({
-                                                            "op": events::opcode::EVENT,
-                                                            "type": "voice.server_update",
-                                                            "data": {
-                                                                "space_id": vsu.space_id,
-                                                                "channel_id": channel_id,
-                                                                "backend": "livekit",
-                                                                "url": lk.external_url(),
-                                                                "token": token
-                                                            }
-                                                        }),
-                                                        Err(_) => serde_json::json!({
-                                                            "op": events::opcode::EVENT,
-                                                            "type": "voice.server_update",
-                                                            "data": {
-                                                                "space_id": vsu.space_id,
-                                                                "channel_id": channel_id,
-                                                                "backend": "livekit",
-                                                                "error": "failed to generate token"
-                                                            }
-                                                        }),
-                                                    };
-                                                    let _ = tx.send(server_update.to_string());
                                                 } else {
                                                     // Leave voice
                                                     if let Some(old_vs) = crate::voice::state::leave_voice_channel(&state, &user_id) {
@@ -342,8 +345,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                         // LiveKit cleanup
                                                         if let Some(ref ch_id) = old_vs.channel_id {
                                                             if !state.test_mode {
-                                                                state.livekit_client.remove_participant(ch_id, &user_id).await;
-                                                                state.livekit_client.delete_room_if_empty(ch_id).await;
+                                                                if let Some(ref lk) = state.livekit_client {
+                                                                    lk.remove_participant(ch_id, &user_id).await;
+                                                                    lk.delete_room_if_empty(ch_id).await;
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -397,8 +402,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         // LiveKit cleanup on disconnect
         if let Some(ref ch_id) = old_vs.channel_id {
             if !state.test_mode {
-                state.livekit_client.remove_participant(ch_id, &user_id).await;
-                state.livekit_client.delete_room_if_empty(ch_id).await;
+                if let Some(ref lk) = state.livekit_client {
+                    lk.remove_participant(ch_id, &user_id).await;
+                    lk.delete_room_if_empty(ch_id).await;
+                }
             }
         }
     }

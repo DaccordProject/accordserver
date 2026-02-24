@@ -24,7 +24,7 @@ pub struct AppState {
     pub dispatcher: Arc<RwLock<Option<Dispatcher>>>,
     pub gateway_tx: Arc<RwLock<Option<broadcast::Sender<GatewayBroadcast>>>>,
     pub test_mode: bool,
-    pub livekit_client: LiveKitClient,
+    pub livekit_client: Option<LiveKitClient>,
     pub rate_limits: Arc<DashMap<String, RateLimitBucket>>,
     pub storage_path: PathBuf,
 }

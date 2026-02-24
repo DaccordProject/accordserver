@@ -57,6 +57,29 @@ impl LiveKitClient {
             .map_err(|e| AppError::Internal(format!("failed to generate livekit token: {}", e)))
     }
 
+    /// Preflight connectivity check — called at startup to verify the server
+    /// can reach LiveKit's Twirp API. Fails fast with a clear error instead of
+    /// silently timing out on the first voice join.
+    pub async fn check_connectivity(&self) -> Result<(), String> {
+        // List rooms is a lightweight read-only Twirp call.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.room_client.list_rooms(Vec::new()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(format!(
+                "LiveKit API error at {}: {}",
+                self.internal_url, e
+            )),
+            Err(_) => Err(format!(
+                "LiveKit unreachable at {} (timed out after 5s)",
+                self.internal_url
+            )),
+        }
+    }
+
     pub async fn ensure_room(&self, channel_id: &str) -> Result<(), AppError> {
         let room_name = Self::room_name(channel_id);
         self.room_client
