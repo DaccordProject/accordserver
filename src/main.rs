@@ -23,7 +23,7 @@ async fn main() {
 
 fn print_banner(config: &Config) {
     let version = env!("CARGO_PKG_VERSION");
-    let voice = format!("livekit ({})", config.livekit.url);
+    let voice = format!("livekit ({}, ext: {})", config.livekit.internal_url, config.livekit.external_url);
 
     eprintln!();
     eprintln!("  \x1b[1;36maccord\x1b[0m \x1b[2mv{version}\x1b[0m");
@@ -48,7 +48,8 @@ async fn run_main_server(config: Config) {
     let (dispatcher, gateway_tx) = Dispatcher::new();
 
     let livekit_client = accordserver::voice::livekit::LiveKitClient::new(
-        &config.livekit.url,
+        &config.livekit.internal_url,
+        &config.livekit.external_url,
         &config.livekit.api_key,
         &config.livekit.api_secret,
     );

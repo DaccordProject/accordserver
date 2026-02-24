@@ -61,6 +61,7 @@ impl TestServer {
 
         let livekit_client = LiveKitClient::new(
             "http://localhost:7880",
+            "ws://localhost:7880",
             "devkey",
             "secret",
         );

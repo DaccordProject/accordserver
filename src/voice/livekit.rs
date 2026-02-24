@@ -5,24 +5,30 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct LiveKitClient {
-    url: String,
+    internal_url: String,
+    external_url: String,
     api_key: String,
     api_secret: String,
     room_client: Arc<RoomClient>,
 }
 
 impl LiveKitClient {
-    pub fn new(url: &str, api_key: &str, api_secret: &str) -> Self {
+    pub fn new(internal_url: &str, external_url: &str, api_key: &str, api_secret: &str) -> Self {
         Self {
-            url: url.to_string(),
+            internal_url: internal_url.to_string(),
+            external_url: external_url.to_string(),
             api_key: api_key.to_string(),
             api_secret: api_secret.to_string(),
-            room_client: Arc::new(RoomClient::with_api_key(url, api_key, api_secret)),
+            room_client: Arc::new(RoomClient::with_api_key(internal_url, api_key, api_secret)),
         }
     }
 
-    pub fn url(&self) -> &str {
-        &self.url
+    pub fn internal_url(&self) -> &str {
+        &self.internal_url
+    }
+
+    pub fn external_url(&self) -> &str {
+        &self.external_url
     }
 
     pub fn room_name(channel_id: &str) -> String {

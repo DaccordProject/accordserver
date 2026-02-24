@@ -87,7 +87,7 @@ pub async fn join_voice(
         "data": {
             "voice_state": voice_state,
             "backend": "livekit",
-            "livekit_url": lk.url(),
+            "livekit_url": lk.external_url(),
             "token": token
         }
     })))

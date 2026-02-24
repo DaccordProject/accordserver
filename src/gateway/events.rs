@@ -24,7 +24,6 @@ pub mod opcode {
     pub const PRESENCE_UPDATE: u8 = 8;
     pub const VOICE_STATE_UPDATE: u8 = 9;
     pub const REQUEST_MEMBERS: u8 = 10;
-    pub const VOICE_SIGNAL: u8 = 11;
 }
 
 /// Close codes.
@@ -71,12 +70,4 @@ pub struct VoiceStateUpdateData {
     pub channel_id: Option<String>,
     pub self_mute: Option<bool>,
     pub self_deaf: Option<bool>,
-}
-
-/// VOICE_SIGNAL (opcode 11) payload data.
-#[derive(Debug, Deserialize)]
-pub struct VoiceSignalData {
-    #[serde(rename = "type")]
-    pub signal_type: String,
-    pub payload: serde_json::Value,
 }
