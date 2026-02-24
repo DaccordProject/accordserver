@@ -8,9 +8,7 @@ A self-hosted Discord-like chat and voice server backend, built in Rust with [Ax
 - **REST API** — Full CRUD for users, spaces (guilds), channels, messages, members, roles, bans, invites, reactions, emojis, and bot applications
 - **Public Spaces** — Spaces can be marked public, allowing anyone to join without an invite
 - **WebSocket Gateway** — Real-time event streaming with intent-based filtering, heartbeats, and session management
-- **Voice** — Join/leave voice channels with two backend options:
-  - **Custom SFU** — Built-in WebRTC signaling relay with distributed SFU node management
-  - **LiveKit** — Integration with [LiveKit](https://livekit.io/) for managed WebRTC
+- **Voice** — Join/leave voice channels powered by [LiveKit](https://livekit.io/) for managed WebRTC
 - **SQLite** — Lightweight persistence with automatic migrations (WAL mode)
 - **Snowflake IDs** — Discord-style unique ID generation for all entities
 - **Authorization** — Role-based permission system with per-handler enforcement. Space owners get implicit administrator. New spaces grant sensible default permissions (view, send, react, connect, etc.) to all members via the `@everyone` role.
@@ -42,31 +40,10 @@ All configuration is done via environment variables.
 | `PORT` | `3000` | Server listen port |
 | `DATABASE_URL` | `sqlite:accord.db?mode=rwc` | SQLite connection string |
 | `RUST_LOG` | `accordserver=debug,tower_http=debug` | Tracing log filter |
-| `ACCORD_MODE` | `main` | `main` (full server) or `sfu` (forwarding node) |
-| `ACCORD_VOICE_BACKEND` | `custom` | `custom` (built-in SFU) or `livekit` |
-
-### LiveKit Backend
-
-Required when `ACCORD_VOICE_BACKEND=livekit`:
-
-| Variable | Description |
-|---|---|
-| `LIVEKIT_URL` | LiveKit server URL (e.g. `wss://livekit.example.com`) |
-| `LIVEKIT_API_KEY` | LiveKit API key |
-| `LIVEKIT_API_SECRET` | LiveKit API secret |
-
-### SFU Mode
-
-Required when `ACCORD_MODE=sfu`:
-
-| Variable | Description |
-|---|---|
-| `ACCORD_MAIN_URL` | Base URL of the main server |
-| `ACCORD_SFU_NODE_ID` | Unique ID for this SFU node |
-| `ACCORD_SFU_REGION` | Region label (e.g. `us-east`) |
-| `ACCORD_SFU_CAPACITY` | Max concurrent sessions |
-| `ACCORD_SFU_ENDPOINT` | Publicly reachable address for clients |
-| `ACCORD_SFU_HEARTBEAT_INTERVAL` | Seconds between heartbeats (default: `25`) |
+| `LIVEKIT_INTERNAL_URL` | | LiveKit server URL for server communication (e.g. `http://livekit:7880`) |
+| `LIVEKIT_EXTERNAL_URL` | | LiveKit server URL for client connections (e.g. `wss://livekit.example.com`) |
+| `LIVEKIT_API_KEY` | | LiveKit API key |
+| `LIVEKIT_API_SECRET` | | LiveKit API secret |
 
 ## Docker
 
@@ -90,10 +67,10 @@ services:
       PORT: 39099
       DATABASE_URL: sqlite:/app/data/accord.db?mode=rwc
       RUST_LOG: accordserver=debug,tower_http=debug
-      LIVEKIT_URL: http://livekit:7880
+      LIVEKIT_INTERNAL_URL: http://livekit:7880
+      LIVEKIT_EXTERNAL_URL: ws://localhost:7880
       LIVEKIT_API_KEY: devkey
       LIVEKIT_API_SECRET: secret
-      ACCORD_VOICE_BACKEND: livekit
     depends_on:
       - livekit
 
@@ -111,29 +88,24 @@ volumes:
 
 ## Architecture
 
-Single-binary Axum application that runs in two modes:
-
-- **Main mode** (default) — Full server with REST API, WebSocket gateway, database, and SFU node management
-- **SFU mode** — Lightweight forwarding node that registers with the main server, heartbeats, and exposes a `/health` endpoint
+Single-binary Axum application with a REST API, WebSocket gateway, database, and LiveKit voice integration.
 
 ### Project Structure
 
 ```
 src/
-  main.rs           Entry point — branches on AccordMode
+  main.rs           Entry point
   lib.rs            Library root
   config.rs         Config loaded from environment variables
   state.rs          Shared AppState (db, voice, dispatcher, etc.)
   error.rs          AppError enum → JSON error responses
   snowflake.rs      Snowflake ID generator
-  sfu_client.rs     HTTP client for SFU ↔ main server communication
-  sfu_runtime.rs    SFU node lifecycle (register, heartbeat, shutdown)
   db/               Database queries (one module per resource)
   models/           Serializable data types
   routes/           REST API handlers under /api/v1 (incl. auth)
 
   gateway/          WebSocket gateway (events, sessions, dispatcher)
-  voice/            Voice state, SFU allocation, signaling, LiveKit
+  voice/            Voice state, signaling, LiveKit
   middleware/       Auth, permissions, and rate limiting
 migrations/         SQLite migration files
 tests/              Integration and E2E tests
@@ -236,17 +208,12 @@ Clients connect via WebSocket at `/ws`. The server sends a `HELLO` with `heartbe
 | 8 | PRESENCE_UPDATE | client → server |
 | 9 | VOICE_STATE_UPDATE | client → server |
 | 10 | REQUEST_MEMBERS | client → server |
-| 11 | VOICE_SIGNAL | client → server |
 
 Events are filtered by space membership and client intents: `spaces`, `members`, `messages`, `message_content`, `presences`, `voice_states`, and more.
 
 ## Voice
 
-Two voice backends are supported, selected via `ACCORD_VOICE_BACKEND`:
-
-**Custom SFU** — The client sends `VOICE_STATE_UPDATE` (opcode 9) through the gateway. The server allocates an SFU node and returns a `voice.server_update` event with the SFU endpoint. The client connects directly to the SFU for WebRTC, using opcode 11 (`VOICE_SIGNAL`) for signaling.
-
-**LiveKit** — Same initial flow, but `voice.server_update` contains a LiveKit URL and JWT token. The client connects to LiveKit directly; signaling is handled by LiveKit internally.
+The client sends `VOICE_STATE_UPDATE` (opcode 9) through the gateway. The server returns a `voice.server_update` event containing a LiveKit URL and JWT token. The client connects to LiveKit directly; WebRTC and signaling are handled by LiveKit internally.
 
 ## Development
 

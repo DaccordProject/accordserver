@@ -257,7 +257,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                                 "space_id": vsu.space_id,
                                                                 "channel_id": channel_id,
                                                                 "backend": "livekit",
-                                                                "url": lk.url(),
+                                                                "url": lk.external_url(),
                                                                 "token": token
                                                             }
                                                         }),
@@ -315,10 +315,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             }
                                         }
                                     }
-                                }
-                                op if op == events::opcode::VOICE_SIGNAL => {
-                                    // Custom signals are only for custom SFU, which we removed.
-                                    // LiveKit handles its own signaling.
                                 }
                                 _ => {}
                             }
