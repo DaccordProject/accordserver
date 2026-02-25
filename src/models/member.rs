@@ -33,6 +33,7 @@ pub struct MemberRow {
 #[derive(Debug, Deserialize)]
 pub struct UpdateMember {
     pub nickname: Option<String>,
+    pub avatar: Option<String>,
     pub roles: Option<Vec<String>>,
     pub mute: Option<bool>,
     pub deaf: Option<bool>,

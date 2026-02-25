@@ -1062,3 +1062,286 @@ async fn test_voice_join_unauthenticated() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------------------
+// Avatar Upload Tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_user_avatar_upload() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/users/@me",
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": test_png_data_uri() }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let avatar = body["data"]["avatar"].as_str().unwrap();
+    assert!(
+        avatar.starts_with("/cdn/avatars/"),
+        "avatar should be a CDN path, got: {avatar}"
+    );
+    assert!(avatar.ends_with(".png"), "avatar should end with .png");
+
+    // Verify the file exists on disk
+    let file_path = server
+        .state
+        .storage_path
+        .join(avatar.strip_prefix("/cdn/").unwrap());
+    assert!(file_path.exists(), "avatar file should exist on disk");
+}
+
+#[tokio::test]
+async fn test_user_avatar_replace() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    // Upload first avatar
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/users/@me",
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": test_png_data_uri() }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let first_avatar = body["data"]["avatar"].as_str().unwrap().to_string();
+
+    let first_path = server
+        .state
+        .storage_path
+        .join(first_avatar.strip_prefix("/cdn/").unwrap());
+    assert!(first_path.exists(), "first avatar should exist");
+
+    // Upload replacement avatar
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/users/@me",
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": test_png_data_uri() }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let second_avatar = body["data"]["avatar"].as_str().unwrap().to_string();
+    assert!(second_avatar.starts_with("/cdn/avatars/"));
+
+    // New file should exist
+    let second_path = server
+        .state
+        .storage_path
+        .join(second_avatar.strip_prefix("/cdn/").unwrap());
+    assert!(second_path.exists(), "replacement avatar should exist");
+}
+
+#[tokio::test]
+async fn test_user_avatar_remove() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    // Upload avatar
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/users/@me",
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": test_png_data_uri() }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let avatar_path = body["data"]["avatar"].as_str().unwrap().to_string();
+
+    let file_path = server
+        .state
+        .storage_path
+        .join(avatar_path.strip_prefix("/cdn/").unwrap());
+    assert!(file_path.exists(), "avatar file should exist before removal");
+
+    // Remove avatar by sending empty string
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/users/@me",
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": "" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(
+        body["data"]["avatar"].is_null(),
+        "avatar should be null after removal"
+    );
+
+    // Verify the file is deleted
+    assert!(
+        !file_path.exists(),
+        "avatar file should be deleted from disk"
+    );
+}
+
+#[tokio::test]
+async fn test_member_avatar_upload() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "AvatarSpace").await;
+
+    // Upload member avatar via own member endpoint
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}/members/@me"),
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": test_png_data_uri() }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let avatar = body["data"]["avatar"].as_str().unwrap();
+    assert!(
+        avatar.starts_with("/cdn/avatars/"),
+        "member avatar should be a CDN path"
+    );
+    assert!(avatar.ends_with(".png"));
+}
+
+#[tokio::test]
+async fn test_space_icon_upload() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "IconSpace").await;
+
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}"),
+        &alice.auth_header(),
+        &serde_json::json!({ "icon": test_png_data_uri() }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let icon = body["data"]["icon"].as_str().unwrap();
+    assert!(
+        icon.starts_with("/cdn/icons/"),
+        "space icon should be a CDN path, got: {icon}"
+    );
+    assert!(icon.ends_with(".png"));
+
+    // Verify the file exists on disk
+    let file_path = server
+        .state
+        .storage_path
+        .join(icon.strip_prefix("/cdn/").unwrap());
+    assert!(file_path.exists(), "icon file should exist on disk");
+}
+
+#[tokio::test]
+async fn test_avatar_invalid_format() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    // Send an invalid data URI (text/plain instead of image)
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/users/@me",
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": "data:text/plain;base64,SGVsbG8=" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_avatar_too_large() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    // Create a data URI that exceeds 2 MB
+    let large_data = vec![0u8; 3 * 1024 * 1024]; // 3 MB
+    let b64 = simple_base64_encode(&large_data);
+    let data_uri = format!("data:image/png;base64,{b64}");
+
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/users/@me",
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": data_uri }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn test_space_icon_remove() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "IconSpace").await;
+
+    // Upload icon
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}"),
+        &alice.auth_header(),
+        &serde_json::json!({ "icon": test_png_data_uri() }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let icon_path = body["data"]["icon"].as_str().unwrap().to_string();
+
+    let file_path = server
+        .state
+        .storage_path
+        .join(icon_path.strip_prefix("/cdn/").unwrap());
+    assert!(file_path.exists(), "icon file should exist");
+
+    // Remove icon
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}"),
+        &alice.auth_header(),
+        &serde_json::json!({ "icon": "" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(
+        body["data"]["icon"].is_null(),
+        "icon should be null after removal"
+    );
+    assert!(!file_path.exists(), "icon file should be deleted");
+}
+
+#[tokio::test]
+async fn test_cdn_serves_avatar_image() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    // Upload avatar
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/users/@me",
+        &alice.auth_header(),
+        &serde_json::json!({ "avatar": test_png_data_uri() }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let avatar_url = body["data"]["avatar"].as_str().unwrap().to_string();
+
+    // Fetch via CDN
+    let req = Request::builder()
+        .uri(&avatar_url)
+        .body(Body::empty())
+        .unwrap();
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(!bytes.is_empty(), "CDN should serve the avatar file");
+}

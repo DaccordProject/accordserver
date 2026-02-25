@@ -167,12 +167,20 @@ pub async fn update_space(
         values.push(description.clone());
     }
     if let Some(ref icon) = input.icon {
-        sets.push("icon = ?".to_string());
-        values.push(icon.clone());
+        if icon.is_empty() {
+            sets.push("icon = NULL".to_string());
+        } else {
+            sets.push("icon = ?".to_string());
+            values.push(icon.clone());
+        }
     }
     if let Some(ref banner) = input.banner {
-        sets.push("banner = ?".to_string());
-        values.push(banner.clone());
+        if banner.is_empty() {
+            sets.push("banner = NULL".to_string());
+        } else {
+            sets.push("banner = ?".to_string());
+            values.push(banner.clone());
+        }
     }
     if let Some(ref verification_level) = input.verification_level {
         sets.push("verification_level = ?".to_string());

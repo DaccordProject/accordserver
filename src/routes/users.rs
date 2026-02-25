@@ -8,6 +8,7 @@ use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::AuthUser;
 use crate::models::user::UpdateUser;
 use crate::state::AppState;
+use crate::storage;
 
 #[derive(Deserialize)]
 pub struct CreateDmRequest {
@@ -26,8 +27,52 @@ pub async fn get_current_user(
 pub async fn update_current_user(
     state: State<AppState>,
     auth: AuthUser,
-    Json(input): Json<UpdateUser>,
+    Json(mut input): Json<UpdateUser>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Process avatar data URI
+    if let Some(ref avatar) = input.avatar {
+        if avatar.starts_with("data:") {
+            // Fetch old avatar to clean up
+            let old_user = db::users::get_user(&state.db, &auth.user_id).await?;
+            if let Some(ref old_avatar) = old_user.avatar {
+                let _ = storage::delete_file(&state.storage_path, old_avatar).await;
+            }
+            let (url, _, _, _) =
+                storage::save_avatar_image(&state.storage_path, "avatars", &auth.user_id, avatar)
+                    .await?;
+            input.avatar = Some(url);
+        } else if avatar.is_empty() {
+            // Empty string means remove avatar
+            let old_user = db::users::get_user(&state.db, &auth.user_id).await?;
+            if let Some(ref old_avatar) = old_user.avatar {
+                let _ = storage::delete_file(&state.storage_path, old_avatar).await;
+            }
+            storage::delete_avatar(&state.storage_path, "avatars", &auth.user_id).await?;
+            // Keep as Some("") — DB layer will treat empty string as NULL
+        }
+    }
+
+    // Process banner data URI
+    if let Some(ref banner) = input.banner {
+        if banner.starts_with("data:") {
+            let old_user = db::users::get_user(&state.db, &auth.user_id).await?;
+            if let Some(ref old_banner) = old_user.banner {
+                let _ = storage::delete_file(&state.storage_path, old_banner).await;
+            }
+            let (url, _, _, _) =
+                storage::save_avatar_image(&state.storage_path, "banners", &auth.user_id, banner)
+                    .await?;
+            input.banner = Some(url);
+        } else if banner.is_empty() {
+            let old_user = db::users::get_user(&state.db, &auth.user_id).await?;
+            if let Some(ref old_banner) = old_user.banner {
+                let _ = storage::delete_file(&state.storage_path, old_banner).await;
+            }
+            storage::delete_avatar(&state.storage_path, "banners", &auth.user_id).await?;
+            // Keep as Some("") — DB layer will treat empty string as NULL
+        }
+    }
+
     let user = db::users::update_user(&state.db, &auth.user_id, &input).await?;
     Ok(Json(serde_json::json!({ "data": user })))
 }

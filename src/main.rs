@@ -95,7 +95,7 @@ async fn run_main_server(config: Config) {
 
     // Create storage directories
     let storage_path = config.storage_path.clone();
-    for subdir in &["emojis", "sounds"] {
+    for subdir in &["emojis", "sounds", "avatars", "icons", "banners"] {
         let dir = storage_path.join(subdir);
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
             tracing::error!("failed to create storage directory {:?}: {:?}", dir, e);

@@ -10,6 +10,7 @@ use crate::middleware::permissions::{
 };
 use crate::models::member::{MemberRow, UpdateMember};
 use crate::state::AppState;
+use crate::storage;
 
 #[derive(Deserialize)]
 pub struct ListMembersQuery {
@@ -92,10 +93,15 @@ pub async fn update_member(
     state: State<AppState>,
     Path((space_id, user_id)): Path<(String, String)>,
     auth: AuthUser,
-    Json(input): Json<UpdateMember>,
+    Json(mut input): Json<UpdateMember>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Nickname changes require manage_nicknames
     if input.nickname.is_some() {
+        require_permission(&state.db, &space_id, &auth, "manage_nicknames").await?;
+    }
+
+    // Avatar changes on other members require manage_nicknames
+    if input.avatar.is_some() {
         require_permission(&state.db, &space_id, &auth, "manage_nicknames").await?;
     }
 
@@ -116,6 +122,28 @@ pub async fn update_member(
     }
     if input.deaf.is_some() {
         require_permission(&state.db, &space_id, &auth, "deafen_members").await?;
+    }
+
+    // Process avatar data URI
+    let entity_id = format!("{}_{}", space_id, user_id);
+    if let Some(ref avatar) = input.avatar {
+        if avatar.starts_with("data:") {
+            let old_member = db::members::get_member_row(&state.db, &space_id, &user_id).await?;
+            if let Some(ref old_avatar) = old_member.avatar {
+                let _ = storage::delete_file(&state.storage_path, old_avatar).await;
+            }
+            let (url, _, _, _) =
+                storage::save_avatar_image(&state.storage_path, "avatars", &entity_id, avatar)
+                    .await?;
+            input.avatar = Some(url);
+        } else if avatar.is_empty() {
+            let old_member = db::members::get_member_row(&state.db, &space_id, &user_id).await?;
+            if let Some(ref old_avatar) = old_member.avatar {
+                let _ = storage::delete_file(&state.storage_path, old_avatar).await;
+            }
+            storage::delete_avatar(&state.storage_path, "avatars", &entity_id).await?;
+            // Keep as Some("") — DB layer will treat empty string as NULL
+        }
     }
 
     let row = db::members::update_member(&state.db, &space_id, &user_id, &input).await?;
@@ -140,11 +168,37 @@ pub async fn update_own_member(
     state: State<AppState>,
     Path(space_id): Path<String>,
     auth: AuthUser,
-    Json(input): Json<UpdateMember>,
+    Json(mut input): Json<UpdateMember>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "change_nickname").await?;
+
+    // Process avatar data URI for self
+    let entity_id = format!("{}_{}", space_id, auth.user_id);
+    if let Some(ref avatar) = input.avatar {
+        if avatar.starts_with("data:") {
+            let old_member =
+                db::members::get_member_row(&state.db, &space_id, &auth.user_id).await?;
+            if let Some(ref old_avatar) = old_member.avatar {
+                let _ = storage::delete_file(&state.storage_path, old_avatar).await;
+            }
+            let (url, _, _, _) =
+                storage::save_avatar_image(&state.storage_path, "avatars", &entity_id, avatar)
+                    .await?;
+            input.avatar = Some(url);
+        } else if avatar.is_empty() {
+            let old_member =
+                db::members::get_member_row(&state.db, &space_id, &auth.user_id).await?;
+            if let Some(ref old_avatar) = old_member.avatar {
+                let _ = storage::delete_file(&state.storage_path, old_avatar).await;
+            }
+            storage::delete_avatar(&state.storage_path, "avatars", &entity_id).await?;
+            // Keep as Some("") — DB layer will treat empty string as NULL
+        }
+    }
+
     let limited = UpdateMember {
         nickname: input.nickname,
+        avatar: input.avatar,
         roles: None,
         mute: None,
         deaf: None,
