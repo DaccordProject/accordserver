@@ -154,8 +154,8 @@ pub async fn create_dm_channel(
 
     let id = snowflake::generate();
     sqlx::query(
-        "INSERT INTO channels (id, type, owner_id, position, nsfw, rate_limit, archived) \
-         VALUES (?, ?, ?, 0, 0, 0, 0)",
+        "INSERT INTO channels (id, name, type, owner_id, position, nsfw, rate_limit, archived) \
+         VALUES (?, '', ?, ?, 0, 0, 0, 0)",
     )
     .bind(&id)
     .bind(channel_type)
