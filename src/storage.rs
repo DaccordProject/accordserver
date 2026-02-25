@@ -55,7 +55,7 @@ pub fn validate_image_data_uri(data: &str) -> Result<(Vec<u8>, String, bool), Ap
 
 /// Parse a `data:<mime>;base64,<data>` URI for audio.
 /// Returns `(decoded_bytes, content_type)`.
-pub fn validate_audio_data_uri(data: &str) -> Result<(Vec<u8>, String), AppError> {
+pub fn validate_audio_data_uri(data: &str, max_size: usize) -> Result<(Vec<u8>, String), AppError> {
     let rest = data
         .strip_prefix("data:")
         .ok_or_else(|| AppError::BadRequest("audio must be a data URI".to_string()))?;
@@ -70,10 +70,10 @@ pub fn validate_audio_data_uri(data: &str) -> Result<(Vec<u8>, String), AppError
     }
 
     let bytes = base64_decode(b64)?;
-    if bytes.len() > MAX_SOUND_SIZE {
+    if bytes.len() > max_size {
         return Err(AppError::PayloadTooLarge(format!(
             "audio exceeds maximum size of {} MB",
-            MAX_SOUND_SIZE / (1024 * 1024)
+            max_size / (1024 * 1024)
         )));
     }
 
@@ -87,8 +87,9 @@ pub async fn save_base64_image(
     space_id: &str,
     file_id: &str,
     data: &str,
+    max_size: usize,
 ) -> Result<(String, String, usize, bool), AppError> {
-    let (bytes, content_type, is_animated) = validate_image_data_uri(data)?;
+    let (bytes, content_type, is_animated) = validate_image_data_uri_with_limit(data, max_size)?;
     let ext = mime_to_ext(&content_type);
     let size = bytes.len();
 
@@ -114,8 +115,9 @@ pub async fn save_base64_audio(
     space_id: &str,
     file_id: &str,
     data: &str,
+    max_size: usize,
 ) -> Result<(String, String, usize), AppError> {
-    let (bytes, content_type) = validate_audio_data_uri(data)?;
+    let (bytes, content_type) = validate_audio_data_uri(data, max_size)?;
     let ext = mime_to_ext(&content_type);
     let size = bytes.len();
 
@@ -142,9 +144,10 @@ pub async fn save_avatar_image(
     category: &str,
     entity_id: &str,
     data: &str,
+    max_size: usize,
 ) -> Result<(String, String, usize, bool), AppError> {
     let (bytes, content_type, is_animated) =
-        validate_image_data_uri_with_limit(data, MAX_AVATAR_SIZE)?;
+        validate_image_data_uri_with_limit(data, max_size)?;
     let ext = mime_to_ext(&content_type);
     let size = bytes.len();
 
@@ -203,11 +206,12 @@ pub async fn save_attachment(
     message_id: &str,
     filename: &str,
     bytes: &[u8],
+    max_size: usize,
 ) -> Result<(String, usize), AppError> {
-    if bytes.len() > MAX_ATTACHMENT_SIZE {
+    if bytes.len() > max_size {
         return Err(AppError::PayloadTooLarge(format!(
             "attachment exceeds maximum size of {} MB",
-            MAX_ATTACHMENT_SIZE / (1024 * 1024)
+            max_size / (1024 * 1024)
         )));
     }
 

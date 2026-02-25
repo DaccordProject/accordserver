@@ -37,9 +37,11 @@ pub async fn create_emoji(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_emojis").await?;
 
+    let max_emoji_size = state.settings.load().max_emoji_size as usize;
+
     // Save the image file
     let (image_path, content_type, size, animated) =
-        storage::save_base64_image(&state.storage_path, &space_id, &input.name, &input.image)
+        storage::save_base64_image(&state.storage_path, &space_id, &input.name, &input.image, max_emoji_size)
             .await?;
 
     let emoji = db::emojis::create_emoji(
@@ -60,7 +62,7 @@ pub async fn create_emoji(
         // Re-save with the correct ID-based path
         let _ = storage::delete_file(&state.storage_path, &image_path).await;
         let (real_path, _, _, _) =
-            storage::save_base64_image(&state.storage_path, &space_id, emoji_id, &input.image)
+            storage::save_base64_image(&state.storage_path, &space_id, emoji_id, &input.image, max_emoji_size)
                 .await?;
 
         // Update the DB with the correct path

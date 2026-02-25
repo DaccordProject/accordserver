@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -8,6 +9,7 @@ use tokio::time::Instant;
 use crate::gateway::dispatcher::Dispatcher;
 use crate::gateway::events::GatewayBroadcast;
 use crate::models::presence::Presence;
+use crate::models::settings::ServerSettings;
 use crate::models::voice::VoiceState;
 use crate::voice::livekit::LiveKitClient;
 
@@ -29,4 +31,5 @@ pub struct AppState {
     pub livekit_client: Option<LiveKitClient>,
     pub rate_limits: Arc<DashMap<String, RateLimitBucket>>,
     pub storage_path: PathBuf,
+    pub settings: Arc<ArcSwap<ServerSettings>>,
 }

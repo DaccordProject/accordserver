@@ -271,12 +271,12 @@ pub async fn remove_recipient(
     require_dm_access(&state.db, &channel_id, &auth.user_id).await?;
 
     // Can remove self, or owner can remove others
-    if user_id != auth.user_id {
-        if channel.owner_id.as_deref() != Some(&auth.user_id) {
-            return Err(AppError::Forbidden(
-                "only the group owner can remove members".into(),
-            ));
-        }
+    if user_id != auth.user_id
+        && channel.owner_id.as_deref() != Some(&auth.user_id)
+    {
+        return Err(AppError::Forbidden(
+            "only the group owner can remove members".into(),
+        ));
     }
 
     db::dm_participants::remove_participant(&state.db, &channel_id, &user_id).await?;

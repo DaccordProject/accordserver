@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use arc_swap::ArcSwap;
 use accordserver::db;
 use accordserver::gateway::dispatcher::Dispatcher;
 use accordserver::middleware::auth::{create_token_hash, generate_token};
@@ -66,6 +67,10 @@ impl TestServer {
             "secret",
         ));
 
+        let settings = db::settings::get_settings(&pool)
+            .await
+            .unwrap_or_default();
+
         let state = AppState {
             db: pool,
             voice_states: Arc::new(DashMap::new()),
@@ -76,6 +81,7 @@ impl TestServer {
             livekit_client,
             rate_limits: Arc::new(DashMap::new()),
             storage_path,
+            settings: Arc::new(ArcSwap::from_pointee(settings)),
         };
 
         Self { state }

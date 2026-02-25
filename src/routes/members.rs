@@ -124,6 +124,8 @@ pub async fn update_member(
         require_permission(&state.db, &space_id, &auth, "deafen_members").await?;
     }
 
+    let max_avatar_size = state.settings.load().max_avatar_size as usize;
+
     // Process avatar data URI
     let entity_id = format!("{}_{}", space_id, user_id);
     if let Some(ref avatar) = input.avatar {
@@ -133,7 +135,7 @@ pub async fn update_member(
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
             let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "avatars", &entity_id, avatar)
+                storage::save_avatar_image(&state.storage_path, "avatars", &entity_id, avatar, max_avatar_size)
                     .await?;
             input.avatar = Some(url);
         } else if avatar.is_empty() {
@@ -172,6 +174,8 @@ pub async fn update_own_member(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "change_nickname").await?;
 
+    let max_avatar_size = state.settings.load().max_avatar_size as usize;
+
     // Process avatar data URI for self
     let entity_id = format!("{}_{}", space_id, auth.user_id);
     if let Some(ref avatar) = input.avatar {
@@ -182,7 +186,7 @@ pub async fn update_own_member(
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
             let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "avatars", &entity_id, avatar)
+                storage::save_avatar_image(&state.storage_path, "avatars", &entity_id, avatar, max_avatar_size)
                     .await?;
             input.avatar = Some(url);
         } else if avatar.is_empty() {

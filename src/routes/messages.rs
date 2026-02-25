@@ -14,8 +14,6 @@ use crate::models::message::{BulkDeleteMessages, CreateMessage, MessageRow, Upda
 use crate::state::AppState;
 use crate::storage;
 
-const MAX_ATTACHMENTS: usize = 10;
-
 #[derive(Deserialize)]
 pub struct ListMessagesQuery {
     pub after: Option<String>,
@@ -137,7 +135,7 @@ pub async fn create_message(
     // Spawn URL unfurling in the background -- if the message has no embeds
     // already and its content contains URLs, fetch OpenGraph metadata and
     // update the message with generated embeds.
-    if input.embeds.as_ref().map_or(true, |e| e.is_empty()) {
+    if input.embeds.as_ref().is_none_or(|e| e.is_empty()) {
         let content = input.content.clone();
         let msg_id = msg.id.clone();
         let space_id = channel.space_id.clone();
@@ -188,6 +186,10 @@ pub async fn create_message_multipart(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
 
+    let settings = state.settings.load();
+    let max_attachments = settings.max_attachments_per_message as usize;
+    let max_attachment_size = settings.max_attachment_size as usize;
+
     let mut payload_json: Option<CreateMessage> = None;
     let mut files: Vec<(String, String, Vec<u8>)> = Vec::new(); // (filename, content_type, bytes)
 
@@ -208,9 +210,9 @@ pub async fn create_message_multipart(
                     .map_err(|e| AppError::BadRequest(format!("invalid payload_json: {e}")))?,
             );
         } else if name.starts_with("files[") {
-            if files.len() >= MAX_ATTACHMENTS {
+            if files.len() >= max_attachments {
                 return Err(AppError::BadRequest(format!(
-                    "maximum {MAX_ATTACHMENTS} attachments per message"
+                    "maximum {max_attachments} attachments per message"
                 )));
             }
             let filename = field
@@ -252,6 +254,7 @@ pub async fn create_message_multipart(
             &msg.id,
             filename,
             bytes,
+            max_attachment_size,
         )
         .await?;
 
@@ -308,10 +311,10 @@ pub async fn update_message(
     if existing.channel_id != channel_id {
         return Err(AppError::NotFound("unknown_message".to_string()));
     }
+    // Author can always edit their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
-        return Err(AppError::Forbidden(
-            "you can only edit your own messages".to_string(),
-        ));
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages")
+            .await?;
     }
     let msg = db::messages::update_message(&state.db, &message_id, &input).await?;
 
