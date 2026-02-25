@@ -221,6 +221,9 @@ pub async fn add_role(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_roles").await?;
     let role = db::roles::get_role_row(&state.db, &role_id).await?;
+    if role.space_id != space_id {
+        return Err(AppError::NotFound("role not found in this space".into()));
+    }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
     db::members::add_role_to_member(&state.db, &space_id, &user_id, &role_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
@@ -233,6 +236,9 @@ pub async fn remove_role(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_roles").await?;
     let role = db::roles::get_role_row(&state.db, &role_id).await?;
+    if role.space_id != space_id {
+        return Err(AppError::NotFound("role not found in this space".into()));
+    }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
     db::members::remove_role_from_member(&state.db, &space_id, &user_id, &role_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))

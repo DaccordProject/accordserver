@@ -1569,3 +1569,1039 @@ async fn test_instance_admin_can_update_channel() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK, "instance admin should be able to update channel");
 }
+
+// =========================================================================
+// 9. Permission-Based Access Control
+//
+// Tests that fine-grained permissions and channel overwrites are enforced.
+// =========================================================================
+
+/// Helper: get the @everyone role ID for a space (position == 0).
+async fn get_everyone_role_id(server: &TestServer, space_id: &str, auth: &str) -> String {
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/roles"),
+        auth,
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let roles = body["data"].as_array().unwrap();
+    roles
+        .iter()
+        .find(|r| r["position"].as_i64() == Some(0))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn test_member_without_send_messages_cannot_post() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "PermSpace").await;
+    let channel_id = server.create_channel(&space_id, "restricted").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Get @everyone role and deny send_messages via channel overwrite
+    let everyone_role_id = get_everyone_role_id(&server, &space_id, &alice.auth_header()).await;
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{channel_id}/permissions/{everyone_role_id}"),
+        &alice.auth_header(),
+        &json!({ "type": "role", "allow": [], "deny": ["send_messages"] }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Bob (member but send_messages denied) tries to post → 403
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &bob.auth_header(),
+        &json!({ "content": "should fail" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_member_without_manage_messages_cannot_delete_others_message() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "MsgSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Alice sends a message
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "alice's message" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Bob (no manage_messages) tries to delete Alice's message → 403
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/channels/{channel_id}/messages/{msg_id}"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_member_without_manage_messages_cannot_edit_others_message() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "MsgSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Alice sends a message
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "alice's message" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Bob (no manage_messages) tries to edit Alice's message → 403
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/channels/{channel_id}/messages/{msg_id}"),
+        &bob.auth_header(),
+        &json!({ "content": "hacked" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_channel_overwrite_deny_blocks_send() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "OverwriteSpace").await;
+    let channel_id = server.create_channel(&space_id, "restricted").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Set member-specific overwrite denying send_messages for Bob
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{channel_id}/permissions/{}", bob.user.id),
+        &alice.auth_header(),
+        &json!({ "type": "member", "allow": [], "deny": ["send_messages"] }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Bob tries to send → 403
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &bob.auth_header(),
+        &json!({ "content": "should fail" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_channel_overwrite_member_overrides_role() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "OverrideSpace").await;
+    let channel_id = server.create_channel(&space_id, "restricted").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Create a role that allows send_messages and assign it to Bob
+    let role_id = server
+        .create_role(&space_id, "talker", &["send_messages", "view_channel"])
+        .await;
+    server.assign_role(&space_id, &bob.user.id, &role_id).await;
+
+    // Role overwrite allows send_messages
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{channel_id}/permissions/{role_id}"),
+        &alice.auth_header(),
+        &json!({ "type": "role", "allow": ["send_messages"], "deny": [] }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // But member-specific overwrite denies it (should take precedence)
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{channel_id}/permissions/{}", bob.user.id),
+        &alice.auth_header(),
+        &json!({ "type": "member", "allow": [], "deny": ["send_messages"] }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Bob tries to send → 403 (member overwrite takes precedence over role)
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &bob.auth_header(),
+        &json!({ "content": "should fail" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// =========================================================================
+// 10. Message Ownership & Cross-Channel
+//
+// Tests that message operations respect authorship and channel boundaries.
+// =========================================================================
+
+#[tokio::test]
+async fn test_non_author_cannot_edit_message() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "MsgOwn").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Alice sends a message
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "alice's" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Bob (member, not author, no manage_messages) edits → 403
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/channels/{channel_id}/messages/{msg_id}"),
+        &bob.auth_header(),
+        &json!({ "content": "tampered" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_non_author_cannot_delete_message() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "MsgOwn").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "alice's" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Bob (member, not author, no manage_messages) deletes → 403
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/channels/{channel_id}/messages/{msg_id}"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_edit_message_wrong_channel_returns_not_found() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "CrossChan").await;
+    let channel_a = server.create_channel(&space_id, "chan-a").await;
+    let channel_b = server.create_channel(&space_id, "chan-b").await;
+
+    // Alice sends in channel A
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_a}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "in channel A" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Try to PATCH via channel B's URL → 404
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/channels/{channel_b}/messages/{msg_id}"),
+        &alice.auth_header(),
+        &json!({ "content": "cross-channel edit" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delete_message_wrong_channel_returns_not_found() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "CrossChan").await;
+    let channel_a = server.create_channel(&space_id, "chan-a").await;
+    let channel_b = server.create_channel(&space_id, "chan-b").await;
+
+    // Alice sends in channel A
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_a}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "in channel A" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Try to DELETE via channel B's URL → 404
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/channels/{channel_b}/messages/{msg_id}"),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// =========================================================================
+// 11. Role Hierarchy Edge Cases
+//
+// Tests that hierarchy checks prevent lateral and upward privilege actions.
+// =========================================================================
+
+#[tokio::test]
+async fn test_kick_equal_position_forbidden() {
+    let server = TestServer::new().await;
+    let owner = server.create_user_with_token("owner").await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&owner.user.id, "HierSpace").await;
+    server.add_member(&space_id, &alice.user.id).await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Create a mod role with kick_members at position 1
+    let mod_role = server
+        .create_role(&space_id, "mod", &["kick_members", "view_channel"])
+        .await;
+    server
+        .assign_role(&space_id, &alice.user.id, &mod_role)
+        .await;
+    server
+        .assign_role(&space_id, &bob.user.id, &mod_role)
+        .await;
+
+    // Alice tries to kick Bob (same position) → 403
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}/members/{}", bob.user.id),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_ban_higher_position_forbidden() {
+    let server = TestServer::new().await;
+    let owner = server.create_user_with_token("owner").await;
+    let mod_user = server.create_user_with_token("mod").await;
+    let admin_user = server.create_user_with_token("admin_user").await;
+    let space_id = server.create_space(&owner.user.id, "HierSpace").await;
+    server.add_member(&space_id, &mod_user.user.id).await;
+    server.add_member(&space_id, &admin_user.user.id).await;
+
+    // Mod role at default position (1) with ban_members
+    let mod_role = server
+        .create_role(&space_id, "mod", &["ban_members", "view_channel"])
+        .await;
+    // Higher role at position 3
+    let high_role = server
+        .create_role(&space_id, "senior", &["view_channel"])
+        .await;
+
+    server
+        .assign_role(&space_id, &mod_user.user.id, &mod_role)
+        .await;
+    server
+        .assign_role(&space_id, &admin_user.user.id, &high_role)
+        .await;
+
+    // Mod tries to ban admin_user (higher position) → 403
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", admin_user.user.id),
+        &mod_user.auth_header(),
+        &json!({ "reason": "should fail" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_assign_role_above_own_position_forbidden() {
+    let server = TestServer::new().await;
+    let owner = server.create_user_with_token("owner").await;
+    let mod_user = server.create_user_with_token("mod").await;
+    let target = server.create_user_with_token("target").await;
+    let space_id = server.create_space(&owner.user.id, "HierSpace").await;
+    server.add_member(&space_id, &mod_user.user.id).await;
+    server.add_member(&space_id, &target.user.id).await;
+
+    // Mod role with manage_roles
+    let mod_role = server
+        .create_role(&space_id, "mod", &["manage_roles", "view_channel"])
+        .await;
+    // Higher role that mod shouldn't be able to assign
+    let high_role = server
+        .create_role(&space_id, "senior", &["view_channel"])
+        .await;
+
+    server
+        .assign_role(&space_id, &mod_user.user.id, &mod_role)
+        .await;
+
+    // Mod tries to assign high_role to target → 403 (high_role position >= mod's position)
+    let req = authenticated_request(
+        Method::PUT,
+        &format!(
+            "/api/v1/spaces/{space_id}/members/{}/roles/{high_role}",
+            target.user.id
+        ),
+        &mod_user.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_delete_role_above_own_position_forbidden() {
+    let server = TestServer::new().await;
+    let owner = server.create_user_with_token("owner").await;
+    let mod_user = server.create_user_with_token("mod").await;
+    let space_id = server.create_space(&owner.user.id, "HierSpace").await;
+    server.add_member(&space_id, &mod_user.user.id).await;
+
+    // Mod role with manage_roles
+    let mod_role = server
+        .create_role(&space_id, "mod", &["manage_roles", "view_channel"])
+        .await;
+    // Higher role
+    let high_role = server
+        .create_role(&space_id, "senior", &["view_channel"])
+        .await;
+
+    server
+        .assign_role(&space_id, &mod_user.user.id, &mod_role)
+        .await;
+
+    // Mod tries to delete high_role → 403
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}/roles/{high_role}"),
+        &mod_user.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// =========================================================================
+// 12. Ban Enforcement
+//
+// Tests that banned users are blocked from rejoining, accepting invites,
+// and sending messages.
+// =========================================================================
+
+#[tokio::test]
+async fn test_banned_user_cannot_accept_invite() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "BanSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Ban Bob
+    server
+        .ban_user(&space_id, &bob.user.id, &alice.user.id)
+        .await;
+
+    // Create an invite
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/invites"),
+        &alice.auth_header(),
+        &json!({ "max_uses": 10 }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let invite_code = body["data"]["code"].as_str().unwrap().to_string();
+
+    // Bob (banned) tries to accept → 403
+    let req = authenticated_request(
+        Method::POST,
+        &format!("/api/v1/invites/{invite_code}/accept"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_banned_user_cannot_send_message() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "BanSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Ban Bob (removes membership)
+    server
+        .ban_user(&space_id, &bob.user.id, &alice.user.id)
+        .await;
+
+    // Bob (banned, no longer a member) tries to send → 403
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &bob.auth_header(),
+        &json!({ "content": "should fail" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_banned_user_cannot_rejoin_public_space() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_public_space(&alice.user.id, "PublicBan").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Ban Bob
+    server
+        .ban_user(&space_id, &bob.user.id, &alice.user.id)
+        .await;
+
+    // Bob tries to rejoin via public join → 403
+    let req = authenticated_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/join"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// =========================================================================
+// 13. DM Access Control
+//
+// Tests that DM channels enforce participant-only access.
+// =========================================================================
+
+#[tokio::test]
+async fn test_create_dm_with_self_rejected() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/users/@me/channels",
+        &alice.auth_header(),
+        &json!({ "recipient_id": alice.user.id }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_dm_with_nonexistent_user_rejected() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/users/@me/channels",
+        &alice.auth_header(),
+        &json!({ "recipient_id": "999999999999999" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let status = response.status();
+    assert!(
+        status == StatusCode::NOT_FOUND || status == StatusCode::BAD_REQUEST,
+        "expected 404 or 400 for nonexistent recipient, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_non_participant_cannot_read_dm_messages() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let charlie = server.create_user_with_token("charlie").await;
+
+    // Create DM between Alice and Bob
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/users/@me/channels",
+        &alice.auth_header(),
+        &json!({ "recipient_id": bob.user.id }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let dm_channel_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Charlie (not a participant) tries to GET messages → 403
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/channels/{dm_channel_id}/messages"),
+        &charlie.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_group_dm_exceed_participant_limit() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    // Create 10 other users (alice + 10 = 11, exceeds 10 max)
+    let mut recipient_ids = Vec::new();
+    for i in 0..10 {
+        let user = server
+            .create_user_with_token(&format!("user{i}"))
+            .await;
+        recipient_ids.push(serde_json::Value::String(user.user.id));
+    }
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/users/@me/channels",
+        &alice.auth_header(),
+        &json!({ "recipients": recipient_ids }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// =========================================================================
+// 14. Reaction Authorization
+//
+// Tests that reaction endpoints enforce membership and permission checks.
+// =========================================================================
+
+#[tokio::test]
+async fn test_non_member_cannot_add_reaction() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "ReactSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // Alice sends a message
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "react to me" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Bob (non-member) tries to add a reaction → 403
+    let req = authenticated_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{channel_id}/messages/{msg_id}/reactions/%F0%9F%91%8D/@me"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_non_member_cannot_remove_others_reaction() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "ReactSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // Alice sends a message and adds a reaction
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "react" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    let req = authenticated_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{channel_id}/messages/{msg_id}/reactions/%F0%9F%91%8D/@me"),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Bob (non-member) tries to remove Alice's reaction → 403
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!(
+            "/api/v1/channels/{channel_id}/messages/{msg_id}/reactions/%F0%9F%91%8D/{}",
+            alice.user.id
+        ),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_member_without_manage_messages_cannot_remove_others_reaction() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "ReactSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Alice sends a message and adds a reaction
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "react" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    let req = authenticated_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{channel_id}/messages/{msg_id}/reactions/%F0%9F%91%8D/@me"),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Bob (member, no manage_messages) tries to remove Alice's reaction → 403
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!(
+            "/api/v1/channels/{channel_id}/messages/{msg_id}/reactions/%F0%9F%91%8D/{}",
+            alice.user.id
+        ),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// =========================================================================
+// 15. Cross-Space Isolation
+//
+// Tests that resources in one space cannot be accessed from another.
+// =========================================================================
+
+#[tokio::test]
+async fn test_cross_space_channel_access_forbidden() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let _space_a = server.create_space(&alice.user.id, "SpaceA").await;
+    let space_b = server.create_space(&bob.user.id, "SpaceB").await;
+    let channel_b = server.create_channel(&space_b, "secret").await;
+
+    // Alice (not a member of space B) tries to GET channel from space B → 403
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/channels/{channel_b}"),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_cross_space_role_assignment_forbidden() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_a = server.create_space(&alice.user.id, "SpaceA").await;
+    let space_b = server.create_space(&bob.user.id, "SpaceB").await;
+
+    // Create a role in space A
+    let role_a = server
+        .create_role(&space_a, "arole", &["view_channel"])
+        .await;
+
+    // Bob adds Alice as member of space B
+    server.add_member(&space_b, &alice.user.id).await;
+
+    // Try to assign role_a (from space A) to Alice in space B → should fail
+    let req = authenticated_request(
+        Method::PUT,
+        &format!(
+            "/api/v1/spaces/{space_b}/members/{}/roles/{role_a}",
+            alice.user.id
+        ),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let status = response.status();
+    assert!(
+        status == StatusCode::NOT_FOUND || status == StatusCode::FORBIDDEN,
+        "expected 404 or 403 for cross-space role assignment, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_cross_space_invite_creation_forbidden() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let _space_a = server.create_space(&alice.user.id, "SpaceA").await;
+    let space_b = server.create_space(&bob.user.id, "SpaceB").await;
+    let channel_b = server.create_channel(&space_b, "general").await;
+
+    // Alice (non-member of space B) tries to create invite for space B's channel → 403
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_b}/invites"),
+        &alice.auth_header(),
+        &json!({ "max_uses": 5 }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// =========================================================================
+// 16. Space Ownership & Deletion
+//
+// Tests that only the space owner (or instance admin) can delete a space.
+// =========================================================================
+
+#[tokio::test]
+async fn test_non_owner_cannot_delete_space() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Give Bob manage_space permission
+    let role_id = server
+        .create_role(&space_id, "manager", &["manage_space", "view_channel"])
+        .await;
+    server
+        .assign_role(&space_id, &bob.user.id, &role_id)
+        .await;
+
+    // Bob (manage_space but not owner) tries to delete → 403
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_member_cannot_delete_space() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Bob (regular member) tries to delete → 403
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_non_owner_cannot_transfer_ownership() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Bob tries to set himself as owner via PATCH → should not change ownership
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}"),
+        &bob.auth_header(),
+        &json!({ "owner_id": bob.user.id }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let status = response.status();
+    // Either 403 (no manage_space), or succeeds but ignores owner_id
+    if status == StatusCode::OK {
+        // Verify ownership did not change
+        let req = authenticated_request(
+            Method::GET,
+            &format!("/api/v1/spaces/{space_id}"),
+            &alice.auth_header(),
+        );
+        let response = server.router().oneshot(req).await.unwrap();
+        let body = parse_body(response).await;
+        assert_eq!(
+            body["data"]["owner_id"].as_str().unwrap(),
+            alice.user.id,
+            "ownership should not have changed"
+        );
+    }
+    // If 403, that's also fine — Bob was denied
+}
+
+// =========================================================================
+// 17. Token Misuse
+//
+// Tests that invalidated or misformatted tokens are rejected.
+// =========================================================================
+
+#[tokio::test]
+async fn test_logged_out_token_rejected() {
+    let server = TestServer::new().await;
+
+    // Register a user via REST
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &json!({
+            "username": "logouttest",
+            "password": "securepassword123"
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let token = body["data"]["token"].as_str().unwrap().to_string();
+
+    // Verify token works
+    let req = authenticated_request(Method::GET, "/api/v1/users/@me", &format!("Bearer {token}"));
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Logout
+    let req = authenticated_request(
+        Method::POST,
+        "/api/v1/auth/logout",
+        &format!("Bearer {token}"),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Use same token again → 401
+    let req = authenticated_request(Method::GET, "/api/v1/users/@me", &format!("Bearer {token}"));
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_bot_token_with_bearer_prefix_rejected() {
+    let server = TestServer::new().await;
+    let (_owner, bot) = server.create_bot_with_token("botowner", "testbot").await;
+
+    // Use bot token value with "Bearer " prefix → should fail
+    let req = authenticated_request(
+        Method::GET,
+        "/api/v1/users/@me",
+        &format!("Bearer {}", bot.token),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_user_token_with_bot_prefix_rejected() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    // Use user token value with "Bot " prefix → should fail
+    let req = authenticated_request(
+        Method::GET,
+        "/api/v1/users/@me",
+        &format!("Bot {}", alice.token),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// =========================================================================
+// 18. Self-Action Limits
+//
+// Tests that users cannot ban or kick themselves.
+// =========================================================================
+
+#[tokio::test]
+async fn test_user_cannot_ban_self() {
+    let server = TestServer::new().await;
+    let owner = server.create_user_with_token("owner").await;
+    let space_id = server.create_space(&owner.user.id, "SelfBan").await;
+
+    // Owner tries to ban themselves → 403 (hierarchy: owner vs owner is equal)
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", owner.user.id),
+        &owner.auth_header(),
+        &json!({ "reason": "self-ban" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_user_cannot_kick_self() {
+    let server = TestServer::new().await;
+    let owner = server.create_user_with_token("owner").await;
+    let space_id = server.create_space(&owner.user.id, "SelfKick").await;
+
+    // Owner tries to kick themselves → 403 (hierarchy: owner vs owner is equal)
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}/members/{}", owner.user.id),
+        &owner.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
