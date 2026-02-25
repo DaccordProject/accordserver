@@ -1345,3 +1345,91 @@ async fn test_cdn_serves_avatar_image() {
         .unwrap();
     assert!(!bytes.is_empty(), "CDN should serve the avatar file");
 }
+
+// ---------------------------------------------------------------------------
+// Server settings tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_settings() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    let req = authenticated_request(Method::GET, "/api/v1/settings", &alice.auth_header());
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["max_emoji_size"], 262144);
+    assert_eq!(body["data"]["max_avatar_size"], 2097152);
+    assert_eq!(body["data"]["max_sound_size"], 2097152);
+    assert_eq!(body["data"]["max_attachment_size"], 26214400);
+    assert_eq!(body["data"]["max_attachments_per_message"], 10);
+}
+
+#[tokio::test]
+async fn test_update_settings_admin() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/settings",
+        &admin.auth_header(),
+        &serde_json::json!({
+            "max_emoji_size": 512000,
+            "max_attachments_per_message": 5
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["max_emoji_size"], 512000);
+    assert_eq!(body["data"]["max_attachments_per_message"], 5);
+    // Unchanged fields keep defaults
+    assert_eq!(body["data"]["max_avatar_size"], 2097152);
+}
+
+#[tokio::test]
+async fn test_update_settings_non_admin_forbidden() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/settings",
+        &alice.auth_header(),
+        &serde_json::json!({ "max_emoji_size": 512000 }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_upload_respects_custom_limit() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let space_id = server.create_space(&admin.user.id, "test-space").await;
+
+    // Lower the emoji limit to 10 bytes
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/settings",
+        &admin.auth_header(),
+        &serde_json::json!({ "max_emoji_size": 10 }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Attempt to upload an emoji (the PNG is larger than 10 bytes)
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/emojis"),
+        &admin.auth_header(),
+        &serde_json::json!({
+            "name": "test_emoji",
+            "image": test_png_data_uri()
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}

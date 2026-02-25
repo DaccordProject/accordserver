@@ -37,10 +37,12 @@ pub async fn create_sound(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_soundboard").await?;
 
+    let max_sound_size = state.settings.load().max_sound_size as usize;
+
     // Save audio file
     let id = crate::snowflake::generate();
     let (audio_path, content_type, size) =
-        storage::save_base64_audio(&state.storage_path, &space_id, &id, &input.audio).await?;
+        storage::save_base64_audio(&state.storage_path, &space_id, &id, &input.audio, max_sound_size).await?;
 
     let sound = db::soundboard::create_sound(
         &state.db,

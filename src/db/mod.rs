@@ -9,6 +9,7 @@ pub mod members;
 pub mod messages;
 pub mod permission_overwrites;
 pub mod roles;
+pub mod settings;
 pub mod soundboard;
 pub mod spaces;
 pub mod users;

@@ -11,6 +11,7 @@ mod members;
 pub mod messages;
 mod reactions;
 mod roles;
+mod settings;
 mod soundboard;
 pub mod spaces;
 mod test_seed;
@@ -269,6 +270,11 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/interactions/{interaction_id}/{token}/callback",
             post(interactions::interaction_callback),
+        )
+        // Settings
+        .route(
+            "/settings",
+            get(settings::get_settings).patch(settings::update_settings),
         )
         // Version
         .route("/version", get(health::version))

@@ -242,9 +242,8 @@ pub async fn unfurl_message_urls(content: &str) -> Vec<Embed> {
 
     let mut embeds = Vec::new();
     for url in &urls {
-        match unfurl_url(url, &client).await {
-            Some(embed) => embeds.push(embed),
-            None => {}
+        if let Some(embed) = unfurl_url(url, &client).await {
+            embeds.push(embed);
         }
     }
     embeds

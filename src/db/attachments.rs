@@ -6,6 +6,7 @@ use crate::error::AppError;
 use crate::models::attachment::Attachment;
 use crate::snowflake;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_attachment(
     pool: &SqlitePool,
     message_id: &str,
@@ -57,7 +58,7 @@ pub async fn get_attachments_for_message(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|r| row_to_attachment(r)).collect())
+    Ok(rows.into_iter().map(row_to_attachment).collect())
 }
 
 pub async fn get_attachments_for_messages(

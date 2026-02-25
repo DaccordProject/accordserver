@@ -29,6 +29,8 @@ pub async fn update_current_user(
     auth: AuthUser,
     Json(mut input): Json<UpdateUser>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let max_avatar_size = state.settings.load().max_avatar_size as usize;
+
     // Process avatar data URI
     if let Some(ref avatar) = input.avatar {
         if avatar.starts_with("data:") {
@@ -38,7 +40,7 @@ pub async fn update_current_user(
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
             let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "avatars", &auth.user_id, avatar)
+                storage::save_avatar_image(&state.storage_path, "avatars", &auth.user_id, avatar, max_avatar_size)
                     .await?;
             input.avatar = Some(url);
         } else if avatar.is_empty() {
@@ -60,7 +62,7 @@ pub async fn update_current_user(
                 let _ = storage::delete_file(&state.storage_path, old_banner).await;
             }
             let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "banners", &auth.user_id, banner)
+                storage::save_avatar_image(&state.storage_path, "banners", &auth.user_id, banner, max_avatar_size)
                     .await?;
             input.banner = Some(url);
         } else if banner.is_empty() {

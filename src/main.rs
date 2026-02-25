@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -104,6 +105,10 @@ async fn run_main_server(config: Config) {
 
     let gateway_tx_arc = Arc::new(RwLock::new(Some(gateway_tx)));
 
+    let settings = accordserver::db::settings::get_settings(&db)
+        .await
+        .unwrap_or_default();
+
     let state = AppState {
         db,
         voice_states: Arc::new(DashMap::new()),
@@ -114,6 +119,7 @@ async fn run_main_server(config: Config) {
         livekit_client,
         rate_limits: Arc::new(DashMap::new()),
         storage_path,
+        settings: Arc::new(ArcSwap::from_pointee(settings)),
     };
 
     // Ensure a default invite exists and display it
