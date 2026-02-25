@@ -9,6 +9,7 @@ use crate::models::channel::{ChannelPositionUpdate, ChannelRow, CreateChannel};
 use crate::models::permission::PermissionOverwrite;
 use crate::models::space::{CreateSpace, UpdateSpace};
 use crate::state::AppState;
+use crate::storage;
 
 pub async fn create_space(
     state: State<AppState>,
@@ -45,9 +46,51 @@ pub async fn update_space(
     state: State<AppState>,
     Path(space_id): Path<String>,
     auth: AuthUser,
-    Json(input): Json<UpdateSpace>,
+    Json(mut input): Json<UpdateSpace>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_space").await?;
+
+    // Process icon data URI
+    if let Some(ref icon) = input.icon {
+        if icon.starts_with("data:") {
+            let old_space = db::spaces::get_space_row(&state.db, &space_id).await?;
+            if let Some(ref old_icon) = old_space.icon {
+                let _ = storage::delete_file(&state.storage_path, old_icon).await;
+            }
+            let (url, _, _, _) =
+                storage::save_avatar_image(&state.storage_path, "icons", &space_id, icon).await?;
+            input.icon = Some(url);
+        } else if icon.is_empty() {
+            let old_space = db::spaces::get_space_row(&state.db, &space_id).await?;
+            if let Some(ref old_icon) = old_space.icon {
+                let _ = storage::delete_file(&state.storage_path, old_icon).await;
+            }
+            storage::delete_avatar(&state.storage_path, "icons", &space_id).await?;
+            // Keep as Some("") — DB layer will treat empty string as NULL
+        }
+    }
+
+    // Process banner data URI
+    if let Some(ref banner) = input.banner {
+        if banner.starts_with("data:") {
+            let old_space = db::spaces::get_space_row(&state.db, &space_id).await?;
+            if let Some(ref old_banner) = old_space.banner {
+                let _ = storage::delete_file(&state.storage_path, old_banner).await;
+            }
+            let (url, _, _, _) =
+                storage::save_avatar_image(&state.storage_path, "banners", &space_id, banner)
+                    .await?;
+            input.banner = Some(url);
+        } else if banner.is_empty() {
+            let old_space = db::spaces::get_space_row(&state.db, &space_id).await?;
+            if let Some(ref old_banner) = old_space.banner {
+                let _ = storage::delete_file(&state.storage_path, old_banner).await;
+            }
+            storage::delete_avatar(&state.storage_path, "banners", &space_id).await?;
+            // Keep as Some("") — DB layer will treat empty string as NULL
+        }
+    }
+
     let space = db::spaces::update_space(&state.db, &space_id, &input).await?;
     Ok(Json(serde_json::json!({ "data": space })))
 }

@@ -127,6 +127,23 @@ pub async fn update_member(
             .await?;
     }
 
+    if let Some(ref avatar) = input.avatar {
+        if avatar.is_empty() {
+            sqlx::query("UPDATE members SET avatar = NULL WHERE space_id = ? AND user_id = ?")
+                .bind(space_id)
+                .bind(user_id)
+                .execute(pool)
+                .await?;
+        } else {
+            sqlx::query("UPDATE members SET avatar = ? WHERE space_id = ? AND user_id = ?")
+                .bind(avatar)
+                .bind(space_id)
+                .bind(user_id)
+                .execute(pool)
+                .await?;
+        }
+    }
+
     if let Some(mute) = input.mute {
         sqlx::query("UPDATE members SET mute = ? WHERE space_id = ? AND user_id = ?")
             .bind(mute)

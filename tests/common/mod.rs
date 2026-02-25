@@ -55,7 +55,7 @@ impl TestServer {
 
         let storage_path = storage::temp_storage_path();
         // Create storage subdirectories
-        for subdir in &["emojis", "sounds"] {
+        for subdir in &["emojis", "sounds", "avatars", "icons", "banners"] {
             std::fs::create_dir_all(storage_path.join(subdir)).ok();
         }
 
@@ -69,6 +69,7 @@ impl TestServer {
         let state = AppState {
             db: pool,
             voice_states: Arc::new(DashMap::new()),
+            presences: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
             gateway_tx: Arc::new(RwLock::new(Some(gateway_tx))),
             test_mode: true,

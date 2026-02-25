@@ -65,12 +65,20 @@ pub async fn update_user(
         values.push(display_name.clone());
     }
     if let Some(ref avatar) = input.avatar {
-        sets.push("avatar = ?");
-        values.push(avatar.clone());
+        if avatar.is_empty() {
+            sets.push("avatar = NULL");
+        } else {
+            sets.push("avatar = ?");
+            values.push(avatar.clone());
+        }
     }
     if let Some(ref banner) = input.banner {
-        sets.push("banner = ?");
-        values.push(banner.clone());
+        if banner.is_empty() {
+            sets.push("banner = NULL");
+        } else {
+            sets.push("banner = ?");
+            values.push(banner.clone());
+        }
     }
     if let Some(ref bio) = input.bio {
         sets.push("bio = ?");

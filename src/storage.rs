@@ -3,15 +3,19 @@ use std::path::{Path, PathBuf};
 use crate::error::AppError;
 
 pub const MAX_EMOJI_SIZE: usize = 256 * 1024; // 256 KB
+pub const MAX_AVATAR_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 pub const MAX_SOUND_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 pub const MAX_ATTACHMENT_SIZE: usize = 25 * 1024 * 1024; // 25 MB
 
 pub const ALLOWED_IMAGE_TYPES: &[&str] = &["image/png", "image/gif", "image/webp"];
 pub const ALLOWED_AUDIO_TYPES: &[&str] = &["audio/ogg", "audio/mpeg", "audio/wav"];
 
-/// Parse a `data:<mime>;base64,<data>` URI for images.
+/// Parse a `data:<mime>;base64,<data>` URI for images with a custom size limit.
 /// Returns `(decoded_bytes, content_type, is_animated)`.
-pub fn validate_image_data_uri(data: &str) -> Result<(Vec<u8>, String, bool), AppError> {
+pub fn validate_image_data_uri_with_limit(
+    data: &str,
+    max_size: usize,
+) -> Result<(Vec<u8>, String, bool), AppError> {
     let rest = data
         .strip_prefix("data:")
         .ok_or_else(|| AppError::BadRequest("image must be a data URI".to_string()))?;
@@ -26,15 +30,27 @@ pub fn validate_image_data_uri(data: &str) -> Result<(Vec<u8>, String, bool), Ap
     }
 
     let bytes = base64_decode(b64)?;
-    if bytes.len() > MAX_EMOJI_SIZE {
+    if bytes.len() > max_size {
+        if max_size >= 1024 * 1024 {
+            return Err(AppError::PayloadTooLarge(format!(
+                "image exceeds maximum size of {} MB",
+                max_size / (1024 * 1024)
+            )));
+        }
         return Err(AppError::PayloadTooLarge(format!(
             "image exceeds maximum size of {} KB",
-            MAX_EMOJI_SIZE / 1024
+            max_size / 1024
         )));
     }
 
     let is_animated = mime == "image/gif";
     Ok((bytes, mime.to_string(), is_animated))
+}
+
+/// Parse a `data:<mime>;base64,<data>` URI for images.
+/// Returns `(decoded_bytes, content_type, is_animated)`.
+pub fn validate_image_data_uri(data: &str) -> Result<(Vec<u8>, String, bool), AppError> {
+    validate_image_data_uri_with_limit(data, MAX_EMOJI_SIZE)
 }
 
 /// Parse a `data:<mime>;base64,<data>` URI for audio.
@@ -116,6 +132,67 @@ pub async fn save_base64_audio(
 
     let relative_url = format!("/cdn/sounds/{space_id}/{filename}");
     Ok((relative_url, content_type, size))
+}
+
+/// Save a base64-encoded avatar/icon/banner image to disk.
+/// `category` should be `"avatars"`, `"icons"`, or `"banners"`.
+/// Returns `(relative_url, content_type, file_size, is_animated)`.
+pub async fn save_avatar_image(
+    storage_path: &Path,
+    category: &str,
+    entity_id: &str,
+    data: &str,
+) -> Result<(String, String, usize, bool), AppError> {
+    let (bytes, content_type, is_animated) =
+        validate_image_data_uri_with_limit(data, MAX_AVATAR_SIZE)?;
+    let ext = mime_to_ext(&content_type);
+    let size = bytes.len();
+
+    let dir = storage_path.join(category);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to create {category} directory: {e}")))?;
+
+    // Delete any existing files for this entity (handles extension changes on re-upload)
+    delete_avatar(storage_path, category, entity_id).await?;
+
+    let filename = format!("{entity_id}.{ext}");
+    let file_path = dir.join(&filename);
+    tokio::fs::write(&file_path, &bytes)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to write {category} file: {e}")))?;
+
+    let relative_url = format!("/cdn/{category}/{filename}");
+    Ok((relative_url, content_type, size, is_animated))
+}
+
+/// Delete all files matching `entity_id.*` in the category directory.
+/// Handles extension changes on re-upload.
+pub async fn delete_avatar(
+    storage_path: &Path,
+    category: &str,
+    entity_id: &str,
+) -> Result<(), AppError> {
+    let dir = storage_path.join(category);
+    if !dir.exists() {
+        return Ok(());
+    }
+    let mut entries = tokio::fs::read_dir(&dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to read {category} directory: {e}")))?;
+    let prefix = format!("{entity_id}.");
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to read directory entry: {e}")))?
+    {
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with(&prefix) {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Save an uploaded attachment file to disk.
