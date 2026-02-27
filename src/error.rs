@@ -92,7 +92,58 @@ impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         match &e {
             sqlx::Error::RowNotFound => AppError::NotFound("resource not found".to_string()),
+            sqlx::Error::Database(db_err) => {
+                match db_err.code().as_deref() {
+                    // SQLITE_CONSTRAINT_UNIQUE (2067)
+                    Some("2067") => {
+                        let field = extract_constraint_field(db_err.message());
+                        tracing::warn!("unique constraint violation: {}", db_err.message());
+                        match field {
+                            Some(f) => AppError::Conflict(format!("{f} already exists")),
+                            None => AppError::Conflict("resource already exists".to_string()),
+                        }
+                    }
+                    // SQLITE_CONSTRAINT_NOTNULL (1299)
+                    Some("1299") => {
+                        let field = extract_constraint_field(db_err.message());
+                        tracing::warn!("not-null constraint violation: {}", db_err.message());
+                        match field {
+                            Some(f) => {
+                                AppError::BadRequest(format!("missing required field: {f}"))
+                            }
+                            None => AppError::BadRequest("missing required field".to_string()),
+                        }
+                    }
+                    // SQLITE_CONSTRAINT_FOREIGNKEY (787)
+                    Some("787") => {
+                        tracing::warn!("foreign key constraint violation: {}", db_err.message());
+                        AppError::BadRequest(
+                            "referenced resource does not exist".to_string(),
+                        )
+                    }
+                    // SQLITE_CONSTRAINT_CHECK (275)
+                    Some("275") => {
+                        tracing::warn!("check constraint violation: {}", db_err.message());
+                        AppError::BadRequest("invalid field value".to_string())
+                    }
+                    _ => AppError::Database(e),
+                }
+            }
             _ => AppError::Database(e),
         }
     }
+}
+
+/// Extract the column name from a SQLite constraint error message.
+///
+/// Messages look like `"NOT NULL constraint failed: table.column"` or
+/// `"UNIQUE constraint failed: table.column"`.  For composite constraints
+/// (e.g. `"table.col1, table.col2"`) we return `None` to avoid a confusing
+/// message.
+fn extract_constraint_field(message: &str) -> Option<&str> {
+    let (_, rest) = message.rsplit_once(": ")?;
+    if rest.contains(',') {
+        return None;
+    }
+    rest.split('.').last()
 }
