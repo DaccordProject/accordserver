@@ -10,6 +10,8 @@ pub fn join_voice_channel(
     session_id: &str,
     self_mute: bool,
     self_deaf: bool,
+    self_video: bool,
+    self_stream: bool,
 ) -> (VoiceState, Option<String>) {
     let previous_channel = state
         .voice_states
@@ -25,8 +27,8 @@ pub fn join_voice_channel(
         mute: false,
         self_deaf,
         self_mute,
-        self_stream: false,
-        self_video: false,
+        self_stream,
+        self_video,
         suppress: false,
     };
 
@@ -35,6 +37,25 @@ pub fn join_voice_channel(
         .insert(user_id.to_string(), voice_state.clone());
 
     (voice_state, previous_channel)
+}
+
+/// Update an existing voice state's flags in-place without changing channel or session.
+/// Returns the updated VoiceState, or None if the user is not in voice.
+pub fn update_voice_state(
+    state: &AppState,
+    user_id: &str,
+    self_mute: bool,
+    self_deaf: bool,
+    self_video: bool,
+    self_stream: bool,
+) -> Option<VoiceState> {
+    let mut entry = state.voice_states.get_mut(user_id)?;
+    let vs = entry.value_mut();
+    vs.self_mute = self_mute;
+    vs.self_deaf = self_deaf;
+    vs.self_video = self_video;
+    vs.self_stream = self_stream;
+    Some(vs.clone())
 }
 
 /// Leave voice. Returns the old VoiceState if the user was in voice.

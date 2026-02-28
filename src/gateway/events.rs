@@ -77,4 +77,6 @@ pub struct VoiceStateUpdateData {
     pub channel_id: Option<String>,
     pub self_mute: Option<bool>,
     pub self_deaf: Option<bool>,
+    pub self_video: Option<bool>,
+    pub self_stream: Option<bool>,
 }

@@ -73,6 +73,8 @@ pub async fn join_voice(
         &session_id,
         self_mute,
         self_deaf,
+        false,
+        false,
     );
 
     let lk = state.livekit_client.as_ref()

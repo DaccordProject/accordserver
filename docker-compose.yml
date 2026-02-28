@@ -1,31 +1,62 @@
 services:
   accordserver:
-    build: .
-    ports:
-      - "39099:39099"
+    image: ghcr.io/daccordproject/accordserver:latest
+    networks:
+      - app-network
     volumes:
-      - accord-data:/app/data
-      - ./cdn:/app/cdn
+      - accordserver_data:/app/data
     environment:
-      PORT: 39099
-      DATABASE_URL: sqlite:/app/data/accord.db?mode=rwc
+      DATABASE_URL: sqlite:data/accord.db?mode=rwc
       RUST_LOG: accordserver=debug,tower_http=debug
       LIVEKIT_INTERNAL_URL: http://livekit:7880
-      LIVEKIT_EXTERNAL_URL: ws://localhost:7880
+      LIVEKIT_EXTERNAL_URL: wss://livekit.example.com
       LIVEKIT_API_KEY: devkey
       LIVEKIT_API_SECRET: secret
+      ACCORD_VOICE_BACKEND: livekit
     depends_on:
       - livekit
+    labels:
+      caddy: chat.example.com
+      caddy.reverse_proxy: "{{upstreams 39099}}"
 
   livekit:
     image: livekit/livekit-server:latest
-    command: --dev --keys '{"devkey": "secret"}'
+    container_name: livekit
+    networks:
+      - app-network
+    command:
+      - "--dev"
+      - "--keys"
+      - "devkey: secret"
     ports:
       - "7880:7880"
       - "7881:7881"
       - "7882:7882/udp"
+    labels:
+      caddy: livekit.example.com
+      caddy.reverse_proxy: "{{upstreams 7880}}"
+
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:ci-alpine
+    container_name: caddy
+    ports:
+      - "443:443"
+      - "80:80"
     environment:
-      LIVEKIT_KEYS: '{"devkey": "secret"}'
+      - CADDY_INGRESS_NETWORKS=app-network
+    networks:
+      - app-network
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - caddy_data:/data
+    restart: unless-stopped
+
+networks:
+  app-network:
+    name: app-network
+    driver: bridge
+    external: true
 
 volumes:
-  accord-data:
+  caddy_data:
+  accordserver_data:
