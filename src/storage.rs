@@ -235,13 +235,38 @@ pub async fn save_attachment(
 }
 
 /// Sanitize a filename to prevent directory traversal and other issues.
+/// Only allows alphanumeric characters, hyphens, underscores, and a single dot for extension.
 fn sanitize_filename(name: &str) -> String {
-    let name = name.replace(['/', '\\', '\0'], "_");
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Remove leading dots (hidden files / path traversal)
     let name = name.trim_start_matches('.');
-    if name.is_empty() {
+    // Collapse consecutive dots to prevent path tricks
+    let mut result = String::new();
+    let mut last_was_dot = false;
+    for c in name.chars() {
+        if c == '.' {
+            if !last_was_dot {
+                result.push(c);
+            }
+            last_was_dot = true;
+        } else {
+            last_was_dot = false;
+            result.push(c);
+        }
+    }
+    if result.is_empty() {
         "attachment".to_string()
     } else {
-        name.to_string()
+        result
     }
 }
 
@@ -250,8 +275,14 @@ pub async fn delete_file(storage_path: &Path, relative_path: &str) -> Result<(),
     // Strip the leading `/cdn/` to get the path relative to storage_path
     let rel = relative_path.strip_prefix("/cdn/").unwrap_or(relative_path);
     let file_path = storage_path.join(rel);
-    if file_path.exists() {
-        tokio::fs::remove_file(&file_path)
+
+    // Canonicalize both paths to prevent directory traversal
+    let canonical_storage = storage_path.canonicalize().unwrap_or_else(|_| storage_path.to_path_buf());
+    if let Ok(canonical_file) = file_path.canonicalize() {
+        if !canonical_file.starts_with(&canonical_storage) {
+            return Err(AppError::BadRequest("invalid file path".to_string()));
+        }
+        tokio::fs::remove_file(&canonical_file)
             .await
             .map_err(|e| AppError::Internal(format!("failed to delete file: {e}")))?;
     }

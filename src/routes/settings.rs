@@ -10,12 +10,34 @@ use crate::middleware::permissions::require_server_admin;
 use crate::models::settings::UpdateServerSettings;
 use crate::state::AppState;
 
+/// Admin-only: returns all server settings.
 pub async fn get_settings(
+    state: State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+    let settings = state.settings.load();
+    Ok(Json(serde_json::json!({ "data": *settings })))
+}
+
+/// Public: returns client-facing settings (upload limits, server name, etc.).
+pub async fn get_public_settings(
     state: State<AppState>,
     _auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let settings = state.settings.load();
-    Ok(Json(serde_json::json!({ "data": *settings })))
+    Ok(Json(serde_json::json!({
+        "data": {
+            "max_emoji_size": settings.max_emoji_size,
+            "max_avatar_size": settings.max_avatar_size,
+            "max_sound_size": settings.max_sound_size,
+            "max_attachment_size": settings.max_attachment_size,
+            "max_attachments_per_message": settings.max_attachments_per_message,
+            "server_name": settings.server_name,
+            "registration_policy": settings.registration_policy,
+            "motd": settings.motd,
+        }
+    })))
 }
 
 pub async fn update_settings(

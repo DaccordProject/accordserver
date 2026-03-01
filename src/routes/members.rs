@@ -108,7 +108,7 @@ pub async fn update_member(
     // Role changes require manage_roles + hierarchy checks
     if let Some(ref roles) = input.roles {
         require_permission(&state.db, &space_id, &auth, "manage_roles").await?;
-        require_hierarchy(&state.db, &space_id, &auth.user_id, &user_id).await?;
+        require_hierarchy(&state.db, &space_id, &auth, &user_id).await?;
         // Verify each role being assigned is below the actor's highest role
         for role_id in roles {
             let role = db::roles::get_role_row(&state.db, role_id).await?;
@@ -161,7 +161,7 @@ pub async fn kick_member(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "kick_members").await?;
-    require_hierarchy(&state.db, &space_id, &auth.user_id, &user_id).await?;
+    require_hierarchy(&state.db, &space_id, &auth, &user_id).await?;
     db::members::remove_member(&state.db, &space_id, &user_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }

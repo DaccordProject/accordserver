@@ -1,22 +1,31 @@
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
 use crate::error::AppError;
 use crate::models::settings::{ServerSettings, UpdateServerSettings};
 
 pub async fn get_settings(pool: &SqlitePool) -> Result<ServerSettings, AppError> {
-    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, Option<String>)>(
-        "SELECT max_emoji_size, max_avatar_size, max_sound_size, max_attachment_size, max_attachments_per_message, updated_at FROM server_settings WHERE id = 1",
+    let row = sqlx::query(
+        "SELECT max_emoji_size, max_avatar_size, max_sound_size, max_attachment_size, \
+         max_attachments_per_message, server_name, registration_policy, max_spaces, \
+         max_members_per_space, motd, public_listing, updated_at \
+         FROM server_settings WHERE id = 1",
     )
     .fetch_one(pool)
     .await?;
 
     Ok(ServerSettings {
-        max_emoji_size: row.0,
-        max_avatar_size: row.1,
-        max_sound_size: row.2,
-        max_attachment_size: row.3,
-        max_attachments_per_message: row.4,
-        updated_at: row.5,
+        max_emoji_size: row.get("max_emoji_size"),
+        max_avatar_size: row.get("max_avatar_size"),
+        max_sound_size: row.get("max_sound_size"),
+        max_attachment_size: row.get("max_attachment_size"),
+        max_attachments_per_message: row.get("max_attachments_per_message"),
+        server_name: row.get("server_name"),
+        registration_policy: row.get("registration_policy"),
+        max_spaces: row.get("max_spaces"),
+        max_members_per_space: row.get("max_members_per_space"),
+        motd: row.get("motd"),
+        public_listing: row.get("public_listing"),
+        updated_at: row.get("updated_at"),
     })
 }
 
@@ -24,7 +33,6 @@ pub async fn update_settings(
     pool: &SqlitePool,
     input: &UpdateServerSettings,
 ) -> Result<ServerSettings, AppError> {
-    // Build dynamic SET clause for only the provided fields
     let mut sets = Vec::new();
     if input.max_emoji_size.is_some() {
         sets.push("max_emoji_size = ?");
@@ -40,6 +48,24 @@ pub async fn update_settings(
     }
     if input.max_attachments_per_message.is_some() {
         sets.push("max_attachments_per_message = ?");
+    }
+    if input.server_name.is_some() {
+        sets.push("server_name = ?");
+    }
+    if input.registration_policy.is_some() {
+        sets.push("registration_policy = ?");
+    }
+    if input.max_spaces.is_some() {
+        sets.push("max_spaces = ?");
+    }
+    if input.max_members_per_space.is_some() {
+        sets.push("max_members_per_space = ?");
+    }
+    if input.motd.is_some() {
+        sets.push("motd = ?");
+    }
+    if input.public_listing.is_some() {
+        sets.push("public_listing = ?");
     }
 
     if sets.is_empty() {
@@ -64,6 +90,24 @@ pub async fn update_settings(
         query = query.bind(v);
     }
     if let Some(v) = input.max_attachments_per_message {
+        query = query.bind(v);
+    }
+    if let Some(ref v) = input.server_name {
+        query = query.bind(v);
+    }
+    if let Some(ref v) = input.registration_policy {
+        query = query.bind(v);
+    }
+    if let Some(v) = input.max_spaces {
+        query = query.bind(v);
+    }
+    if let Some(v) = input.max_members_per_space {
+        query = query.bind(v);
+    }
+    if let Some(ref v) = input.motd {
+        query = query.bind(v);
+    }
+    if let Some(v) = input.public_listing {
         query = query.bind(v);
     }
 

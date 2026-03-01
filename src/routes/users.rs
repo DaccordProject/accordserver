@@ -29,6 +29,30 @@ pub async fn update_current_user(
     auth: AuthUser,
     Json(mut input): Json<UpdateUser>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Input validation
+    if let Some(ref username) = input.username {
+        let u = username.trim();
+        if u.is_empty() || u.len() > 32 {
+            return Err(crate::error::AppError::BadRequest(
+                "username must be between 1 and 32 characters".into(),
+            ));
+        }
+    }
+    if let Some(ref display_name) = input.display_name {
+        if display_name.len() > 32 {
+            return Err(crate::error::AppError::BadRequest(
+                "display name must be at most 32 characters".into(),
+            ));
+        }
+    }
+    if let Some(ref bio) = input.bio {
+        if bio.len() > 2000 {
+            return Err(crate::error::AppError::BadRequest(
+                "bio must be at most 2000 characters".into(),
+            ));
+        }
+    }
+
     let max_avatar_size = state.settings.load().max_avatar_size as usize;
 
     // Process avatar data URI

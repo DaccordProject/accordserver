@@ -16,6 +16,22 @@ pub async fn create_space(
     auth: AuthUser,
     Json(input): Json<CreateSpace>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Input validation
+    let name = input.name.trim();
+    if name.is_empty() || name.len() > 100 {
+        return Err(AppError::BadRequest("space name must be between 1 and 100 characters".into()));
+    }
+    if let Some(ref slug) = input.slug {
+        if slug.len() > 100 {
+            return Err(AppError::BadRequest("slug must be at most 100 characters".into()));
+        }
+    }
+    if let Some(ref desc) = input.description {
+        if desc.len() > 1000 {
+            return Err(AppError::BadRequest("description must be at most 1000 characters".into()));
+        }
+    }
+
     let space = db::spaces::create_space(&state.db, &auth.user_id, &input).await?;
     Ok(Json(serde_json::json!({ "data": space })))
 }
@@ -134,6 +150,28 @@ pub async fn create_channel(
     Json(input): Json<CreateChannel>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_channels").await?;
+
+    // Input validation
+    let name = input.name.trim();
+    if name.is_empty() || name.len() > 100 {
+        return Err(AppError::BadRequest("channel name must be between 1 and 100 characters".into()));
+    }
+    if let Some(ref topic) = input.topic {
+        if topic.len() > 1024 {
+            return Err(AppError::BadRequest("topic must be at most 1024 characters".into()));
+        }
+    }
+    if let Some(bitrate) = input.bitrate {
+        if !(0..=384_000).contains(&bitrate) {
+            return Err(AppError::BadRequest("bitrate must be between 0 and 384000".into()));
+        }
+    }
+    if let Some(user_limit) = input.user_limit {
+        if !(0..=99).contains(&user_limit) {
+            return Err(AppError::BadRequest("user_limit must be between 0 and 99".into()));
+        }
+    }
+
     let channel = db::channels::create_channel(&state.db, &space_id, &input).await?;
     // Newly created channel has no overwrites
     Ok(Json(

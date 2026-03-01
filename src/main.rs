@@ -28,6 +28,10 @@ fn print_banner(config: &Config) {
         Some(lk) => format!("livekit ({}, ext: {})", lk.internal_url, lk.external_url),
         None => "disabled".to_string(),
     };
+    let master = match &config.master_server {
+        Some(ms) => format!("{} → {}", ms.server_name, ms.url),
+        None => "disabled".to_string(),
+    };
 
     eprintln!();
     eprintln!("  \x1b[1;36maccord\x1b[0m \x1b[2mv{version}\x1b[0m");
@@ -35,6 +39,7 @@ fn print_banner(config: &Config) {
     eprintln!("  \x1b[2mport\x1b[0m         {}", config.port);
     eprintln!("  \x1b[2mdatabase\x1b[0m     {}", config.database_url);
     eprintln!("  \x1b[2mvoice\x1b[0m        {voice}");
+    eprintln!("  \x1b[2mmaster\x1b[0m       {master}");
 
     if config.test_mode {
         eprintln!();
@@ -132,6 +137,10 @@ async fn run_main_server(config: Config) {
         }
     }
 
+    if let Some(ref master_config) = config.master_server {
+        tokio::spawn(accordserver::master::run(master_config.clone()));
+    }
+
     let app = accordserver::routes::router(state);
 
     let listener = TcpListener::bind(("0.0.0.0", config.port))
@@ -146,4 +155,8 @@ async fn run_main_server(config: Config) {
     eprintln!();
 
     axum::serve(listener, app).await.expect("server error");
+
+    if let Some(ref master_config) = config.master_server {
+        accordserver::master::deregister_from(master_config).await;
+    }
 }

@@ -29,6 +29,22 @@ pub async fn register(
     State(state): State<AppState>,
     Json(input): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Check registration policy
+    let policy = &state.settings.load().registration_policy;
+    match policy.as_str() {
+        "closed" => {
+            return Err(AppError::Forbidden(
+                "registration is currently closed".to_string(),
+            ));
+        }
+        "invite_only" => {
+            return Err(AppError::Forbidden(
+                "registration requires an invitation".to_string(),
+            ));
+        }
+        _ => {} // "open" or any other value allows registration
+    }
+
     // Validate username length
     let username = input.username.trim();
     if username.is_empty() || username.len() > 32 {
@@ -57,9 +73,14 @@ pub async fn register(
         return Err(AppError::Conflict("username already taken".to_string()));
     }
 
-    // Hash password with Argon2id
+    // Hash password with Argon2id (OWASP-recommended params: 19 MiB memory, 3 iterations)
     let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
+    let argon2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon2::Params::new(19456, 3, 1, None)
+            .map_err(|e| AppError::Internal(format!("argon2 params failed: {e}")))?,
+    );
     let password_hash = argon2
         .hash_password(input.password.as_bytes(), &salt)
         .map_err(|e| AppError::Internal(format!("password hashing failed: {e}")))?
@@ -137,22 +158,34 @@ pub async fn login(
     Json(input): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Look up user by username (must not be a bot, must have password_hash)
-    let row = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, password_hash FROM users WHERE username = ? AND bot = false AND password_hash IS NOT NULL",
+    let row = sqlx::query_as::<_, (String, String, bool, bool)>(
+        "SELECT id, password_hash, disabled, force_password_reset FROM users WHERE username = ? AND bot = false AND password_hash IS NOT NULL",
     )
     .bind(&input.username)
     .fetch_optional(&state.db)
     .await
     .map_err(AppError::from)?;
 
-    let (user_id, stored_hash) = match row {
+    let (user_id, stored_hash, disabled, force_password_reset) = match row {
         Some(r) => r,
         None => {
+            // Run a dummy Argon2 verification to prevent timing-based user enumeration.
+            // Without this, "user not found" returns instantly while "wrong password"
+            // takes ~100ms for Argon2, leaking whether a username exists.
+            let dummy_salt = SaltString::generate(&mut OsRng);
+            let _ = Argon2::default().hash_password(b"dummy", &dummy_salt);
             return Err(AppError::Unauthorized(
                 "invalid credentials".to_string(),
             ));
         }
     };
+
+    // Disabled users cannot log in
+    if disabled {
+        return Err(AppError::Forbidden(
+            "account is disabled".to_string(),
+        ));
+    }
 
     // Verify password
     let parsed_hash = PasswordHash::new(&stored_hash)
@@ -184,12 +217,15 @@ pub async fn login(
         .await
         .map_err(AppError::from)?;
 
-    Ok(Json(serde_json::json!({
-        "data": {
-            "user": user,
-            "token": token
-        }
-    })))
+    let mut data = serde_json::json!({
+        "user": user,
+        "token": token
+    });
+    if force_password_reset {
+        data["force_password_reset"] = serde_json::json!(true);
+    }
+
+    Ok(Json(serde_json::json!({ "data": data })))
 }
 
 pub async fn logout(

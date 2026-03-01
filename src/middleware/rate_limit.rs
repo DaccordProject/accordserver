@@ -22,7 +22,7 @@ pub async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    // Derive a key from the Authorization header (hashed) or fall back to a default.
+    // Derive a key from the Authorization header (hashed) or fall back to IP-based keying.
     let key = req
         .headers()
         .get("Authorization")
@@ -32,7 +32,26 @@ pub async fn rate_limit_middleware(
             hasher.update(auth.as_bytes());
             format!("auth:{:x}", hasher.finalize())
         })
-        .unwrap_or_else(|| "anon".to_string());
+        .unwrap_or_else(|| {
+            // Use IP-based keying for unauthenticated requests to prevent
+            // one attacker from exhausting the bucket for all anonymous users.
+            let ip = req
+                .headers()
+                .get("X-Forwarded-For")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(|s| s.trim().to_string())
+                .or_else(|| {
+                    req.headers()
+                        .get("X-Real-IP")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let mut hasher = Sha256::new();
+            hasher.update(ip.as_bytes());
+            format!("ip:{:x}", hasher.finalize())
+        });
 
     let now = Instant::now();
 

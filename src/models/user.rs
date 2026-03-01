@@ -12,6 +12,7 @@ pub struct User {
     pub bot: bool,
     pub system: bool,
     pub is_admin: bool,
+    pub disabled: bool,
     pub flags: i64,
     pub public_flags: i64,
     pub created_at: String,
@@ -31,4 +32,13 @@ pub struct UpdateUser {
     pub banner: Option<String>,
     pub accent_color: Option<i64>,
     pub bio: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminUpdateUser {
+    pub is_admin: Option<bool>,
+    pub disabled: Option<bool>,
+    pub force_password_reset: Option<bool>,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
 }
