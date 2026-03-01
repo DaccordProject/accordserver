@@ -1,7 +1,7 @@
 use sqlx::{Row, SqlitePool};
 
 use crate::error::AppError;
-use crate::models::space::{CreateSpace, SpaceRow, UpdateSpace};
+use crate::models::space::{CreateSpace, PublicSpaceRow, SpaceRow, UpdateSpace};
 use crate::slug;
 use crate::snowflake;
 
@@ -247,11 +247,31 @@ pub async fn delete_space(pool: &SqlitePool, space_id: &str) -> Result<(), AppEr
     Ok(())
 }
 
-pub async fn list_public_spaces(pool: &SqlitePool) -> Result<Vec<SpaceRow>, AppError> {
-    let rows = sqlx::query(&format!("{SELECT_SPACES} WHERE public = 1"))
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().map(row_to_space).collect())
+pub async fn list_public_spaces(pool: &SqlitePool) -> Result<Vec<PublicSpaceRow>, AppError> {
+    let rows = sqlx::query(
+        "SELECT s.id, s.name, s.slug, s.description, s.icon, s.public,
+                COUNT(m.user_id) AS member_count
+         FROM spaces s
+         LEFT JOIN members m ON m.space_id = s.id
+         WHERE s.public = 1
+         GROUP BY s.id
+         ORDER BY s.name",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PublicSpaceRow {
+            id: row.get("id"),
+            name: row.get("name"),
+            slug: row.get("slug"),
+            description: row.get("description"),
+            icon: row.get("icon"),
+            member_count: row.get("member_count"),
+            public: row.get("public"),
+        })
+        .collect())
 }
 
 pub async fn list_space_ids_for_user(

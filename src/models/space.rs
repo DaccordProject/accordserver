@@ -35,6 +35,18 @@ pub struct Space {
     pub created_at: String,
 }
 
+/// Public space listing with member count for directory/discovery use.
+#[derive(Debug, Clone, Serialize)]
+pub struct PublicSpaceRow {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub icon: Option<String>,
+    pub member_count: i64,
+    pub public: bool,
+}
+
 /// Lightweight version from the DB row before loading relations.
 #[derive(Debug, Clone, Serialize)]
 pub struct SpaceRow {
