@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod attachments;
 pub mod auth;
 pub mod bans;

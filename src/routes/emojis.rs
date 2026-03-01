@@ -25,6 +25,7 @@ pub async fn get_emoji(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_membership(&state.db, &space_id, &auth.user_id).await?;
+    db::emojis::require_emoji_in_space(&state.db, &emoji_id, &space_id).await?;
     let emoji = db::emojis::get_emoji(&state.db, &emoji_id).await?;
     Ok(Json(serde_json::json!({ "data": emoji })))
 }
@@ -124,6 +125,7 @@ pub async fn update_emoji(
     Json(input): Json<UpdateEmoji>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_emojis").await?;
+    db::emojis::require_emoji_in_space(&state.db, &emoji_id, &space_id).await?;
     let emoji = db::emojis::update_emoji(&state.db, &emoji_id, &input).await?;
 
     // Broadcast to gateway
@@ -153,6 +155,7 @@ pub async fn delete_emoji(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_emojis").await?;
+    db::emojis::require_emoji_in_space(&state.db, &emoji_id, &space_id).await?;
 
     let image_path = db::emojis::delete_emoji(&state.db, &emoji_id).await?;
 

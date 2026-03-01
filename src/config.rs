@@ -1,4 +1,14 @@
 #[derive(Debug, Clone)]
+pub struct MasterServerConfig {
+    pub url: String,
+    pub bearer_token: String,
+    pub server_id: String,
+    pub server_name: String,
+    pub public_url: String,
+    pub heartbeat_interval: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct LiveKitConfig {
     pub internal_url: String,
     pub external_url: String,
@@ -11,6 +21,7 @@ pub struct Config {
     pub database_url: String,
     pub test_mode: bool,
     pub livekit: Option<LiveKitConfig>,
+    pub master_server: Option<MasterServerConfig>,
     pub storage_path: std::path::PathBuf,
 }
 
@@ -34,6 +45,25 @@ impl Config {
                 }
             });
 
+        let master_server = std::env::var("MASTER_BEARER_TOKEN").ok().map(|bearer_token| {
+            let public_url = std::env::var("MASTER_SERVER_PUBLIC_URL")
+                .expect("MASTER_SERVER_PUBLIC_URL is required when MASTER_BEARER_TOKEN is set");
+            MasterServerConfig {
+                url: std::env::var("MASTER_SERVER_URL")
+                    .unwrap_or_else(|_| "https://master.daccord.gg".to_string()),
+                bearer_token,
+                server_id: std::env::var("MASTER_SERVER_ID")
+                    .unwrap_or_else(|_| crate::snowflake::generate()),
+                server_name: std::env::var("MASTER_SERVER_NAME")
+                    .unwrap_or_else(|_| "Accord Server".to_string()),
+                public_url,
+                heartbeat_interval: std::env::var("MASTER_HEARTBEAT_INTERVAL")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(60),
+            }
+        });
+
         let storage_path = std::env::var("ACCORD_STORAGE_PATH")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("./cdn"));
@@ -49,6 +79,7 @@ impl Config {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             livekit,
+            master_server,
             storage_path,
         }
     }
@@ -68,6 +99,12 @@ mod tests {
         std::env::remove_var("LIVEKIT_EXTERNAL_URL");
         std::env::remove_var("LIVEKIT_API_KEY");
         std::env::remove_var("LIVEKIT_API_SECRET");
+        std::env::remove_var("MASTER_BEARER_TOKEN");
+        std::env::remove_var("MASTER_SERVER_URL");
+        std::env::remove_var("MASTER_SERVER_ID");
+        std::env::remove_var("MASTER_SERVER_NAME");
+        std::env::remove_var("MASTER_SERVER_PUBLIC_URL");
+        std::env::remove_var("MASTER_HEARTBEAT_INTERVAL");
     }
 
     #[test]

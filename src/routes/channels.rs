@@ -182,6 +182,18 @@ pub async fn upsert_overwrite(
         }
     }
 
+    // Validate that role/member belongs to the same space as the channel
+    if input.overwrite_type == "role" {
+        let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+        if let Some(ref space_id) = channel.space_id {
+            let role = db::roles::get_role_row(&state.db, &overwrite_id).await
+                .map_err(|_| AppError::NotFound("role not found".into()))?;
+            if role.space_id != *space_id {
+                return Err(AppError::NotFound("role not found in this space".into()));
+            }
+        }
+    }
+
     let overwrite = PermissionOverwrite {
         id: overwrite_id,
         overwrite_type: input.overwrite_type,

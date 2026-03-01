@@ -24,13 +24,18 @@ fn hash_token(token: &str) -> String {
 
 async fn resolve_bot_token(pool: &SqlitePool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
-    let row = sqlx::query_as::<_, (String, bool)>(
-        "SELECT bt.user_id, u.is_admin FROM bot_tokens bt JOIN users u ON bt.user_id = u.id WHERE bt.token_hash = ?",
+    let row = sqlx::query_as::<_, (String, bool, bool)>(
+        "SELECT bt.user_id, u.is_admin, u.disabled FROM bot_tokens bt JOIN users u ON bt.user_id = u.id WHERE bt.token_hash = ?",
     )
     .bind(&token_hash)
     .fetch_optional(pool)
     .await
     .ok()??;
+
+    // Disabled users cannot authenticate
+    if row.2 {
+        return None;
+    }
 
     Some(AuthUser {
         user_id: row.0,
@@ -41,8 +46,8 @@ async fn resolve_bot_token(pool: &SqlitePool, token: &str) -> Option<AuthUser> {
 
 async fn resolve_bearer_token(pool: &SqlitePool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
-    let row = sqlx::query_as::<_, (String, String, bool)>(
-        "SELECT ut.user_id, ut.expires_at, u.is_admin FROM user_tokens ut JOIN users u ON ut.user_id = u.id WHERE ut.token_hash = ?",
+    let row = sqlx::query_as::<_, (String, String, bool, bool)>(
+        "SELECT ut.user_id, ut.expires_at, u.is_admin, u.disabled FROM user_tokens ut JOIN users u ON ut.user_id = u.id WHERE ut.token_hash = ?",
     )
     .bind(&token_hash)
     .fetch_optional(pool)
@@ -51,6 +56,11 @@ async fn resolve_bearer_token(pool: &SqlitePool, token: &str) -> Option<AuthUser
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     if row.1 < now {
+        return None;
+    }
+
+    // Disabled users cannot authenticate
+    if row.3 {
         return None;
     }
 
@@ -145,13 +155,11 @@ pub fn create_token_hash(token: &str) -> String {
     hash_token(token)
 }
 
-/// Generate a random token string.
+/// Generate a cryptographically secure random token string (256 bits of entropy).
 pub fn generate_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let random: u64 = rand::random();
-    format!("{ts:x}.{random:x}")
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let a: u128 = rng.gen();
+    let b: u128 = rng.gen();
+    format!("{a:032x}{b:032x}")
 }

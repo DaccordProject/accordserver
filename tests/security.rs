@@ -491,7 +491,7 @@ async fn test_non_member_can_create_invite() {
 
 #[tokio::test]
 async fn test_oversized_message_content() {
-    // No content length limit on messages (documented behavior)
+    // Message content is limited to 4000 characters
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;
     let space_id = server.create_space(&alice.user.id, "TestSpace").await;
@@ -505,14 +505,12 @@ async fn test_oversized_message_content() {
         &serde_json::json!({ "content": huge_content }),
     );
     let response = server.router().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = parse_body(response).await;
-    assert_eq!(body["data"]["content"].as_str().unwrap().len(), 100_000);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn test_oversized_username() {
-    // No username length limit on PATCH /users/@me (documented behavior)
+    // Display name is limited to 32 characters
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;
 
@@ -524,14 +522,12 @@ async fn test_oversized_username() {
         &serde_json::json!({ "display_name": huge_name }),
     );
     let response = server.router().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = parse_body(response).await;
-    assert_eq!(body["data"]["display_name"].as_str().unwrap().len(), 10_000);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn test_oversized_space_name() {
-    // No space name length limit (documented behavior)
+    // Space name is limited to 100 characters
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;
 
@@ -543,7 +539,7 @@ async fn test_oversized_space_name() {
         &serde_json::json!({ "name": huge_name }),
     );
     let response = server.router().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

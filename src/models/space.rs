@@ -83,6 +83,27 @@ pub struct CreateSpace {
     pub public: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AdminSpaceRow {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub icon: Option<String>,
+    pub owner_id: String,
+    pub member_count: i64,
+    pub public: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminUpdateSpace {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub owner_id: Option<String>,
+    pub public: Option<bool>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateSpace {
     pub name: Option<String>,

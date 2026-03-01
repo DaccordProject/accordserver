@@ -105,6 +105,17 @@ pub async fn create_message(
     Json(input): Json<CreateMessage>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
+
+    // Input validation
+    if input.content.len() > 4000 {
+        return Err(AppError::BadRequest("message content must be at most 4000 characters".into()));
+    }
+    if let Some(ref embeds) = input.embeds {
+        if embeds.len() > 10 {
+            return Err(AppError::BadRequest("at most 10 embeds per message".into()));
+        }
+    }
+
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
     let msg = db::messages::create_message(
         &state.db,

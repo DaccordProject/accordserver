@@ -29,6 +29,19 @@ fn row_to_emoji(row: EmojiRow, role_ids: Vec<String>) -> Emoji {
     }
 }
 
+/// Verify an emoji belongs to the given space. Returns an error if it doesn't.
+pub async fn require_emoji_in_space(pool: &SqlitePool, emoji_id: &str, space_id: &str) -> Result<(), AppError> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT space_id FROM emojis WHERE id = ?")
+        .bind(emoji_id)
+        .fetch_optional(pool)
+        .await?;
+    match row {
+        Some((sid,)) if sid == space_id => Ok(()),
+        Some(_) => Err(AppError::NotFound("emoji not found in this space".to_string())),
+        None => Err(AppError::NotFound("unknown_emoji".to_string())),
+    }
+}
+
 pub async fn get_emoji(pool: &SqlitePool, emoji_id: &str) -> Result<Emoji, AppError> {
     let row = sqlx::query_as::<_, EmojiRow>(
         "SELECT id, name, animated, managed, available, require_colons, creator_id, image_path FROM emojis WHERE id = ?"

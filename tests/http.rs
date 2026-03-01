@@ -1373,7 +1373,7 @@ async fn test_update_settings_admin() {
 
     let req = authenticated_json_request(
         Method::PATCH,
-        "/api/v1/settings",
+        "/api/v1/admin/settings",
         &admin.auth_header(),
         &serde_json::json!({
             "max_emoji_size": 512000,
@@ -1396,7 +1396,7 @@ async fn test_update_settings_non_admin_forbidden() {
 
     let req = authenticated_json_request(
         Method::PATCH,
-        "/api/v1/settings",
+        "/api/v1/admin/settings",
         &alice.auth_header(),
         &serde_json::json!({ "max_emoji_size": 512000 }),
     );
@@ -1413,7 +1413,7 @@ async fn test_upload_respects_custom_limit() {
     // Lower the emoji limit to 10 bytes
     let req = authenticated_json_request(
         Method::PATCH,
-        "/api/v1/settings",
+        "/api/v1/admin/settings",
         &admin.auth_header(),
         &serde_json::json!({ "max_emoji_size": 10 }),
     );

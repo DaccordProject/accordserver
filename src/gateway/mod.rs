@@ -132,6 +132,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         .collect();
 
     // Send READY event
+    let motd = state.settings.load().motd.clone();
     let ready = serde_json::json!({
         "op": events::opcode::EVENT,
         "seq": 1,
@@ -142,7 +143,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             "spaces": space_ids.iter().collect::<Vec<_>>(),
             "presences": presences_json,
             "api_version": "v1",
-            "server_version": env!("CARGO_PKG_VERSION")
+            "server_version": env!("CARGO_PKG_VERSION"),
+            "motd": motd
         }
     });
     if ws_sink
@@ -199,6 +201,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut last_heartbeat = tokio::time::Instant::now();
     let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
 
+    // Per-connection rate limit: max 120 messages per 60 seconds
+    const WS_RATE_LIMIT: u32 = 120;
+    const WS_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut ws_msg_count: u32 = 0;
+    let mut ws_rate_window_start = tokio::time::Instant::now();
+
     loop {
         tokio::select! {
             // Outgoing messages from the session channel
@@ -252,6 +260,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        // Per-connection rate limiting
+                        if ws_rate_window_start.elapsed() >= WS_RATE_WINDOW {
+                            ws_msg_count = 0;
+                            ws_rate_window_start = tokio::time::Instant::now();
+                        }
+                        ws_msg_count += 1;
+                        if ws_msg_count > WS_RATE_LIMIT {
+                            // Drop excess messages silently to prevent flooding
+                            continue;
+                        }
+
                         if let Ok(gw_msg) = serde_json::from_str::<GatewayMessage>(&text) {
                             match gw_msg.op {
                                 op if op == events::opcode::HEARTBEAT => {
@@ -320,6 +339,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     let is_same_channel = current_channel.as_deref() == Some(channel_id.as_str());
 
                                                     if is_same_channel {
+                                                        // Re-validate channel connect permission before allowing flag updates
+                                                        let auth_user = crate::middleware::auth::AuthUser {
+                                                            user_id: user_id.clone(),
+                                                            is_bot,
+                                                            is_admin,
+                                                        };
+                                                        if crate::middleware::permissions::require_channel_permission(
+                                                            &state.db, &channel_id, &auth_user, "connect",
+                                                        ).await.is_err() {
+                                                            continue;
+                                                        }
+
                                                         // Update flags in-place — no LiveKit teardown/rejoin
                                                         if let Some(voice_state) = crate::voice::state::update_voice_state(
                                                             &state, &user_id, self_mute, self_deaf, self_video, self_stream,
@@ -576,7 +607,7 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
     } else if let Some(tok) = token.strip_prefix("Bearer ") {
         let token_hash = auth_resolve::create_token_hash(tok);
         let row =
-            sqlx::query_as::<_, (String,)>("SELECT user_id FROM user_tokens WHERE token_hash = ?")
+            sqlx::query_as::<_, (String,)>("SELECT user_id FROM user_tokens WHERE token_hash = ? AND expires_at > datetime('now')")
                 .bind(&token_hash)
                 .fetch_optional(&state.db)
                 .await
@@ -586,10 +617,12 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
         return None;
     };
 
-    let is_admin = crate::db::users::get_user(&state.db, &user_id)
-        .await
-        .map(|u| u.is_admin)
-        .unwrap_or(false);
+    let user = crate::db::users::get_user(&state.db, &user_id).await.ok()?;
 
-    Some(ResolvedAuth { user_id, is_bot, is_admin })
+    // Disabled users cannot connect to the gateway
+    if user.disabled {
+        return None;
+    }
+
+    Some(ResolvedAuth { user_id, is_bot, is_admin: user.is_admin })
 }

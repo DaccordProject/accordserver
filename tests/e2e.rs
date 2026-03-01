@@ -1015,6 +1015,62 @@ async fn test_owner_can_kick_member() {
 }
 
 #[tokio::test]
+async fn test_admin_role_can_kick_member() {
+    let server = TestServer::new().await;
+    let owner = server.create_user_with_token("owner").await;
+    let admin_user = server.create_user_with_token("admin_user").await;
+    let target = server.create_user_with_token("target").await;
+    let space_id = server.create_space(&owner.user.id, "TestSpace").await;
+    server.add_member(&space_id, &admin_user.user.id).await;
+    server.add_member(&space_id, &target.user.id).await;
+
+    // Get the default Admin role (created at space creation, position 2)
+    let roles = accordserver::db::roles::list_roles(server.pool(), &space_id)
+        .await
+        .unwrap();
+    let admin_role = roles
+        .iter()
+        .find(|r| r.name == "Admin")
+        .expect("Admin role should exist");
+
+    // Assign Admin role to admin_user
+    server
+        .assign_role(&space_id, &admin_user.user.id, &admin_role.id)
+        .await;
+
+    // admin_user (with Admin role, position 2) kicks target (no roles, position 0) → 200
+    let app = server.router();
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}/members/{}", target.user.id),
+        &admin_user.auth_header(),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_instance_admin_can_kick_member() {
+    let server = TestServer::new().await;
+    let owner = server.create_user_with_token("owner").await;
+    let admin = server.create_admin_with_token("instance_admin").await;
+    let target = server.create_user_with_token("target").await;
+    let space_id = server.create_space(&owner.user.id, "TestSpace").await;
+    server.add_member(&space_id, &admin.user.id).await;
+    server.add_member(&space_id, &target.user.id).await;
+
+    // Instance admin (is_admin=true, but no space roles) kicks target → should be 200
+    let app = server.router();
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}/members/{}", target.user.id),
+        &admin.auth_header(),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_non_member_cannot_create_ban() {
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;
@@ -1407,4 +1463,558 @@ async fn test_update_space_slug() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = parse_body(response).await;
     assert_eq!(body["data"]["id"], space_id);
+}
+
+// =========================================================================
+// Admin API
+// =========================================================================
+
+#[tokio::test]
+async fn test_admin_list_spaces() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+
+    // Create a couple of spaces
+    server.create_space(&admin.user.id, "Space A").await;
+    server.create_space(&admin.user.id, "Space B").await;
+
+    let app = server.router();
+    let req = authenticated_request(Method::GET, "/api/v1/admin/spaces", &auth);
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let spaces = body["data"].as_array().unwrap();
+    assert_eq!(spaces.len(), 2);
+}
+
+#[tokio::test]
+async fn test_admin_list_spaces_non_admin_forbidden() {
+    let server = TestServer::new().await;
+    let user = server.create_user_with_token("regular").await;
+    let auth = user.auth_header();
+
+    let app = server.router();
+    let req = authenticated_request(Method::GET, "/api/v1/admin/spaces", &auth);
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_admin_update_space_owner_transfer() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    let bob = server.create_user_with_token("bob").await;
+
+    let space_id = server.create_space(&admin.user.id, "Transfer Test").await;
+
+    // Transfer ownership to bob
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/spaces/{space_id}"),
+        &auth,
+        &serde_json::json!({ "owner_id": bob.user.id }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["owner_id"], bob.user.id);
+
+    // Verify bob was added as member
+    let app = server.router();
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/members/{}", bob.user.id),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_admin_list_users() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    server.create_user_with_token("alice").await;
+    server.create_user_with_token("bob").await;
+
+    let app = server.router();
+    let req = authenticated_request(Method::GET, "/api/v1/admin/users", &auth);
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let users = body["data"].as_array().unwrap();
+    assert_eq!(users.len(), 3); // admin + alice + bob
+}
+
+#[tokio::test]
+async fn test_admin_list_users_with_search() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    server.create_user_with_token("alice").await;
+    server.create_user_with_token("bob").await;
+
+    let app = server.router();
+    let req = authenticated_request(
+        Method::GET,
+        "/api/v1/admin/users?search=ali",
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let users = body["data"].as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["username"], "alice");
+}
+
+#[tokio::test]
+async fn test_admin_list_users_pagination() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    server.create_user_with_token("alice").await;
+    server.create_user_with_token("bob").await;
+    server.create_user_with_token("charlie").await;
+
+    // Request with limit=2
+    let app = server.router();
+    let req = authenticated_request(Method::GET, "/api/v1/admin/users?limit=2", &auth);
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let users = body["data"].as_array().unwrap();
+    assert_eq!(users.len(), 2);
+    assert!(body["cursor"]["has_more"].as_bool().unwrap());
+
+    // Request next page
+    let after = body["cursor"]["after"].as_str().unwrap();
+    let app = server.router();
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/admin/users?limit=2&after={after}"),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let users = body["data"].as_array().unwrap();
+    assert_eq!(users.len(), 2);
+}
+
+#[tokio::test]
+async fn test_admin_toggle_admin_flag() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    let bob = server.create_user_with_token("bob").await;
+
+    // Promote bob to admin
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+        &serde_json::json!({ "is_admin": true }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["is_admin"], true);
+
+    // Demote bob
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+        &serde_json::json!({ "is_admin": false }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["is_admin"], false);
+}
+
+#[tokio::test]
+async fn test_admin_self_demotion_prevented() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/users/{}", admin.user.id),
+        &auth,
+        &serde_json::json!({ "is_admin": false }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_admin_last_admin_protection() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    let bob = server.create_user_with_token("bob").await;
+
+    // Promote bob
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+        &serde_json::json!({ "is_admin": true }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Now demote bob — should work since admin is still an admin
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+        &serde_json::json!({ "is_admin": false }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_admin_disable_user() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    let bob = server.create_user_with_token("bob").await;
+
+    // Disable bob
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+        &serde_json::json!({ "disabled": true }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["disabled"], true);
+
+    // Disabled user gets 401 on next request
+    let app = server.router();
+    let req = authenticated_request(Method::GET, "/api/v1/users/@me", &bob.auth_header());
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_admin_delete_user() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    let bob = server.create_user_with_token("bob").await;
+
+    let app = server.router();
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Verify user is gone
+    let app = server.router();
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/users/{}", bob.user.id),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_admin_delete_user_owns_spaces_rejected() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    let bob = server.create_user_with_token("bob").await;
+    server.create_space(&bob.user.id, "Bob's Space").await;
+
+    let app = server.router();
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_admin_delete_self_prevented() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+
+    let app = server.router();
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/admin/users/{}", admin.user.id),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_admin_delete_admin_user_prevented() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    let bob = server.create_user_with_token("bob").await;
+
+    // Promote bob
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+        &serde_json::json!({ "is_admin": true }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Try to delete bob (admin) → should fail
+    let app = server.router();
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/admin/users/{}", bob.user.id),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_registration_policy_closed() {
+    let server = TestServer::new().await;
+
+    // Set policy to closed
+    sqlx::query("UPDATE server_settings SET registration_policy = 'closed' WHERE id = 1")
+        .execute(server.pool())
+        .await
+        .unwrap();
+    // Reload settings into state
+    let settings = accordserver::db::settings::get_settings(server.pool())
+        .await
+        .unwrap();
+    server
+        .state
+        .settings
+        .store(std::sync::Arc::new(settings));
+
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "newuser",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_registration_policy_open() {
+    let server = TestServer::new().await;
+
+    // Default policy is open
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "newuser",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_settings_new_fields_roundtrip() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+
+    // Update new settings fields via admin endpoint
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/admin/settings",
+        &auth,
+        &serde_json::json!({
+            "server_name": "My Server",
+            "registration_policy": "invite_only",
+            "max_spaces": 100,
+            "max_members_per_space": 500,
+            "motd": "Welcome to the server!",
+            "public_listing": true
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["server_name"], "My Server");
+    assert_eq!(body["data"]["registration_policy"], "invite_only");
+    assert_eq!(body["data"]["max_spaces"], 100);
+    assert_eq!(body["data"]["max_members_per_space"], 500);
+    assert_eq!(body["data"]["motd"], "Welcome to the server!");
+    assert_eq!(body["data"]["public_listing"], true);
+
+    // Read them back via admin endpoint (full settings)
+    let app = server.router();
+    let req = authenticated_request(Method::GET, "/api/v1/admin/settings", &auth);
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["server_name"], "My Server");
+    assert_eq!(body["data"]["motd"], "Welcome to the server!");
+
+    // Public settings endpoint returns subset
+    let app = server.router();
+    let req = authenticated_request(Method::GET, "/api/v1/settings", &auth);
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["server_name"], "My Server");
+    assert_eq!(body["data"]["motd"], "Welcome to the server!");
+    // Public endpoint should NOT include admin-only fields
+    assert!(body["data"]["max_spaces"].is_null());
+    assert!(body["data"]["max_members_per_space"].is_null());
+}
+
+#[tokio::test]
+async fn test_force_password_reset_in_login_response() {
+    let server = TestServer::new().await;
+
+    // Register a user
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Set force_password_reset flag
+    sqlx::query("UPDATE users SET force_password_reset = 1 WHERE username = 'alice'")
+        .execute(server.pool())
+        .await
+        .unwrap();
+
+    // Login — should include force_password_reset in response
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["force_password_reset"], true);
+}
+
+#[tokio::test]
+async fn test_disabled_user_cannot_login() {
+    let server = TestServer::new().await;
+
+    // Register a user
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Disable the user
+    sqlx::query("UPDATE users SET disabled = 1 WHERE username = 'alice'")
+        .execute(server.pool())
+        .await
+        .unwrap();
+
+    // Login attempt → 403
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_admin_settings_alias() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+
+    // GET /admin/settings should return the same as /settings
+    let app = server.router();
+    let req = authenticated_request(Method::GET, "/api/v1/admin/settings", &auth);
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(body["data"]["server_name"].is_string());
+}
+
+#[tokio::test]
+async fn test_admin_list_spaces_with_search() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    server.create_space(&admin.user.id, "Alpha Space").await;
+    server.create_space(&admin.user.id, "Beta Space").await;
+
+    let app = server.router();
+    let req = authenticated_request(
+        Method::GET,
+        "/api/v1/admin/spaces?search=Alpha",
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let spaces = body["data"].as_array().unwrap();
+    assert_eq!(spaces.len(), 1);
+    assert_eq!(spaces[0]["name"], "Alpha Space");
 }

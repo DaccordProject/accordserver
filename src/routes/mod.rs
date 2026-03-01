@@ -1,3 +1,4 @@
+mod admin;
 mod applications;
 mod auth;
 mod bans;
@@ -21,7 +22,7 @@ mod voice;
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
@@ -41,7 +42,7 @@ pub fn router(state: AppState) -> Router {
         .nest_service("/cdn", cdn_service)
         .nest("/api/v1", api)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(build_cors_layer())
         .with_state(state)
 }
 
@@ -271,11 +272,21 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/interactions/{interaction_id}/{token}/callback",
             post(interactions::interaction_callback),
         )
-        // Settings
+        // Admin
+        .route("/admin/spaces", get(admin::list_spaces))
+        .route("/admin/spaces/{space_id}", patch(admin::update_space))
+        .route("/admin/users", get(admin::list_users))
         .route(
-            "/settings",
+            "/admin/users/{user_id}",
+            patch(admin::update_user).delete(admin::delete_user),
+        )
+        // Admin settings (GET + PATCH, admin-only)
+        .route(
+            "/admin/settings",
             get(settings::get_settings).patch(settings::update_settings),
         )
+        // Public settings (GET only, any authenticated user — for client upload limits, etc.)
+        .route("/settings", get(settings::get_public_settings))
         // Version
         .route("/version", get(health::version))
         // Gateway info (authenticated)
@@ -285,4 +296,42 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             state.clone(),
             rate_limit_middleware,
         ))
+}
+
+/// Build the CORS layer. If `CORS_ALLOWED_ORIGINS` is set, restrict to those
+/// origins (comma-separated). Otherwise, allow any origin for backward
+/// compatibility with game clients that don't send an Origin header.
+fn build_cors_layer() -> CorsLayer {
+    use axum::http::{HeaderName, Method};
+
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+    let headers = [
+        HeaderName::from_static("authorization"),
+        HeaderName::from_static("content-type"),
+        HeaderName::from_static("accept"),
+    ];
+
+    match std::env::var("CORS_ALLOWED_ORIGINS") {
+        Ok(origins) if !origins.is_empty() => {
+            let origins: Vec<_> = origins
+                .split(',')
+                .filter_map(|o| o.trim().parse().ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods(methods)
+                .allow_headers(headers)
+        }
+        _ => CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(methods)
+            .allow_headers(headers),
+    }
 }

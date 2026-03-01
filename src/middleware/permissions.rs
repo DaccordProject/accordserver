@@ -405,13 +405,17 @@ pub async fn get_highest_role_position(
 
 /// Requires that the actor's highest role position is strictly greater than
 /// the target user's highest role position. Prevents lateral or upward actions.
+/// Instance admins (`auth.is_admin`) bypass this check.
 pub async fn require_hierarchy(
     pool: &SqlitePool,
     space_id: &str,
-    actor_id: &str,
+    auth: &AuthUser,
     target_id: &str,
 ) -> Result<(), AppError> {
-    let actor_pos = get_highest_role_position(pool, space_id, actor_id).await?;
+    if auth.is_admin {
+        return Ok(());
+    }
+    let actor_pos = get_highest_role_position(pool, space_id, &auth.user_id).await?;
     let target_pos = get_highest_role_position(pool, space_id, target_id).await?;
     if actor_pos <= target_pos {
         return Err(AppError::Forbidden(

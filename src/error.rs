@@ -96,23 +96,13 @@ impl From<sqlx::Error> for AppError {
                 match db_err.code().as_deref() {
                     // SQLITE_CONSTRAINT_UNIQUE (2067)
                     Some("2067") => {
-                        let field = extract_constraint_field(db_err.message());
                         tracing::warn!("unique constraint violation: {}", db_err.message());
-                        match field {
-                            Some(f) => AppError::Conflict(format!("{f} already exists")),
-                            None => AppError::Conflict("resource already exists".to_string()),
-                        }
+                        AppError::Conflict("resource already exists".to_string())
                     }
                     // SQLITE_CONSTRAINT_NOTNULL (1299)
                     Some("1299") => {
-                        let field = extract_constraint_field(db_err.message());
                         tracing::warn!("not-null constraint violation: {}", db_err.message());
-                        match field {
-                            Some(f) => {
-                                AppError::BadRequest(format!("missing required field: {f}"))
-                            }
-                            None => AppError::BadRequest("missing required field".to_string()),
-                        }
+                        AppError::BadRequest("missing required field".to_string())
                     }
                     // SQLITE_CONSTRAINT_FOREIGNKEY (787)
                     Some("787") => {
@@ -134,16 +124,3 @@ impl From<sqlx::Error> for AppError {
     }
 }
 
-/// Extract the column name from a SQLite constraint error message.
-///
-/// Messages look like `"NOT NULL constraint failed: table.column"` or
-/// `"UNIQUE constraint failed: table.column"`.  For composite constraints
-/// (e.g. `"table.col1, table.col2"`) we return `None` to avoid a confusing
-/// message.
-fn extract_constraint_field(message: &str) -> Option<&str> {
-    let (_, rest) = message.rsplit_once(": ")?;
-    if rest.contains(',') {
-        return None;
-    }
-    rest.split('.').last()
-}
