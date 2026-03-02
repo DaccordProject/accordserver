@@ -6,8 +6,8 @@ WORKDIR /app
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy main to build dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs
+# Create dummy sources to build dependencies
+RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && echo "fn main() {}" > src/bin/seed.rs
 COPY build.rs ./
 RUN cargo build --release && rm -rf src
 
@@ -19,8 +19,8 @@ COPY migrations/ migrations/
 ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
 
-# Build the real binary (no caching to ensure version is always correct)
-RUN cargo build --release && cp target/release/accordserver /app/accordserver
+# Build the real binaries (no caching to ensure version is always correct)
+RUN cargo build --release && cp target/release/accordserver /app/accordserver && cp target/release/accord-seed /app/accord-seed
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /app/accordserver ./
+COPY --from=builder /app/accord-seed ./
 COPY migrations/ migrations/
 RUN mkdir -p /app/data
 
