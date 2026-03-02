@@ -2,7 +2,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use accordserver::config::Config;
 use accordserver::gateway::dispatcher::Dispatcher;
@@ -29,8 +29,8 @@ fn print_banner(config: &Config) {
         None => "disabled".to_string(),
     };
     let master = match &config.master_server {
-        Some(ms) => format!("{} → {}", ms.server_name, ms.url),
-        None => "disabled".to_string(),
+        Some(ms) => format!("{} → {} (listing controlled by public_listing setting)", ms.server_name, ms.url),
+        None => "disabled (set MASTER_SERVER_PUBLIC_URL to enable)".to_string(),
     };
 
     eprintln!();
@@ -114,6 +114,8 @@ async fn run_main_server(config: Config) {
         .await
         .unwrap_or_default();
 
+    let master_config = config.master_server;
+
     let state = AppState {
         db,
         voice_states: Arc::new(DashMap::new()),
@@ -124,7 +126,9 @@ async fn run_main_server(config: Config) {
         livekit_client,
         rate_limits: Arc::new(DashMap::new()),
         storage_path,
-        settings: Arc::new(ArcSwap::from_pointee(settings)),
+        settings: Arc::new(ArcSwap::from_pointee(settings.clone())),
+        master_config: master_config.clone(),
+        master_task: Arc::new(Mutex::new(None)),
     };
 
     // Ensure a default invite exists and display it
@@ -137,8 +141,14 @@ async fn run_main_server(config: Config) {
         }
     }
 
-    if let Some(ref master_config) = config.master_server {
-        tokio::spawn(accordserver::master::run(master_config.clone()));
+    // Spawn master registration task if config is available and public_listing is enabled
+    if let Some(ref mc) = master_config {
+        if settings.public_listing {
+            let handle = tokio::spawn(accordserver::master::run(mc.clone()));
+            *state.master_task.lock().await = Some(handle);
+        } else {
+            tracing::info!("master server configured but public_listing is off; not registering");
+        }
     }
 
     let app = accordserver::routes::router(state);
@@ -155,8 +165,4 @@ async fn run_main_server(config: Config) {
     eprintln!();
 
     axum::serve(listener, app).await.expect("server error");
-
-    if let Some(ref master_config) = config.master_server {
-        accordserver::master::deregister_from(master_config).await;
-    }
 }

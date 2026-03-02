@@ -3,9 +3,11 @@ use dashmap::DashMap;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::config::MasterServerConfig;
 use crate::gateway::dispatcher::Dispatcher;
 use crate::gateway::events::GatewayBroadcast;
 use crate::models::presence::Presence;
@@ -32,4 +34,6 @@ pub struct AppState {
     pub rate_limits: Arc<DashMap<String, RateLimitBucket>>,
     pub storage_path: PathBuf,
     pub settings: Arc<ArcSwap<ServerSettings>>,
+    pub master_config: Option<MasterServerConfig>,
+    pub master_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }

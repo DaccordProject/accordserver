@@ -8,7 +8,6 @@ async fn register(client: &Client, config: &MasterServerConfig) -> Result<(), re
     let url = format!("{}/api/v1/servers", config.url);
     client
         .post(&url)
-        .bearer_auth(&config.bearer_token)
         .json(&json!({
             "id": config.server_id,
             "name": config.server_name,
@@ -25,7 +24,6 @@ async fn heartbeat(client: &Client, config: &MasterServerConfig) -> Result<u16, 
     let url = format!("{}/api/v1/servers/{}/heartbeat", config.url, config.server_id);
     let resp = client
         .post(&url)
-        .bearer_auth(&config.bearer_token)
         .send()
         .await?;
     let status = resp.status().as_u16();
@@ -39,7 +37,6 @@ async fn deregister(client: &Client, config: &MasterServerConfig) -> Result<(), 
     let url = format!("{}/api/v1/servers/{}", config.url, config.server_id);
     client
         .delete(&url)
-        .bearer_auth(&config.bearer_token)
         .send()
         .await?
         .error_for_status()?;
