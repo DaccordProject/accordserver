@@ -14,7 +14,7 @@ use dashmap::DashMap;
 use http::{Method, Request};
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// A user created for testing, bundling the User record with its raw token.
 pub struct TestUser {
@@ -82,6 +82,8 @@ impl TestServer {
             rate_limits: Arc::new(DashMap::new()),
             storage_path,
             settings: Arc::new(ArcSwap::from_pointee(settings)),
+            master_config: None,
+            master_task: Arc::new(Mutex::new(None)),
         };
 
         Self { state }

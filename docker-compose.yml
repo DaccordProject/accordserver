@@ -13,6 +13,8 @@ services:
       LIVEKIT_API_KEY: devkey
       LIVEKIT_API_SECRET: secret
       ACCORD_VOICE_BACKEND: livekit
+      MASTER_SERVER_PUBLIC_URL: https://chat.example.com
+      MASTER_SERVER_NAME: Accord Server
     depends_on:
       - livekit
     labels:
