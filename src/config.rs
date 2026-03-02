@@ -24,6 +24,34 @@ pub struct Config {
     pub storage_path: std::path::PathBuf,
 }
 
+/// Resolves the master server ID: env var > persisted file > generate and save.
+/// The ID file is stored alongside the CDN storage directory (e.g. `data/master_server_id`).
+fn resolve_master_server_id(storage_path: &std::path::Path) -> String {
+    if let Ok(id) = std::env::var("MASTER_SERVER_ID") {
+        return id;
+    }
+
+    // data/cdn -> data/master_server_id
+    let id_path = storage_path
+        .parent()
+        .unwrap_or(storage_path)
+        .join("master_server_id");
+
+    if let Ok(id) = std::fs::read_to_string(&id_path) {
+        let id = id.trim().to_string();
+        if !id.is_empty() {
+            return id;
+        }
+    }
+
+    let id = crate::snowflake::generate();
+    if let Some(parent) = id_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&id_path, &id);
+    id
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let livekit = std::env::var("LIVEKIT_INTERNAL_URL")
@@ -44,12 +72,15 @@ impl Config {
                 }
             });
 
+        let storage_path = std::env::var("ACCORD_STORAGE_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("./data/cdn"));
+
         let master_server = std::env::var("MASTER_SERVER_PUBLIC_URL").ok().map(|public_url| {
             MasterServerConfig {
                 url: std::env::var("MASTER_SERVER_URL")
                     .unwrap_or_else(|_| "https://master.daccord.gg".to_string()),
-                server_id: std::env::var("MASTER_SERVER_ID")
-                    .unwrap_or_else(|_| crate::snowflake::generate()),
+                server_id: resolve_master_server_id(&storage_path),
                 server_name: std::env::var("MASTER_SERVER_NAME")
                     .unwrap_or_else(|_| "Accord Server".to_string()),
                 public_url,
@@ -59,10 +90,6 @@ impl Config {
                     .unwrap_or(60),
             }
         });
-
-        let storage_path = std::env::var("ACCORD_STORAGE_PATH")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("./data/cdn"));
 
         Self {
             port: std::env::var("PORT")
