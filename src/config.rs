@@ -62,7 +62,7 @@ impl Config {
 
         let storage_path = std::env::var("ACCORD_STORAGE_PATH")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("./cdn"));
+            .unwrap_or_else(|_| std::path::PathBuf::from("./data/cdn"));
 
         Self {
             port: std::env::var("PORT")

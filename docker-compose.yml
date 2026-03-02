@@ -7,6 +7,7 @@ services:
       - accordserver_data:/app/data
     environment:
       DATABASE_URL: sqlite:data/accord.db?mode=rwc
+      ACCORD_STORAGE_PATH: /app/data/cdn
       RUST_LOG: accordserver=debug,tower_http=debug
       LIVEKIT_INTERNAL_URL: http://livekit:7880
       LIVEKIT_EXTERNAL_URL: wss://livekit.example.com
