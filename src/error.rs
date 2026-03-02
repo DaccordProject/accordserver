@@ -88,6 +88,26 @@ impl IntoResponse for AppError {
     }
 }
 
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppError::Database(e) => write!(f, "database error: {e}"),
+            AppError::Internal(e) => write!(f, "internal error: {e}"),
+            AppError::BadRequest(msg) => write!(f, "bad request: {msg}"),
+            AppError::NotFound(msg) => write!(f, "not found: {msg}"),
+            AppError::Unauthorized(msg) => write!(f, "unauthorized: {msg}"),
+            AppError::Forbidden(msg) => write!(f, "forbidden: {msg}"),
+            AppError::Conflict(msg) => write!(f, "conflict: {msg}"),
+            AppError::PayloadTooLarge(msg) => write!(f, "payload too large: {msg}"),
+            AppError::RateLimited { retry_after } => {
+                write!(f, "rate limited, retry after {retry_after}s")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AppError {}
+
 impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         match &e {
