@@ -29,10 +29,17 @@ pub fn slugify(name: &str) -> String {
     let trimmed = result.trim_matches('-');
 
     // Truncate to 100 chars (on a char boundary, but all ASCII so safe)
-    if trimmed.len() > 100 {
+    let truncated = if trimmed.len() > 100 {
         trimmed[..100].trim_end_matches('-').to_string()
     } else {
         trimmed.to_string()
+    };
+
+    // Prevent purely numeric slugs (would collide with snowflake ID lookups)
+    if !truncated.is_empty() && truncated.chars().all(|c| c.is_ascii_digit()) {
+        format!("s-{truncated}")
+    } else {
+        truncated
     }
 }
 
@@ -58,6 +65,9 @@ pub fn validate_slug(slug: &str) -> Result<(), &'static str> {
     }
     if slug.contains("--") {
         return Err("slug must not contain consecutive hyphens");
+    }
+    if slug.chars().all(|c| c.is_ascii_digit()) {
+        return Err("slug must contain at least one letter or hyphen");
     }
     Ok(())
 }
@@ -134,5 +144,22 @@ mod tests {
     fn test_validate_slug_special_chars() {
         assert!(validate_slug("hello world").is_err());
         assert!(validate_slug("hello_world").is_err());
+    }
+
+    #[test]
+    fn test_validate_slug_purely_numeric() {
+        assert!(validate_slug("123456").is_err());
+        assert!(validate_slug("287251087298134016").is_err());
+    }
+
+    #[test]
+    fn test_validate_slug_numeric_with_letters_ok() {
+        assert!(validate_slug("space-123").is_ok());
+        assert!(validate_slug("s-123456").is_ok());
+    }
+
+    #[test]
+    fn test_slugify_purely_numeric_name() {
+        assert_eq!(slugify("12345"), "s-12345");
     }
 }
