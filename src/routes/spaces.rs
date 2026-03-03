@@ -261,16 +261,23 @@ pub async fn list_public_spaces(
 
 pub async fn join_public_space(
     state: State<AppState>,
-    Path(space_id): Path<String>,
+    Path(id_or_slug): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let space = db::spaces::get_space_row(&state.db, &space_id).await?;
+    // Try ID lookup first, fall back to slug lookup
+    let space = match db::spaces::get_space_row(&state.db, &id_or_slug).await {
+        Ok(s) => s,
+        Err(AppError::NotFound(_)) => {
+            db::spaces::get_space_by_slug(&state.db, &id_or_slug).await?
+        }
+        Err(e) => return Err(e),
+    };
     if !space.public {
         return Err(AppError::Forbidden("this space is not public".to_string()));
     }
 
     // Check if the user is banned
-    if db::bans::get_ban(&state.db, &space_id, &auth.user_id)
+    if db::bans::get_ban(&state.db, &space.id, &auth.user_id)
         .await
         .is_ok()
     {
@@ -279,8 +286,8 @@ pub async fn join_public_space(
         ));
     }
 
-    let _member = db::members::add_member(&state.db, &space_id, &auth.user_id).await?;
+    let _member = db::members::add_member(&state.db, &space.id, &auth.user_id).await?;
     Ok(Json(
-        serde_json::json!({ "data": { "space_id": space_id } }),
+        serde_json::json!({ "data": { "space_id": space.id } }),
     ))
 }
