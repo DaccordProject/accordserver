@@ -1,6 +1,6 @@
 [package]
 name = "accordserver"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 
 [dependencies]
@@ -22,6 +22,9 @@ sha2 = "0.10"
 argon2 = "0.5"
 livekit-api = "0.4.14"
 arc-swap = "1"
+totp-rs = { version = "5", features = ["gen_secret"] }
+data-encoding = "2"
+aes-gcm = "0.10"
 
 [[bin]]
 name = "accordserver"

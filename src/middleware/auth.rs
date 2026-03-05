@@ -54,8 +54,11 @@ async fn resolve_bearer_token(pool: &SqlitePool, token: &str) -> Option<AuthUser
     .await
     .ok()??;
 
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    if row.1 < now {
+    // Parse expiry with chrono instead of string comparison
+    let expires_at = chrono::NaiveDateTime::parse_from_str(&row.1, "%Y-%m-%dT%H:%M:%S")
+        .ok()?;
+    let expires_utc = expires_at.and_utc();
+    if expires_utc < chrono::Utc::now() {
         return None;
     }
 
@@ -157,9 +160,15 @@ pub fn create_token_hash(token: &str) -> String {
 
 /// Generate a cryptographically secure random token string (256 bits of entropy).
 pub fn generate_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let a: u128 = rng.gen();
-    let b: u128 = rng.gen();
-    format!("{a:032x}{b:032x}")
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex::encode(&bytes)
+}
+
+/// Hex-encode helper (avoids adding the `hex` crate — uses the same format as before).
+mod hex {
+    pub fn encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }

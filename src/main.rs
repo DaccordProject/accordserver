@@ -115,6 +115,7 @@ async fn run_main_server(config: Config) {
         .unwrap_or_default();
 
     let master_config = config.master_server;
+    let totp_key = config.totp_key;
 
     let state = AppState {
         db,
@@ -129,6 +130,9 @@ async fn run_main_server(config: Config) {
         settings: Arc::new(ArcSwap::from_pointee(settings.clone())),
         master_config: master_config.clone(),
         master_task: Arc::new(Mutex::new(None)),
+        mfa_tickets: Arc::new(DashMap::new()),
+        totp_attempts: Arc::new(DashMap::new()),
+        totp_key,
     };
 
     // Ensure a default invite exists and display it
