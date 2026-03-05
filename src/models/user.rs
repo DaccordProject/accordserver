@@ -12,6 +12,7 @@ pub struct User {
     pub bot: bool,
     pub system: bool,
     pub is_admin: bool,
+    pub mfa_enabled: bool,
     pub disabled: bool,
     pub flags: i64,
     pub public_flags: i64,

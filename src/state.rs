@@ -4,7 +4,6 @@ use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
-use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::config::MasterServerConfig;
@@ -22,6 +21,20 @@ pub struct RateLimitBucket {
     pub last_refill: Instant,
 }
 
+/// Tracks TOTP verification attempts for brute-force protection.
+#[derive(Clone)]
+pub struct TotpAttemptTracker {
+    pub failures: u32,
+    pub window_start: Instant,
+}
+
+/// Short-lived MFA ticket issued after password verification when 2FA is required.
+#[derive(Clone)]
+pub struct MfaTicket {
+    pub user_id: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
@@ -35,5 +48,11 @@ pub struct AppState {
     pub storage_path: PathBuf,
     pub settings: Arc<ArcSwap<ServerSettings>>,
     pub master_config: Option<MasterServerConfig>,
-    pub master_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    pub master_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// ticket_hash -> MfaTicket; short-lived tickets for 2FA login flow
+    pub mfa_tickets: Arc<DashMap<String, MfaTicket>>,
+    /// user_id -> TotpAttemptTracker; brute-force protection for TOTP verification
+    pub totp_attempts: Arc<DashMap<String, TotpAttemptTracker>>,
+    /// Optional AES-256-GCM key for encrypting TOTP secrets at rest
+    pub totp_key: Option<[u8; 32]>,
 }

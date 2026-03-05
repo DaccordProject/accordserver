@@ -84,6 +84,9 @@ impl TestServer {
             settings: Arc::new(ArcSwap::from_pointee(settings)),
             master_config: None,
             master_task: Arc::new(Mutex::new(None)),
+            mfa_tickets: Arc::new(DashMap::new()),
+            totp_attempts: Arc::new(DashMap::new()),
+            totp_key: None,
         };
 
         Self { state }

@@ -22,6 +22,9 @@ pub struct Config {
     pub livekit: Option<LiveKitConfig>,
     pub master_server: Option<MasterServerConfig>,
     pub storage_path: std::path::PathBuf,
+    /// AES-256-GCM key for encrypting TOTP secrets at rest.
+    /// Derived from TOTP_ENCRYPTION_KEY env var via SHA-256.
+    pub totp_key: Option<[u8; 32]>,
 }
 
 /// Resolves the master server ID: env var > persisted file > generate and save.
@@ -91,6 +94,20 @@ impl Config {
             }
         });
 
+        let totp_key = std::env::var("TOTP_ENCRYPTION_KEY").ok().map(|key| {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(key.as_bytes());
+            let result = hasher.finalize();
+            let mut key_bytes = [0u8; 32];
+            key_bytes.copy_from_slice(&result);
+            key_bytes
+        });
+
+        if totp_key.is_none() {
+            tracing::warn!("TOTP_ENCRYPTION_KEY not set — TOTP secrets will be stored in plaintext. Set this env var for defense-in-depth.");
+        }
+
         Self {
             port: std::env::var("PORT")
                 .ok()
@@ -104,6 +121,7 @@ impl Config {
             livekit,
             master_server,
             storage_path,
+            totp_key,
         }
     }
 }
