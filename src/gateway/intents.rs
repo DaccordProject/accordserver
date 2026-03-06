@@ -28,9 +28,11 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
         }
         "member.join" | "member.leave" | "member.update" | "member.chunk" => Some("members"),
         "space.create" | "space.update" | "space.delete" => Some("spaces"),
-        "channel.create" | "channel.update" | "channel.delete" | "channel.pins_update" => {
-            Some("spaces")
-        }
+        "channel.create"
+        | "channel.update"
+        | "channel.delete"
+        | "channel.reorder"
+        | "channel.pins_update" => Some("spaces"),
         "role.create" | "role.update" | "role.delete" => Some("spaces"),
         "reaction.add" | "reaction.remove" | "reaction.clear" | "reaction.clear_emoji" => {
             Some("message_reactions")

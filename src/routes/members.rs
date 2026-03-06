@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::db;
 use crate::error::AppError;
+use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::AuthUser;
 use crate::middleware::permissions::{
     require_hierarchy, require_membership, require_permission, require_role_hierarchy,
@@ -150,9 +151,24 @@ pub async fn update_member(
 
     let row = db::members::update_member(&state.db, &space_id, &user_id, &input).await?;
     let role_ids = db::members::get_member_role_ids(&state.db, &space_id, &user_id).await?;
-    Ok(Json(
-        serde_json::json!({ "data": member_row_to_json(&row, &role_ids) }),
-    ))
+    let member_json = member_row_to_json(&row, &role_ids);
+
+    // Broadcast member.update to the space
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.update",
+            "data": member_json
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "data": member_json })))
 }
 
 pub async fn kick_member(
@@ -163,6 +179,25 @@ pub async fn kick_member(
     require_permission(&state.db, &space_id, &auth, "kick_members").await?;
     require_hierarchy(&state.db, &space_id, &auth, &user_id).await?;
     db::members::remove_member(&state.db, &space_id, &user_id).await?;
+
+    // Broadcast member.leave to the space
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.leave",
+            "data": {
+                "space_id": space_id,
+                "user_id": user_id
+            }
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id.clone()),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
@@ -209,9 +244,24 @@ pub async fn update_own_member(
     };
     let row = db::members::update_member(&state.db, &space_id, &auth.user_id, &limited).await?;
     let role_ids = db::members::get_member_role_ids(&state.db, &space_id, &auth.user_id).await?;
-    Ok(Json(
-        serde_json::json!({ "data": member_row_to_json(&row, &role_ids) }),
-    ))
+    let member_json = member_row_to_json(&row, &role_ids);
+
+    // Broadcast member.update to the space
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.update",
+            "data": member_json
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "data": member_json })))
 }
 
 pub async fn add_role(
@@ -226,6 +276,24 @@ pub async fn add_role(
     }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
     db::members::add_role_to_member(&state.db, &space_id, &user_id, &role_id).await?;
+
+    // Broadcast member.update to the space
+    let row = db::members::get_member_row(&state.db, &space_id, &user_id).await?;
+    let role_ids = db::members::get_member_role_ids(&state.db, &space_id, &user_id).await?;
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.update",
+            "data": member_row_to_json(&row, &role_ids)
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
@@ -241,6 +309,24 @@ pub async fn remove_role(
     }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
     db::members::remove_role_from_member(&state.db, &space_id, &user_id, &role_id).await?;
+
+    // Broadcast member.update to the space
+    let row = db::members::get_member_row(&state.db, &space_id, &user_id).await?;
+    let role_ids = db::members::get_member_role_ids(&state.db, &space_id, &user_id).await?;
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.update",
+            "data": member_row_to_json(&row, &role_ids)
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+
     Ok(Json(serde_json::json!({ "data": null })))
 }
 

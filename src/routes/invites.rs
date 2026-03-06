@@ -3,6 +3,7 @@ use axum::Json;
 
 use crate::db;
 use crate::error::AppError;
+use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::AuthUser;
 use crate::middleware::permissions::{
     require_channel_permission, require_permission,
@@ -54,7 +55,28 @@ pub async fn accept_invite(
         ));
     }
 
-    let _member = db::members::add_member(&state.db, &invite.space_id, &auth.user_id).await?;
+    let member = db::members::add_member(&state.db, &invite.space_id, &auth.user_id).await?;
+
+    // Broadcast member.join to the space
+    let user = db::users::get_user(&state.db, &auth.user_id).await?;
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.join",
+            "data": {
+                "space_id": invite.space_id,
+                "user": user,
+                "joined_at": member.joined_at
+            }
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(invite.space_id.clone()),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+
     Ok(Json(serde_json::json!({ "data": invite })))
 }
 

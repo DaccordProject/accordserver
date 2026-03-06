@@ -1,3 +1,6 @@
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::SaltString;
+use argon2::{Argon2, PasswordHasher};
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
@@ -175,4 +178,90 @@ pub async fn delete_user(
 
     db::admin::delete_user(&state.db, &user_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
+}
+
+// =========================================================================
+// Password Reset
+// =========================================================================
+
+#[derive(Deserialize)]
+pub struct AdminResetPasswordRequest {
+    pub new_password: String,
+}
+
+pub async fn reset_user_password(
+    state: State<AppState>,
+    Path(user_id): Path<String>,
+    auth: AuthUser,
+    Json(input): Json<AdminResetPasswordRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+
+    // Validate password length
+    if input.new_password.len() < 8 || input.new_password.len() > 128 {
+        return Err(AppError::BadRequest(
+            "password must be between 8 and 128 characters".to_string(),
+        ));
+    }
+
+    // Verify target user exists
+    let target = db::users::get_user(&state.db, &user_id).await?;
+
+    // Don't allow resetting bot user passwords
+    if target.bot {
+        return Err(AppError::BadRequest(
+            "cannot reset password for a bot user".to_string(),
+        ));
+    }
+
+    // Hash the new password with Argon2id (same params as registration)
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon2::Params::new(19456, 3, 1, None)
+            .map_err(|e| AppError::Internal(format!("argon2 params failed: {e}")))?,
+    );
+    let password_hash = argon2
+        .hash_password(input.new_password.as_bytes(), &salt)
+        .map_err(|e| AppError::Internal(format!("password hashing failed: {e}")))?
+        .to_string();
+
+    // Update password and set force_password_reset flag
+    sqlx::query(
+        "UPDATE users SET password_hash = ?, force_password_reset = 1 WHERE id = ?",
+    )
+    .bind(&password_hash)
+    .bind(&user_id)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
+
+    // Revoke all existing sessions so the user must log in with the new password
+    sqlx::query("DELETE FROM user_tokens WHERE user_id = ?")
+        .bind(&user_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::from)?;
+
+    // Disable 2FA so the reset password can actually be used to log in
+    sqlx::query("UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?")
+        .bind(&user_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::from)?;
+
+    // Clean up backup codes
+    sqlx::query("DELETE FROM backup_codes WHERE user_id = ?")
+        .bind(&user_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::from)?;
+
+    Ok(Json(serde_json::json!({
+        "data": {
+            "message": "password has been reset",
+            "force_password_reset": true
+        }
+    })))
 }

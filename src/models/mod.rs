@@ -7,6 +7,7 @@ pub mod interaction;
 pub mod invite;
 pub mod member;
 pub mod message;
+pub mod mute;
 pub mod permission;
 pub mod presence;
 pub mod role;

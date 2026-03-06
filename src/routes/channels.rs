@@ -54,7 +54,7 @@ pub async fn update_channel(
     let channel = db::channels::update_channel(&state.db, &channel_id, &input).await?;
     let json = super::spaces::channel_row_to_json_pub(&state.db, &channel).await;
 
-    // Broadcast channel.update for DM channels
+    // Broadcast channel.update
     if existing.channel_type == "dm" || existing.channel_type == "group_dm" {
         let participant_ids =
             db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
@@ -67,6 +67,20 @@ pub async fn update_channel(
             let _ = dispatcher.send(GatewayBroadcast {
                 space_id: None,
                 target_user_ids: Some(participant_ids),
+                event,
+                intent: "channels".to_string(),
+            });
+        }
+    } else if let Some(ref space_id) = existing.space_id {
+        if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+            let event = serde_json::json!({
+                "op": 0,
+                "type": "channel.update",
+                "data": json
+            });
+            let _ = dispatcher.send(GatewayBroadcast {
+                space_id: Some(space_id.clone()),
+                target_user_ids: None,
                 event,
                 intent: "channels".to_string(),
             });
@@ -146,6 +160,24 @@ pub async fn delete_channel(
     }
 
     require_channel_permission(&state.db, &channel_id, &auth, "manage_channels").await?;
+
+    // Broadcast channel.delete to space members before deleting
+    if let Some(ref space_id) = existing.space_id {
+        if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+            let event = serde_json::json!({
+                "op": 0,
+                "type": "channel.delete",
+                "data": { "id": channel_id, "space_id": space_id }
+            });
+            let _ = dispatcher.send(GatewayBroadcast {
+                space_id: Some(space_id.clone()),
+                target_user_ids: None,
+                event,
+                intent: "channels".to_string(),
+            });
+        }
+    }
+
     db::channels::delete_channel(&state.db, &channel_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }

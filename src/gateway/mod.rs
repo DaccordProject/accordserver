@@ -50,6 +50,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let is_admin;
     let user_intents: Vec<String>;
     let space_ids: HashSet<String>;
+    let mut muted_channel_ids: HashSet<String>;
 
     // Channel for sending messages to this client
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -88,6 +89,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 // Load user's space memberships
                                                 space_ids = db::spaces::list_space_ids_for_user(&state.db, &user_id).await
                                                     .map(|sids| sids.into_iter().collect())
+                                                    .unwrap_or_default();
+
+                                                muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
+                                                    .map(|ids| ids.into_iter().collect())
                                                     .unwrap_or_default();
 
                                                 break;
@@ -232,10 +237,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     };
 
                     if should_receive {
-                        // Check intent
                         let event_type = broadcast.event.get("type")
                             .and_then(|t| t.as_str())
                             .unwrap_or("");
+
+                        // Handle mute list updates from REST API
+                        if event_type == "channel_mute.create" || event_type == "channel_mute.delete" {
+                            muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
+                                .map(|ids| ids.into_iter().collect())
+                                .unwrap_or_default();
+                            continue;
+                        }
+
+                        // Suppress message/typing events for muted channels
+                        if event_type.starts_with("message.") || event_type.starts_with("typing.") {
+                            let channel_id = broadcast.event.get("data")
+                                .and_then(|d| d.get("channel_id"))
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("");
+                            if !channel_id.is_empty() && muted_channel_ids.contains(channel_id) {
+                                continue;
+                            }
+                        }
+
+                        // Check intent
                         if intents::has_intent(&user_intents, event_type) {
                             seq += 1;
                             let mut event = broadcast.event.clone();
