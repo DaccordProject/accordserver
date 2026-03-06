@@ -12,6 +12,7 @@ mod members;
 pub mod messages;
 mod mutes;
 mod reactions;
+mod reports;
 mod roles;
 mod settings;
 mod soundboard;
@@ -123,6 +124,15 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(bans::get_ban)
                 .put(bans::create_ban)
                 .delete(bans::delete_ban),
+        )
+        // Reports
+        .route(
+            "/spaces/{space_id}/reports",
+            get(reports::list_reports).post(reports::create_report),
+        )
+        .route(
+            "/spaces/{space_id}/reports/{report_id}",
+            get(reports::get_report).patch(reports::resolve_report),
         )
         // Roles
         .route(
