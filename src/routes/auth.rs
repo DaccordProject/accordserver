@@ -42,6 +42,12 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MfaLoginRequest {
     pub ticket: String,
     pub code: String,
@@ -615,6 +621,69 @@ pub async fn revoke_all_sessions(
 ) -> Result<Json<serde_json::Value>, AppError> {
     sqlx::query("DELETE FROM user_tokens WHERE user_id = ?")
         .bind(&auth.user_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::from)?;
+
+    Ok(Json(serde_json::json!({
+        "data": { "ok": true }
+    })))
+}
+
+// =========================================================================
+// Change Password (self-service)
+// =========================================================================
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Json(input): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Validate new password length
+    if input.new_password.len() < 8 || input.new_password.len() > 128 {
+        return Err(AppError::BadRequest(
+            "password must be between 8 and 128 characters".to_string(),
+        ));
+    }
+
+    // Verify old password
+    verify_user_password(&state, &auth.user_id, &input.old_password).await?;
+
+    // Hash the new password with Argon2id
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon2::Params::new(19456, 3, 1, None)
+            .map_err(|e| AppError::Internal(format!("argon2 params failed: {e}")))?,
+    );
+    let password_hash = argon2
+        .hash_password(input.new_password.as_bytes(), &salt)
+        .map_err(|e| AppError::Internal(format!("password hashing failed: {e}")))?
+        .to_string();
+
+    // Update password and clear force_password_reset flag
+    sqlx::query(
+        "UPDATE users SET password_hash = ?, force_password_reset = 0, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&password_hash)
+    .bind(&auth.user_id)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
+
+    // Revoke all other sessions (keep the current one)
+    let auth_header = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let raw_token = auth_header.strip_prefix("Bearer ").unwrap_or("");
+    let current_token_hash = create_token_hash(raw_token);
+
+    sqlx::query("DELETE FROM user_tokens WHERE user_id = ? AND token_hash != ?")
+        .bind(&auth.user_id)
+        .bind(&current_token_hash)
         .execute(&state.db)
         .await
         .map_err(AppError::from)?;

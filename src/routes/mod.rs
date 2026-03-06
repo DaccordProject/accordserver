@@ -56,6 +56,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/auth/login/mfa", post(auth::login_mfa))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/sessions/revoke-all", post(auth::revoke_all_sessions))
+        .route("/auth/change-password", post(auth::change_password))
         // 2FA (all require auth)
         .route("/auth/2fa/enable", post(auth::enable_2fa))
         .route("/auth/2fa/verify", post(auth::verify_2fa))

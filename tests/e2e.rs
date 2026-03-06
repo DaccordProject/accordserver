@@ -1946,6 +1946,158 @@ async fn test_force_password_reset_in_login_response() {
 }
 
 #[tokio::test]
+async fn test_change_password() {
+    let server = TestServer::new().await;
+
+    // Register a user
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let token = body["data"]["token"].as_str().unwrap().to_string();
+    let auth = format!("Bearer {token}");
+
+    // Change password
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/auth/change-password",
+        &auth,
+        &serde_json::json!({
+            "old_password": "securepassword123",
+            "new_password": "newpassword456"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Old password should no longer work
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // New password should work
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "newpassword456"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_change_password_clears_force_reset_flag() {
+    let server = TestServer::new().await;
+
+    // Register a user
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let token = body["data"]["token"].as_str().unwrap().to_string();
+    let auth = format!("Bearer {token}");
+
+    // Set force_password_reset flag
+    sqlx::query("UPDATE users SET force_password_reset = 1 WHERE username = 'alice'")
+        .execute(server.pool())
+        .await
+        .unwrap();
+
+    // Change password
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/auth/change-password",
+        &auth,
+        &serde_json::json!({
+            "old_password": "securepassword123",
+            "new_password": "newpassword456"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Login with new password — force_password_reset should NOT be present
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "newpassword456"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(body["data"]["force_password_reset"].is_null());
+}
+
+#[tokio::test]
+async fn test_change_password_wrong_old_password() {
+    let server = TestServer::new().await;
+
+    // Register a user
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "alice",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let token = body["data"]["token"].as_str().unwrap().to_string();
+    let auth = format!("Bearer {token}");
+
+    // Try to change password with wrong old password
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/auth/change-password",
+        &auth,
+        &serde_json::json!({
+            "old_password": "wrongpassword",
+            "new_password": "newpassword456"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn test_disabled_user_cannot_login() {
     let server = TestServer::new().await;
 
