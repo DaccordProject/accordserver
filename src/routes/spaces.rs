@@ -3,6 +3,7 @@ use axum::Json;
 
 use crate::db;
 use crate::error::AppError;
+use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::{AuthUser, OptionalAuthUser};
 use crate::middleware::permissions::{require_membership, require_permission};
 use crate::models::channel::{ChannelPositionUpdate, ChannelRow, CreateChannel};
@@ -110,6 +111,22 @@ pub async fn update_space(
     }
 
     let space = db::spaces::update_space(&state.db, &space_id, &input).await?;
+
+    // Broadcast space.update to space members
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "space.update",
+            "data": space
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id),
+            target_user_ids: None,
+            event,
+            intent: "spaces".to_string(),
+        });
+    }
+
     Ok(Json(serde_json::json!({ "data": space })))
 }
 
@@ -122,6 +139,21 @@ pub async fn delete_space(
     if space.owner_id != auth.user_id && !auth.is_admin {
         return Err(AppError::Forbidden("you do not own this space".to_string()));
     }
+    // Broadcast space.delete before deleting so members still exist
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "space.delete",
+            "data": { "id": space_id }
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id.clone()),
+            target_user_ids: None,
+            event,
+            intent: "spaces".to_string(),
+        });
+    }
+
     db::spaces::delete_space(&state.db, &space_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }
@@ -174,9 +206,24 @@ pub async fn create_channel(
 
     let channel = db::channels::create_channel(&state.db, &space_id, &input).await?;
     // Newly created channel has no overwrites
-    Ok(Json(
-        serde_json::json!({ "data": channel_row_to_json_with_overwrites(&channel, &[]) }),
-    ))
+    let json = channel_row_to_json_with_overwrites(&channel, &[]);
+
+    // Broadcast channel.create to space members
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "channel.create",
+            "data": json
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id),
+            target_user_ids: None,
+            event,
+            intent: "channels".to_string(),
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "data": json })))
 }
 
 pub async fn reorder_channels(
@@ -190,6 +237,22 @@ pub async fn reorder_channels(
     db::channels::reorder_channels(&state.db, &space_id, &updates).await?;
     let channels = db::channels::list_channels_in_space(&state.db, &space_id).await?;
     let data = channels_to_json_async(&state.db, &channels).await?;
+
+    // Broadcast channel.reorder to space members
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "channel.reorder",
+            "data": { "space_id": space_id, "channels": data }
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id),
+            target_user_ids: None,
+            event,
+            intent: "channels".to_string(),
+        });
+    }
+
     Ok(Json(serde_json::json!({ "data": data })))
 }
 
@@ -286,7 +349,28 @@ pub async fn join_public_space(
         ));
     }
 
-    let _member = db::members::add_member(&state.db, &space.id, &auth.user_id).await?;
+    let member = db::members::add_member(&state.db, &space.id, &auth.user_id).await?;
+
+    // Broadcast member.join to the space
+    let user = db::users::get_user(&state.db, &auth.user_id).await?;
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.join",
+            "data": {
+                "space_id": space.id,
+                "user": user,
+                "joined_at": member.joined_at
+            }
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space.id.clone()),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+
     Ok(Json(
         serde_json::json!({ "data": { "space_id": space.id } }),
     ))

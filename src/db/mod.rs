@@ -8,6 +8,7 @@ pub mod emojis;
 pub mod invites;
 pub mod members;
 pub mod messages;
+pub mod mutes;
 pub mod permission_overwrites;
 pub mod roles;
 pub mod settings;

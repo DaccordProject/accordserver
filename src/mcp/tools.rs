@@ -118,7 +118,8 @@ pub fn tool_definitions() -> Vec<Value> {
                     "space_id": { "type": "string", "description": "The space ID" },
                     "name": { "type": "string", "description": "Channel name" },
                     "channel_type": { "type": "string", "description": "Channel type: 'text' or 'voice' (default: 'text')" },
-                    "topic": { "type": "string", "description": "Channel topic/description (optional)" }
+                    "topic": { "type": "string", "description": "Channel topic/description (optional)" },
+                    "parent_id": { "type": "string", "description": "Parent category channel ID (optional)" }
                 },
                 "required": ["space_id", "name"],
                 "additionalProperties": false
@@ -464,12 +465,13 @@ async fn tool_create_channel(state: &AppState, args: &Value) -> Result<String, S
     let name = require_str(args, "name")?;
     let channel_type = opt_str(args, "channel_type").unwrap_or("text");
     let topic = opt_str(args, "topic");
+    let parent_id = opt_str(args, "parent_id");
 
     let input = crate::models::channel::CreateChannel {
         name: name.to_string(),
         channel_type: channel_type.to_string(),
         topic: topic.map(String::from),
-        parent_id: None,
+        parent_id: parent_id.map(String::from),
         position: None,
         nsfw: None,
         bitrate: None,
@@ -486,6 +488,7 @@ async fn tool_create_channel(state: &AppState, args: &Value) -> Result<String, S
         "name": channel.name,
         "type": channel.channel_type,
         "space_id": channel.space_id,
+        "parent_id": channel.parent_id,
     })
     .to_string())
 }

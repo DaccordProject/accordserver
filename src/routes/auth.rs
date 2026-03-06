@@ -13,6 +13,7 @@ use tokio::time::Instant;
 
 use crate::db;
 use crate::error::AppError;
+use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::{create_token_hash, generate_token, AuthUser};
 use crate::snowflake;
 use crate::state::{AppState, MfaTicket, TotpAttemptTracker};
@@ -358,6 +359,27 @@ pub async fn register(
             .bind(&space_id)
             .execute(&state.db)
             .await;
+
+        // Broadcast member.join to the space
+        if let Ok(member) = db::members::get_member_row(&state.db, &space_id, &id).await {
+            if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+                let event = serde_json::json!({
+                    "op": 0,
+                    "type": "member.join",
+                    "data": {
+                        "space_id": space_id,
+                        "user": user,
+                        "joined_at": member.joined_at
+                    }
+                });
+                let _ = dispatcher.send(GatewayBroadcast {
+                    space_id: Some(space_id),
+                    target_user_ids: None,
+                    event,
+                    intent: "members".to_string(),
+                });
+            }
+        }
     }
 
     // Generate bearer token with 30-day expiry

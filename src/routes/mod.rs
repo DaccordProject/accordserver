@@ -10,6 +10,7 @@ mod interactions;
 mod invites;
 mod members;
 pub mod messages;
+mod mutes;
 mod reactions;
 mod roles;
 mod settings;
@@ -72,6 +73,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/users/@me/channels",
             get(users::get_current_user_channels).post(users::create_dm_channel),
         )
+        .route("/users/@me/mutes", get(mutes::list_mutes))
         .route("/users/{user_id}", get(users::get_user))
         // Spaces
         .route("/spaces/public", get(spaces::list_public_spaces))
@@ -142,6 +144,11 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/channels/{channel_id}/recipients/{user_id}",
             put(channels::add_recipient).delete(channels::remove_recipient),
+        )
+        // Channel mutes
+        .route(
+            "/channels/{channel_id}/mute",
+            put(mutes::mute_channel).delete(mutes::unmute_channel),
         )
         .route(
             "/channels/{channel_id}/permissions",
@@ -287,6 +294,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/admin/users/{user_id}",
             patch(admin::update_user).delete(admin::delete_user),
+        )
+        .route(
+            "/admin/users/{user_id}/reset-password",
+            post(admin::reset_user_password),
         )
         // Admin settings (GET + PATCH, admin-only)
         .route(
