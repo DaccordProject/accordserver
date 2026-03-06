@@ -25,6 +25,8 @@ pub struct Config {
     /// AES-256-GCM key for encrypting TOTP secrets at rest.
     /// Derived from TOTP_ENCRYPTION_KEY env var via SHA-256.
     pub totp_key: Option<[u8; 32]>,
+    /// Optional API key for MCP endpoint authentication.
+    pub mcp_api_key: Option<String>,
 }
 
 /// Resolves the master server ID: env var > persisted file > generate and save.
@@ -108,6 +110,8 @@ impl Config {
             tracing::warn!("TOTP_ENCRYPTION_KEY not set — TOTP secrets will be stored in plaintext. Set this env var for defense-in-depth.");
         }
 
+        let mcp_api_key = std::env::var("MCP_API_KEY").ok().filter(|k| !k.is_empty());
+
         Self {
             port: std::env::var("PORT")
                 .ok()
@@ -122,6 +126,7 @@ impl Config {
             master_server,
             storage_path,
             totp_key,
+            mcp_api_key,
         }
     }
 }
@@ -145,6 +150,7 @@ mod tests {
         std::env::remove_var("MASTER_SERVER_NAME");
         std::env::remove_var("MASTER_SERVER_PUBLIC_URL");
         std::env::remove_var("MASTER_HEARTBEAT_INTERVAL");
+        std::env::remove_var("MCP_API_KEY");
     }
 
     #[test]

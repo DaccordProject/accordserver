@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/test/seed", post(test_seed::seed))
+        .route("/mcp", post(crate::mcp::handle_mcp))
         .nest_service("/cdn", cdn_service)
         .nest("/api/v1", api)
         .layer(TraceLayer::new_for_http())

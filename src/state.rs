@@ -55,4 +55,6 @@ pub struct AppState {
     pub totp_attempts: Arc<DashMap<String, TotpAttemptTracker>>,
     /// Optional AES-256-GCM key for encrypting TOTP secrets at rest
     pub totp_key: Option<[u8; 32]>,
+    /// Optional API key for MCP endpoint authentication
+    pub mcp_api_key: Option<String>,
 }
