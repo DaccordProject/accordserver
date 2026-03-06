@@ -32,6 +32,11 @@ fn print_banner(config: &Config) {
         Some(ms) => format!("{} → {} (listing controlled by public_listing setting)", ms.server_name, ms.url),
         None => "disabled (set MASTER_SERVER_PUBLIC_URL to enable)".to_string(),
     };
+    let mcp = if config.mcp_api_key.is_some() {
+        "enabled (POST /mcp)"
+    } else {
+        "disabled (set MCP_API_KEY to enable)"
+    };
 
     eprintln!();
     eprintln!("  \x1b[1;36maccord\x1b[0m \x1b[2mv{version}\x1b[0m");
@@ -40,6 +45,7 @@ fn print_banner(config: &Config) {
     eprintln!("  \x1b[2mdatabase\x1b[0m     {}", config.database_url);
     eprintln!("  \x1b[2mvoice\x1b[0m        {voice}");
     eprintln!("  \x1b[2mmaster\x1b[0m       {master}");
+    eprintln!("  \x1b[2mmcp\x1b[0m          {mcp}");
 
     if config.test_mode {
         eprintln!();
@@ -116,6 +122,7 @@ async fn run_main_server(config: Config) {
 
     let master_config = config.master_server;
     let totp_key = config.totp_key;
+    let mcp_api_key = config.mcp_api_key;
 
     let state = AppState {
         db,
@@ -133,6 +140,7 @@ async fn run_main_server(config: Config) {
         mfa_tickets: Arc::new(DashMap::new()),
         totp_attempts: Arc::new(DashMap::new()),
         totp_key,
+        mcp_api_key,
     };
 
     // Ensure a default invite exists and display it

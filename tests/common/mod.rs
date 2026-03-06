@@ -87,6 +87,7 @@ impl TestServer {
             mfa_tickets: Arc::new(DashMap::new()),
             totp_attempts: Arc::new(DashMap::new()),
             totp_key: None,
+            mcp_api_key: None,
         };
 
         Self { state }
