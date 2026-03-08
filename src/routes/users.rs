@@ -173,9 +173,15 @@ pub async fn create_dm_channel(
         ));
     }
 
-    // Validate all recipient IDs exist
+    // Validate all recipient IDs exist and enforce block relationships
     for rid in &recipient_ids {
         db::users::get_user(&state.db, rid).await?;
+        // Blocked users cannot create DMs with the blocker
+        if db::relationships::is_blocked_by(&state.db, rid, &auth.user_id).await? {
+            return Err(AppError::Forbidden(
+                "you cannot send a DM to this user".into(),
+            ));
+        }
     }
 
     let channel =

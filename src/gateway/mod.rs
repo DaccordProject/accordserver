@@ -136,6 +136,37 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         .map(|p| serde_json::to_value(p).unwrap_or_default())
         .collect();
 
+    // Load this user's relationships for READY payload and friend set for presence routing
+    let friend_ids: HashSet<String> = db::relationships::get_friend_ids(&state.db, &user_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let relationships_json: Vec<serde_json::Value> =
+        db::relationships::list_relationships(&state.db, &user_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|r| {
+                let display = r
+                    .target_display_name
+                    .clone()
+                    .unwrap_or_else(|| r.target_username.clone());
+                serde_json::json!({
+                    "id": r.target_user_id,
+                    "user": {
+                        "id": r.target_user_id,
+                        "username": r.target_username,
+                        "display_name": display,
+                        "avatar": r.target_avatar
+                    },
+                    "type": r.rel_type,
+                    "since": r.created_at
+                })
+            })
+            .collect();
+
     // Send READY event
     let motd = state.settings.load().motd.clone();
     let ready = serde_json::json!({
@@ -147,6 +178,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             "user_id": user_id,
             "spaces": space_ids.iter().collect::<Vec<_>>(),
             "presences": presences_json,
+            "relationships": relationships_json,
             "api_version": "v1",
             "server_version": env!("CARGO_PKG_VERSION"),
             "motd": motd
@@ -191,6 +223,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             let _ = gtx.send(GatewayBroadcast {
                 space_id: Some(sid.clone()),
                 target_user_ids: None,
+                event,
+                intent: "presences".to_string(),
+            });
+        }
+        // Also broadcast to friends who may not share any space
+        if !friend_ids.is_empty() {
+            let event = serde_json::json!({
+                "op": events::opcode::EVENT,
+                "type": "presence.update",
+                "data": presence_data
+            });
+            let _ = gtx.send(GatewayBroadcast {
+                space_id: None,
+                target_user_ids: Some(friend_ids.iter().cloned().collect()),
                 event,
                 intent: "presences".to_string(),
             });
@@ -322,7 +368,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             };
                                             crate::presence::set_presence(&state, &user_id, status, activities.clone());
 
-                                            // Broadcast to all spaces
+                                            // Broadcast to all spaces and to friends
                                             if let Some(ref gtx) = *state.gateway_tx.read().await {
                                                 let broadcast_status = if status == "invisible" { "offline" } else { status };
                                                 let presence_data = serde_json::json!({
@@ -340,6 +386,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     let _ = gtx.send(GatewayBroadcast {
                                                         space_id: Some(sid.clone()),
                                                         target_user_ids: None,
+                                                        event,
+                                                        intent: "presences".to_string(),
+                                                    });
+                                                }
+                                                // Also broadcast to friends not sharing any space
+                                                if !friend_ids.is_empty() {
+                                                    let event = serde_json::json!({
+                                                        "op": events::opcode::EVENT,
+                                                        "type": "presence.update",
+                                                        "data": presence_data
+                                                    });
+                                                    let _ = gtx.send(GatewayBroadcast {
+                                                        space_id: None,
+                                                        target_user_ids: Some(friend_ids.iter().cloned().collect()),
                                                         event,
                                                         intent: "presences".to_string(),
                                                     });
@@ -604,6 +664,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 let _ = gtx.send(GatewayBroadcast {
                     space_id: Some(sid.clone()),
                     target_user_ids: None,
+                    event,
+                    intent: "presences".to_string(),
+                });
+            }
+            // Also broadcast offline to friends who may not share any space
+            if !friend_ids.is_empty() {
+                let event = serde_json::json!({
+                    "op": events::opcode::EVENT,
+                    "type": "presence.update",
+                    "data": presence_data
+                });
+                let _ = gtx.send(GatewayBroadcast {
+                    space_id: None,
+                    target_user_ids: Some(friend_ids.iter().cloned().collect()),
                     event,
                     intent: "presences".to_string(),
                 });

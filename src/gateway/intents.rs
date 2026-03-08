@@ -12,6 +12,7 @@ pub const ALL_INTENTS: &[&str] = &[
     "dm_reactions",
     "dm_typing",
     "scheduled_events",
+    "relationships",
     // Privileged
     "members",
     "presences",
@@ -45,6 +46,9 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
         "emoji.create" | "emoji.update" | "emoji.delete" => Some("emojis"),
         "soundboard.create" | "soundboard.update" | "soundboard.delete" | "soundboard.play" => {
             Some("soundboard")
+        }
+        "relationship.add" | "relationship.update" | "relationship.remove" => {
+            Some("relationships")
         }
         "interaction.create" => None, // always delivered
         _ => None,

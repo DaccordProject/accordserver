@@ -12,6 +12,7 @@ mod members;
 pub mod messages;
 mod mutes;
 mod reactions;
+mod relationships;
 mod reports;
 mod roles;
 mod settings;
@@ -76,6 +77,14 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(users::get_current_user_channels).post(users::create_dm_channel),
         )
         .route("/users/@me/mutes", get(mutes::list_mutes))
+        .route(
+            "/users/@me/relationships",
+            get(relationships::list_relationships),
+        )
+        .route(
+            "/users/@me/relationships/{user_id}",
+            put(relationships::put_relationship).delete(relationships::delete_relationship),
+        )
         .route("/users/{user_id}", get(users::get_user))
         // Spaces
         .route("/spaces/public", get(spaces::list_public_spaces))
