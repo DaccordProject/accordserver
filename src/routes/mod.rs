@@ -355,6 +355,7 @@ fn build_cors_layer() -> CorsLayer {
         HeaderName::from_static("authorization"),
         HeaderName::from_static("content-type"),
         HeaderName::from_static("accept"),
+        HeaderName::from_static("user-agent"),
     ];
 
     match std::env::var("CORS_ALLOWED_ORIGINS") {
