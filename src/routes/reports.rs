@@ -58,6 +58,14 @@ pub async fn create_report(
         ));
     }
 
+    if let Some(ref desc) = body.description {
+        if desc.len() > 4000 {
+            return Err(AppError::BadRequest(
+                "description must not exceed 4000 characters".to_string(),
+            ));
+        }
+    }
+
     // Verify user is a member of the space
     db::members::get_member_row(&state.db, &space_id, &auth.user_id)
         .await

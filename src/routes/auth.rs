@@ -19,6 +19,11 @@ use crate::snowflake;
 use crate::state::{AppState, MfaTicket, TotpAttemptTracker};
 
 // ---------------------------------------------------------------------------
+// Session limit constant
+// ---------------------------------------------------------------------------
+const MAX_SESSIONS_PER_USER: i64 = 25;
+
+// ---------------------------------------------------------------------------
 // TOTP rate limiting constants
 // ---------------------------------------------------------------------------
 const TOTP_MAX_FAILURES: u32 = 5;
@@ -291,6 +296,15 @@ pub async fn register(
         ));
     }
 
+    // Validate display_name length if provided
+    if let Some(ref dn) = input.display_name {
+        if dn.len() > 32 {
+            return Err(AppError::BadRequest(
+                "display_name must not exceed 32 characters".to_string(),
+            ));
+        }
+    }
+
     // Validate password length
     if input.password.len() < 8 || input.password.len() > 128 {
         return Err(AppError::BadRequest(
@@ -399,8 +413,9 @@ pub async fn register(
         .await
         .map_err(AppError::from)?;
 
-    // Clean up expired tokens for this user
+    // Clean up expired tokens and enforce session limit
     cleanup_expired_tokens(&state.db, &id).await;
+    enforce_session_limit(&state.db, &id).await;
 
     Ok(Json(serde_json::json!({
         "data": {
@@ -498,6 +513,7 @@ pub async fn login(
         .map_err(AppError::from)?;
 
     cleanup_expired_tokens(&state.db, &user_id).await;
+    enforce_session_limit(&state.db, &user_id).await;
 
     let mut data = serde_json::json!({
         "user": user,
@@ -566,6 +582,7 @@ pub async fn login_mfa(
         .map_err(AppError::from)?;
 
     cleanup_expired_tokens(&state.db, user_id).await;
+    enforce_session_limit(&state.db, user_id).await;
 
     // Check force_password_reset
     let force_reset: bool = sqlx::query_scalar(
@@ -1019,6 +1036,31 @@ async fn verify_and_consume_backup_code(
                 "invalid code".to_string(),
             ))
         }
+    }
+}
+
+/// Enforce maximum concurrent session limit per user.
+/// Deletes the oldest tokens when the user exceeds MAX_SESSIONS_PER_USER active tokens.
+async fn enforce_session_limit(pool: &sqlx::SqlitePool, user_id: &str) {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_tokens WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+    let excess = count - MAX_SESSIONS_PER_USER;
+    if excess > 0 {
+        let _ = sqlx::query(
+            "DELETE FROM user_tokens WHERE user_id = ? AND token_hash IN \
+             (SELECT token_hash FROM user_tokens WHERE user_id = ? \
+              ORDER BY created_at ASC LIMIT ?)",
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .bind(excess)
+        .execute(pool)
+        .await;
     }
 }
 

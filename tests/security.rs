@@ -2603,6 +2603,141 @@ async fn test_user_cannot_kick_self() {
 }
 
 // =========================================================================
+// Session limit tests
+// =========================================================================
+
+#[tokio::test]
+async fn test_session_limit_enforced_on_login() {
+    let server = TestServer::new().await;
+
+    // Register once to create the user
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &json!({ "username": "sessiontest", "password": "password1234" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Log in 25 more times (total 26 sessions including register token)
+    for _ in 0..25 {
+        let req = json_request(
+            Method::POST,
+            "/api/v1/auth/login",
+            &json!({ "username": "sessiontest", "password": "password1234" }),
+        );
+        let response = server.router().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // Verify the session count is capped at MAX_SESSIONS_PER_USER (25)
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM user_tokens WHERE user_id = \
+         (SELECT id FROM users WHERE username = 'sessiontest')",
+    )
+    .fetch_one(server.pool())
+    .await
+    .unwrap();
+
+    assert!(
+        count <= 25,
+        "expected at most 25 active sessions, got {count}"
+    );
+}
+
+// =========================================================================
+// Input validation tests
+// =========================================================================
+
+#[tokio::test]
+async fn test_report_description_too_long_rejected() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // Post a message to report
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "message to report" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Try to submit a report with an oversized description (4001 chars)
+    let long_desc = "x".repeat(4001);
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/reports"),
+        &alice.auth_header(),
+        &json!({
+            "target_type": "message",
+            "target_id": msg_id,
+            "category": "other",
+            "description": long_desc
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_report_description_at_limit_accepted() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // Post a message to report
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "message to report" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Exactly 4000 characters → should succeed
+    let max_desc = "x".repeat(4000);
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/reports"),
+        &alice.auth_header(),
+        &json!({
+            "target_type": "message",
+            "target_id": msg_id,
+            "category": "other",
+            "description": max_desc
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_register_display_name_too_long_rejected() {
+    let server = TestServer::new().await;
+
+    let long_name = "x".repeat(33);
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &json!({
+            "username": "dntest",
+            "password": "password1234",
+            "display_name": long_name
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// =========================================================================
 // Test Seed Endpoint — Compile-time Availability
 //
 // The /test/seed endpoint is gated by the "test-seed" Cargo feature.
