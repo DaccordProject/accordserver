@@ -34,6 +34,10 @@ path = "src/main.rs"
 name = "accord-seed"
 path = "src/bin/seed.rs"
 
+[features]
+# Enable the /test/seed HTTP endpoint. Never set this in production builds.
+test-seed = []
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.28"

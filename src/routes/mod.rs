@@ -18,6 +18,7 @@ mod roles;
 mod settings;
 mod soundboard;
 pub mod spaces;
+#[cfg(feature = "test-seed")]
 mod test_seed;
 mod users;
 mod voice;
@@ -38,14 +39,19 @@ pub fn router(state: AppState) -> Router {
     let api = api_routes(&state);
     let cdn_service = ServeDir::new(&state.storage_path);
 
-    Router::new()
+    let base = Router::new()
         .route("/health", get(health::health))
         .route("/ws", get(crate::gateway::ws_upgrade))
-        .route("/test/seed", post(test_seed::seed))
         .route("/mcp", post(crate::mcp::handle_mcp))
         .nest_service("/cdn", cdn_service)
-        .nest("/api/v1", api)
-        .layer(TraceLayer::new_for_http())
+        .nest("/api/v1", api);
+
+    // The /test/seed route is only compiled in when the "test-seed" feature
+    // is explicitly enabled. It must never be set in production builds.
+    #[cfg(feature = "test-seed")]
+    let base = base.route("/test/seed", post(test_seed::seed));
+
+    base.layer(TraceLayer::new_for_http())
         .layer(build_cors_layer())
         .with_state(state)
 }
@@ -355,6 +361,7 @@ fn build_cors_layer() -> CorsLayer {
         HeaderName::from_static("authorization"),
         HeaderName::from_static("content-type"),
         HeaderName::from_static("accept"),
+        HeaderName::from_static("user-agent"),
     ];
 
     match std::env::var("CORS_ALLOWED_ORIGINS") {
