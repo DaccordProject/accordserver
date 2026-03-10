@@ -2736,3 +2736,217 @@ async fn test_register_display_name_too_long_rejected() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+// =========================================================================
+// Test Seed Endpoint — Compile-time Availability
+//
+// The /test/seed endpoint is gated by the "test-seed" Cargo feature.
+// When built without that feature (all production builds), the route is
+// never registered and any POST to /test/seed returns 404 or 405.
+// This ensures no accidental database reset is possible in prod.
+// =========================================================================
+
+/// Without the "test-seed" feature the route is absent — the server returns
+/// 404 or 405 for any request to /test/seed.
+#[cfg(not(feature = "test-seed"))]
+#[tokio::test]
+async fn test_seed_endpoint_absent_without_feature() {
+    use axum::body::Body;
+    use http::Request;
+
+    let server = TestServer::new().await;
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/test/seed")
+        .body(Body::empty())
+        .unwrap();
+    let response = server.router().oneshot(req).await.unwrap();
+    // Route is not registered, so Axum returns 404 or 405.
+    assert!(
+        response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED,
+        "Expected 404 or 405, got {}",
+        response.status()
+    );
+}
+
+/// With the "test-seed" feature enabled the route IS present and returns
+/// 200 with seed data.
+#[cfg(feature = "test-seed")]
+#[tokio::test]
+async fn test_seed_endpoint_works_with_feature() {
+    use axum::body::Body;
+    use http::Request;
+
+    let server = TestServer::new().await;
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/test/seed")
+        .body(Body::empty())
+        .unwrap();
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(body["data"]["user"]["token"].is_string());
+}
+
+// =========================================================================
+// 19. User Profile Data Scoping
+//
+// GET /users/{user_id} should strip sensitive fields (is_admin, mfa_enabled,
+// disabled, flags) when looking up another user's profile.
+// =========================================================================
+
+#[tokio::test]
+async fn test_get_user_self_returns_full_profile() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/users/{}", alice.user.id),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let data = &body["data"];
+
+    // Full profile includes sensitive fields
+    assert!(data.get("is_admin").is_some(), "self-lookup should include is_admin");
+    assert!(data.get("mfa_enabled").is_some(), "self-lookup should include mfa_enabled");
+    assert!(data.get("disabled").is_some(), "self-lookup should include disabled");
+    assert!(data.get("flags").is_some(), "self-lookup should include flags");
+}
+
+#[tokio::test]
+async fn test_get_user_other_strips_sensitive_fields() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    // Bob looks up Alice's profile
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/users/{}", alice.user.id),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let data = &body["data"];
+
+    // Public profile must NOT include sensitive fields
+    assert!(data.get("is_admin").is_none(), "third-party lookup must not expose is_admin");
+    assert!(data.get("mfa_enabled").is_none(), "third-party lookup must not expose mfa_enabled");
+    assert!(data.get("disabled").is_none(), "third-party lookup must not expose disabled");
+    assert!(data.get("flags").is_none(), "third-party lookup must not expose flags");
+
+    // Public fields should still be present
+    assert!(data.get("id").is_some());
+    assert!(data.get("username").is_some());
+    assert!(data.get("public_flags").is_some());
+}
+
+// =========================================================================
+// 20. Registration Username Enumeration
+//
+// POST /auth/register should return a generic error on username conflict
+// to prevent username enumeration.
+// =========================================================================
+
+#[tokio::test]
+async fn test_register_duplicate_username_returns_generic_error() {
+    let server = TestServer::new().await;
+    let _alice = server.create_user_with_token("alice").await;
+
+    // Try to register with the same username
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &json!({ "username": "alice", "password": "strongpassword1" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = parse_body(response).await;
+    let error_msg = body["error"].as_str().unwrap_or("");
+    // Must not leak "username already taken" — use generic message
+    assert!(
+        !error_msg.contains("username"),
+        "error message must not reveal the conflicting field, got: {error_msg}"
+    );
+}
+
+// MFA ticket security
+// =========================================================================
+
+/// Verifies that issuing a second MFA ticket for the same user invalidates the first,
+/// preventing concurrent brute-force via multiple independent tickets.
+#[tokio::test]
+async fn test_concurrent_mfa_tickets_are_invalidated() {
+    let server = TestServer::new().await;
+
+    // Register user via HTTP so they have a real password_hash
+    let reg_body = json!({ "username": "alice_mfa", "password": "correct-horse-battery" });
+    let resp = server
+        .router()
+        .oneshot(json_request(Method::POST, "/api/v1/auth/register", &reg_body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = parse_body(resp).await;
+    let user_id = body["data"]["user"]["id"].as_str().unwrap().to_string();
+
+    // Enable TOTP in the DB with a dummy secret (content irrelevant — we only
+    // need the login flow to issue MFA tickets, not to complete TOTP verification).
+    sqlx::query("UPDATE users SET totp_enabled = 1, totp_secret = 'DUMMYBASE32SECRET' WHERE id = ?")
+        .bind(&user_id)
+        .execute(server.pool())
+        .await
+        .expect("failed to enable TOTP");
+
+    let login_body = json!({ "username": "alice_mfa", "password": "correct-horse-battery" });
+
+    // First login → ticket1
+    let resp = server
+        .router()
+        .oneshot(json_request(Method::POST, "/api/v1/auth/login", &login_body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = parse_body(resp).await;
+    assert!(body["data"]["mfa_required"].as_bool().unwrap_or(false));
+    let ticket1 = body["data"]["ticket"].as_str().unwrap().to_string();
+
+    // Second login → ticket2. This must invalidate ticket1.
+    let resp = server
+        .router()
+        .oneshot(json_request(Method::POST, "/api/v1/auth/login", &login_body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = parse_body(resp).await;
+    assert!(body["data"]["mfa_required"].as_bool().unwrap_or(false));
+
+    // Exactly one MFA ticket should exist for this user in the in-memory store.
+    let ticket_count = server
+        .state
+        .mfa_tickets
+        .iter()
+        .filter(|e| e.value().user_id == user_id)
+        .count();
+    assert_eq!(ticket_count, 1, "old MFA ticket must be invalidated on re-login");
+
+    // ticket1 must now be rejected by the MFA endpoint.
+    let mfa_body = json!({ "ticket": ticket1, "code": "000000" });
+    let resp = server
+        .router()
+        .oneshot(json_request(Method::POST, "/api/v1/auth/login/mfa", &mfa_body))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "invalidated ticket must be rejected"
+    );
+}
