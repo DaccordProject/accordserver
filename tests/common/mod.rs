@@ -39,19 +39,45 @@ impl TestUser {
     }
 }
 
-/// Test server that owns an in-memory SQLite pool and full AppState.
-/// Each instance is isolated — safe for parallel tests.
+/// Test server that owns a database pool and full AppState.
+/// Uses DATABASE_URL from the environment if set (e.g. for Postgres CI),
+/// otherwise falls back to an in-memory SQLite database.
 pub struct TestServer {
     pub state: AppState,
 }
 
 impl TestServer {
-    /// Create a new TestServer with an in-memory SQLite database.
+    /// Create a new TestServer. Uses DATABASE_URL if set, otherwise in-memory SQLite.
     pub async fn new() -> Self {
         sqlx::any::install_default_drivers();
-        let pool = db::create_pool("sqlite::memory:")
+        let db_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "sqlite::memory:".to_string());
+        let is_postgres = db::url_is_postgres(&db_url);
+        let pool = db::create_pool(&db_url)
             .await
             .expect("failed to create test pool");
+
+        // For Postgres, truncate all tables to ensure test isolation.
+        // In-memory SQLite starts empty each time so this is not needed there.
+        if is_postgres {
+            // Truncate all application tables (order doesn't matter with CASCADE).
+            // server_settings is re-created by get_settings() below.
+            for table in &[
+                "read_states", "reactions", "pinned_messages", "attachments",
+                "messages", "permission_overwrites", "channel_mutes",
+                "dm_participants", "member_roles", "members", "bans",
+                "invites", "emoji_roles", "emojis", "soundboard_sounds",
+                "bot_tokens", "applications", "user_tokens", "backup_codes",
+                "channels", "roles", "reports", "relationships",
+                "spaces", "users", "server_settings",
+            ] {
+                let sql = format!("TRUNCATE TABLE {} CASCADE", table);
+                sqlx::query(&sql)
+                    .execute(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("failed to truncate {}: {}", table, e));
+            }
+        }
 
         let (dispatcher, gateway_tx) = Dispatcher::new();
 
@@ -74,7 +100,7 @@ impl TestServer {
 
         let state = AppState {
             db: pool,
-            db_is_postgres: false,
+            db_is_postgres: is_postgres,
             voice_states: Arc::new(DashMap::new()),
             presences: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RwLock::new(Some(dispatcher))),

@@ -1195,7 +1195,7 @@ async fn verify_and_consume_backup_code(
 
 /// Enforce maximum concurrent session limit per user.
 /// Deletes the oldest tokens when the user exceeds MAX_SESSIONS_PER_USER active tokens.
-async fn enforce_session_limit(pool: &sqlx::SqlitePool, user_id: &str) {
+async fn enforce_session_limit(pool: &sqlx::AnyPool, user_id: &str) {
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM user_tokens WHERE user_id = ?")
             .bind(user_id)

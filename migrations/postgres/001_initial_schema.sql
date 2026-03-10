@@ -369,6 +369,16 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE INDEX IF NOT EXISTS idx_reports_space_status ON reports(space_id, status);
 CREATE INDEX IF NOT EXISTS idx_reports_space_created ON reports(space_id, created_at DESC);
 
+-- Read states: tracks per-user, per-channel read position
+CREATE TABLE IF NOT EXISTS read_states (
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel_id   TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    last_read_message_id TEXT,
+    mention_count INTEGER NOT NULL DEFAULT 0,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, channel_id)
+);
+
 -- Relationships between users
 CREATE TABLE IF NOT EXISTS relationships (
     user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -34,6 +34,10 @@ path = "src/main.rs"
 name = "accord-seed"
 path = "src/bin/seed.rs"
 
+[[bin]]
+name = "accord-migrate-pg"
+path = "src/bin/migrate_to_postgres.rs"
+
 [features]
 # Enable the /test/seed HTTP endpoint. Never set this in production builds.
 test-seed = []
