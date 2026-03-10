@@ -16,18 +16,6 @@ use crate::snowflake;
 use crate::state::AppState;
 
 pub async fn seed(State(state): State<AppState>) -> impl IntoResponse {
-    if !state.test_mode {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": {
-                    "code": "not_found",
-                    "message": "not found"
-                }
-            })),
-        );
-    }
-
     match do_seed(&state).await {
         Ok(data) => (StatusCode::OK, Json(json!({ "data": data }))),
         Err(e) => (

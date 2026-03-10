@@ -2601,3 +2601,56 @@ async fn test_user_cannot_kick_self() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+// =========================================================================
+// Test Seed Endpoint — Compile-time Availability
+//
+// The /test/seed endpoint is gated by the "test-seed" Cargo feature.
+// When built without that feature (all production builds), the route is
+// never registered and any POST to /test/seed returns 404 or 405.
+// This ensures no accidental database reset is possible in prod.
+// =========================================================================
+
+/// Without the "test-seed" feature the route is absent — the server returns
+/// 404 or 405 for any request to /test/seed.
+#[cfg(not(feature = "test-seed"))]
+#[tokio::test]
+async fn test_seed_endpoint_absent_without_feature() {
+    use axum::body::Body;
+    use http::Request;
+
+    let server = TestServer::new().await;
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/test/seed")
+        .body(Body::empty())
+        .unwrap();
+    let response = server.router().oneshot(req).await.unwrap();
+    // Route is not registered, so Axum returns 404 or 405.
+    assert!(
+        response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED,
+        "Expected 404 or 405, got {}",
+        response.status()
+    );
+}
+
+/// With the "test-seed" feature enabled the route IS present and returns
+/// 200 with seed data.
+#[cfg(feature = "test-seed")]
+#[tokio::test]
+async fn test_seed_endpoint_works_with_feature() {
+    use axum::body::Body;
+    use http::Request;
+
+    let server = TestServer::new().await;
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/test/seed")
+        .body(Body::empty())
+        .unwrap();
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(body["data"]["user"]["token"].is_string());
+}
