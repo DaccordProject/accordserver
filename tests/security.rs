@@ -2603,6 +2603,93 @@ async fn test_user_cannot_kick_self() {
 }
 
 // =========================================================================
+<<<<<<< HEAD
+// 19. User Profile Data Scoping
+//
+// GET /users/{user_id} should strip sensitive fields (is_admin, mfa_enabled,
+// disabled, flags) when looking up another user's profile.
+// =========================================================================
+
+#[tokio::test]
+async fn test_get_user_self_returns_full_profile() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/users/{}", alice.user.id),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let data = &body["data"];
+
+    // Full profile includes sensitive fields
+    assert!(data.get("is_admin").is_some(), "self-lookup should include is_admin");
+    assert!(data.get("mfa_enabled").is_some(), "self-lookup should include mfa_enabled");
+    assert!(data.get("disabled").is_some(), "self-lookup should include disabled");
+    assert!(data.get("flags").is_some(), "self-lookup should include flags");
+}
+
+#[tokio::test]
+async fn test_get_user_other_strips_sensitive_fields() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    // Bob looks up Alice's profile
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/users/{}", alice.user.id),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let data = &body["data"];
+
+    // Public profile must NOT include sensitive fields
+    assert!(data.get("is_admin").is_none(), "third-party lookup must not expose is_admin");
+    assert!(data.get("mfa_enabled").is_none(), "third-party lookup must not expose mfa_enabled");
+    assert!(data.get("disabled").is_none(), "third-party lookup must not expose disabled");
+    assert!(data.get("flags").is_none(), "third-party lookup must not expose flags");
+
+    // Public fields should still be present
+    assert!(data.get("id").is_some());
+    assert!(data.get("username").is_some());
+    assert!(data.get("public_flags").is_some());
+}
+
+// =========================================================================
+// 20. Registration Username Enumeration
+//
+// POST /auth/register should return a generic error on username conflict
+// to prevent username enumeration.
+// =========================================================================
+
+#[tokio::test]
+async fn test_register_duplicate_username_returns_generic_error() {
+    let server = TestServer::new().await;
+    let _alice = server.create_user_with_token("alice").await;
+
+    // Try to register with the same username
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &json!({ "username": "alice", "password": "strongpassword1" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = parse_body(response).await;
+    let error_msg = body["error"].as_str().unwrap_or("");
+    // Must not leak "username already taken" — use generic message
+    assert!(
+        !error_msg.contains("username"),
+        "error message must not reveal the conflicting field, got: {error_msg}"
+    );
+}
+
 // MFA ticket security
 // =========================================================================
 

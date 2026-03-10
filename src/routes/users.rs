@@ -106,10 +106,17 @@ pub async fn update_current_user(
 pub async fn get_user(
     state: State<AppState>,
     Path(user_id): Path<String>,
-    _auth: AuthUser,
+    auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user = db::users::get_user(&state.db, &user_id).await?;
-    Ok(Json(serde_json::json!({ "data": user })))
+    if auth.user_id == user_id {
+        // Self-lookup: return full profile including sensitive fields
+        Ok(Json(serde_json::json!({ "data": user })))
+    } else {
+        // Third-party lookup: strip sensitive fields (is_admin, mfa_enabled, disabled, flags)
+        let public_user = crate::models::user::PublicUser::from(user);
+        Ok(Json(serde_json::json!({ "data": public_user })))
+    }
 }
 
 pub async fn get_current_user_channels(
