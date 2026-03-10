@@ -308,7 +308,7 @@ pub async fn register(
     .map_err(AppError::from)?;
 
     if existing.is_some() {
-        return Err(AppError::Conflict("username already taken".to_string()));
+        return Err(AppError::Conflict("registration failed".to_string()));
     }
 
     // Hash password with Argon2id (OWASP-recommended params: 19 MiB memory, 3 iterations)
@@ -464,6 +464,10 @@ pub async fn login(
         let ticket = generate_token();
         let ticket_hash = create_token_hash(&ticket);
         let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+
+        // Invalidate any existing MFA tickets for this user to prevent concurrent
+        // brute-force via multiple independent tickets.
+        state.mfa_tickets.retain(|_, v| v.user_id != user_id);
 
         state.mfa_tickets.insert(
             ticket_hash,
