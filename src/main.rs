@@ -141,6 +141,8 @@ async fn run_main_server(config: Config) {
         totp_attempts: Arc::new(DashMap::new()),
         totp_key,
         mcp_api_key,
+        login_failures: Arc::new(DashMap::new()),
+        register_attempts: Arc::new(DashMap::new()),
     };
 
     // Ensure a default invite exists and display it

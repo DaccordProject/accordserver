@@ -88,6 +88,8 @@ impl TestServer {
             totp_attempts: Arc::new(DashMap::new()),
             totp_key: None,
             mcp_api_key: None,
+            login_failures: Arc::new(DashMap::new()),
+            register_attempts: Arc::new(DashMap::new()),
         };
 
         Self { state }
