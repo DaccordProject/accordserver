@@ -341,7 +341,7 @@ fn issue_bearer_token(
     let token = generate_token();
     let token_hash = create_token_hash(&token);
     let expires_at = (chrono::Utc::now() + chrono::Duration::days(30))
-        .format("%Y-%m-%dT%H:%M:%S")
+        .format("%Y-%m-%dT%H:%M:%S+00:00")
         .to_string();
     (token, token_hash, expires_at)
 }
@@ -725,13 +725,15 @@ pub async fn login_mfa(
     enforce_session_limit(&state.db, user_id).await;
 
     // Check force_password_reset
-    let force_reset: bool = sqlx::query_scalar::<_, i64>(
+    let force_reset = sqlx::query(
         "SELECT force_password_reset FROM users WHERE id = ?",
     )
     .bind(user_id)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map(|v| v != 0)
+    .ok()
+    .flatten()
+    .map(|r| crate::db::get_bool(&r, "force_password_reset"))
     .unwrap_or(false);
 
     let mut data = serde_json::json!({
@@ -869,14 +871,14 @@ pub async fn enable_2fa(
     verify_user_password(&state, &auth.user_id, &input.password).await?;
 
     // Check if 2FA is already enabled
-    let already_enabled: bool = sqlx::query_scalar::<_, i64>(
-        "SELECT totp_enabled FROM users WHERE id = ?",
-    )
-    .bind(&auth.user_id)
-    .fetch_one(&state.db)
-    .await
-    .map(|v| v != 0)
-    .map_err(AppError::from)?;
+    let already_enabled = {
+        let row = sqlx::query("SELECT totp_enabled FROM users WHERE id = ?")
+            .bind(&auth.user_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(AppError::from)?;
+        crate::db::get_bool(&row, "totp_enabled")
+    };
 
     if already_enabled {
         return Err(AppError::BadRequest(
@@ -1069,14 +1071,14 @@ pub async fn regenerate_backup_codes(
     verify_user_password(&state, &auth.user_id, &input.password).await?;
 
     // Verify 2FA is enabled
-    let enabled: bool = sqlx::query_scalar::<_, i64>(
-        "SELECT totp_enabled FROM users WHERE id = ?",
-    )
-    .bind(&auth.user_id)
-    .fetch_one(&state.db)
-    .await
-    .map(|v| v != 0)
-    .map_err(AppError::from)?;
+    let enabled = {
+        let row = sqlx::query("SELECT totp_enabled FROM users WHERE id = ?")
+            .bind(&auth.user_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(AppError::from)?;
+        crate::db::get_bool(&row, "totp_enabled")
+    };
 
     if !enabled {
         return Err(AppError::BadRequest(
@@ -1219,7 +1221,7 @@ async fn enforce_session_limit(pool: &sqlx::SqlitePool, user_id: &str) {
 /// Delete expired tokens for a user (background cleanup).
 async fn cleanup_expired_tokens(pool: &sqlx::AnyPool, user_id: &str) {
     let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S")
+        .format("%Y-%m-%dT%H:%M:%S+00:00")
         .to_string();
     let _ = sqlx::query("DELETE FROM user_tokens WHERE user_id = ? AND expires_at < ?")
         .bind(user_id)

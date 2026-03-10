@@ -78,7 +78,7 @@ pub async fn create_invite(
     let expires_at = max_age.map(|age| {
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::seconds(age);
-        expires.format("%Y-%m-%dT%H:%M:%S").to_string()
+        expires.format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
     });
 
     sqlx::query(
@@ -177,7 +177,7 @@ pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
     // Create a permanent space-level invite (no channel)
     let code = generate_code();
     sqlx::query(
-        "INSERT INTO invites (code, space_id, channel_id, inviter_id, max_uses, max_age, temporary) VALUES (?, ?, NULL, NULL, NULL, NULL, 0)"
+        "INSERT INTO invites (code, space_id, channel_id, inviter_id, max_uses, max_age, temporary) VALUES (?, ?, NULL, NULL, NULL, NULL, FALSE)"
     )
     .bind(&code)
     .bind(&space_id)
@@ -200,7 +200,7 @@ pub async fn use_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> 
 
     // Check if expired
     if let Some(ref expires_at) = invite.expires_at {
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
         if *expires_at < now {
             return Err(AppError::BadRequest("invite has expired".to_string()));
         }

@@ -49,7 +49,7 @@ async fn create_bearer_token(
     let token_hash = format!("{:x}", hasher.finalize());
 
     let expires_at = (chrono::Utc::now() + chrono::Duration::days(365))
-        .format("%Y-%m-%dT%H:%M:%S")
+        .format("%Y-%m-%dT%H:%M:%S+00:00")
         .to_string();
 
     sqlx::query("INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)")

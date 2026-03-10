@@ -93,7 +93,7 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
         .await?;
 
         if is_member == 0 {
-            db::members::add_member(pool, &space.id, uid, false).await?;
+            db::members::add_member(pool, &space.id, uid, state.db_is_postgres).await?;
         }
     }
 
