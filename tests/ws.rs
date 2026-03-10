@@ -315,6 +315,64 @@ async fn test_ws_voice_state_update_leave() {
 }
 
 #[tokio::test]
+async fn test_ws_voice_join_denied_without_connect_permission() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "VoiceSpace").await;
+    let vc_id = server.create_voice_channel(&space_id, "restricted-voice").await;
+
+    // Create bob as a space member
+    let bob = server.create_user_with_token("bob").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Deny the `connect` permission for bob via a member-level overwrite
+    accordserver::db::permission_overwrites::upsert_overwrite(
+        server.pool(),
+        &vc_id,
+        &accordserver::models::permission::PermissionOverwrite {
+            id: bob.user.id.clone(),
+            overwrite_type: "member".to_string(),
+            allow: vec![],
+            deny: vec!["connect".to_string()],
+        },
+    )
+    .await
+    .expect("failed to set permission overwrite");
+
+    let mut ws = connect_and_identify(&ws_url, &bob.gateway_token()).await;
+
+    // Bob tries to join the voice channel
+    let vsu = serde_json::json!({
+        "op": 9,
+        "data": {
+            "space_id": space_id,
+            "channel_id": vc_id,
+            "self_mute": false,
+            "self_deaf": false
+        }
+    });
+    ws.send(Message::Text(vsu.to_string().into()))
+        .await
+        .unwrap();
+
+    // Should NOT receive voice.server_update — the join is rejected due to missing connect perm
+    let result = tokio::time::timeout(std::time::Duration::from_millis(500), ws.next()).await;
+    assert!(
+        result.is_err(),
+        "bob should not receive voice.server_update when connect is denied"
+    );
+
+    // Verify no voice state was set for bob
+    let vs = accordserver::voice::state::get_user_voice_state(&server.state, &bob.user.id);
+    assert!(
+        vs.is_none(),
+        "bob's voice state should not be set when connect permission is denied"
+    );
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_ws_voice_state_update_invalid_space_ignored() {
     let (server, ws_url) = spawn_test_server().await;
     let alice = server.create_user_with_token("alice").await;
