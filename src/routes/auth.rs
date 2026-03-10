@@ -465,6 +465,10 @@ pub async fn login(
         let ticket_hash = create_token_hash(&ticket);
         let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
 
+        // Invalidate any existing MFA tickets for this user to prevent concurrent
+        // brute-force via multiple independent tickets.
+        state.mfa_tickets.retain(|_, v| v.user_id != user_id);
+
         state.mfa_tickets.insert(
             ticket_hash,
             MfaTicket {
