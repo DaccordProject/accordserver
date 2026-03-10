@@ -177,6 +177,16 @@ pub async fn delete_user(
     }
 
     db::admin::delete_user(&state.db, &user_id).await?;
+    db::audit_log::write(
+        &state.db,
+        None,
+        &auth.user_id,
+        "admin.user_delete",
+        Some("user"),
+        Some(&user_id),
+        serde_json::json!({}),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
@@ -258,6 +268,16 @@ pub async fn reset_user_password(
         .await
         .map_err(AppError::from)?;
 
+    db::audit_log::write(
+        &state.db,
+        None,
+        &auth.user_id,
+        "admin.password_reset",
+        Some("user"),
+        Some(&user_id),
+        serde_json::json!({}),
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "data": {
             "message": "password has been reset",

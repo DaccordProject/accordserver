@@ -379,6 +379,19 @@ pub async fn delete_message(
 
     // Broadcast to gateway
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    // Audit log: only record moderation deletions (actor != author)
+    if existing.author_id != auth.user_id {
+        db::audit_log::write(
+            &state.db,
+            channel.space_id.as_deref(),
+            &auth.user_id,
+            "message.delete",
+            Some("message"),
+            Some(&message_id),
+            serde_json::json!({ "channel_id": channel_id }),
+        )
+        .await;
+    }
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
             "op": 0,
@@ -413,6 +426,17 @@ pub async fn bulk_delete_messages(
         ));
     }
     db::messages::bulk_delete_messages(&state.db, &channel_id, &input.messages).await?;
+    let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    db::audit_log::write(
+        &state.db,
+        channel.space_id.as_deref(),
+        &auth.user_id,
+        "message.bulk_delete",
+        Some("channel"),
+        Some(&channel_id),
+        serde_json::json!({ "count": input.messages.len() }),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "data": null })))
 }
 

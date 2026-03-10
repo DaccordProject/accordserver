@@ -2170,3 +2170,186 @@ async fn test_admin_list_spaces_with_search() {
     assert_eq!(spaces.len(), 1);
     assert_eq!(spaces[0]["name"], "Alpha Space");
 }
+
+// =========================================================================
+// Audit Log
+// =========================================================================
+
+#[tokio::test]
+async fn test_audit_log_requires_manage_guild() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Test Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Bob (regular member) cannot read audit log
+    let app = server.router();
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/audit-log"),
+        &bob.auth_header(),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_audit_log_ban_creates_entry() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Test Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Alice (owner) bans Bob
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "reason": "test ban" }),
+    );
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Check audit log has entry
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/audit-log"),
+        &alice.auth_header(),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let entries = body["data"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    let entry = &entries[0];
+    assert_eq!(entry["action"], "ban.create");
+    assert_eq!(entry["actor_id"], alice.user.id);
+    assert_eq!(entry["target_id"], bob.user.id);
+}
+
+#[tokio::test]
+async fn test_audit_log_kick_creates_entry() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Test Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Alice (owner) kicks Bob
+    let app = server.router();
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}/members/{}", bob.user.id),
+        &alice.auth_header(),
+    );
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Check audit log
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/audit-log"),
+        &alice.auth_header(),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let entries = body["data"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    let entry = &entries[0];
+    assert_eq!(entry["action"], "member.kick");
+    assert_eq!(entry["actor_id"], alice.user.id);
+    assert_eq!(entry["target_id"], bob.user.id);
+}
+
+#[tokio::test]
+async fn test_audit_log_message_delete_moderation_creates_entry() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Test Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // Bob posts a message
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &bob.auth_header(),
+        &serde_json::json!({ "content": "hello" }),
+    );
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let message_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Alice (owner, not author) deletes Bob's message — moderation action
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/channels/{channel_id}/messages/{message_id}"),
+        &alice.auth_header(),
+    );
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Check audit log
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/audit-log"),
+        &alice.auth_header(),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let entries = body["data"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    let entry = &entries[0];
+    assert_eq!(entry["action"], "message.delete");
+    assert_eq!(entry["actor_id"], alice.user.id);
+}
+
+#[tokio::test]
+async fn test_audit_log_self_message_delete_no_entry() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Test Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // Alice posts a message
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "hello" }),
+    );
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let message_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Alice deletes her own message — NOT a moderation action
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/channels/{channel_id}/messages/{message_id}"),
+        &alice.auth_header(),
+    );
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Audit log should be empty
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/audit-log"),
+        &alice.auth_header(),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let entries = body["data"].as_array().unwrap();
+    assert!(entries.is_empty());
+}

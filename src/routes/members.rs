@@ -179,6 +179,16 @@ pub async fn kick_member(
     require_permission(&state.db, &space_id, &auth, "kick_members").await?;
     require_hierarchy(&state.db, &space_id, &auth, &user_id).await?;
     db::members::remove_member(&state.db, &space_id, &user_id).await?;
+    db::audit_log::write(
+        &state.db,
+        Some(&space_id),
+        &auth.user_id,
+        "member.kick",
+        Some("user"),
+        Some(&user_id),
+        serde_json::json!({}),
+    )
+    .await;
 
     // Broadcast member.leave to the space
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
@@ -276,6 +286,16 @@ pub async fn add_role(
     }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
     db::members::add_role_to_member(&state.db, &space_id, &user_id, &role_id).await?;
+    db::audit_log::write(
+        &state.db,
+        Some(&space_id),
+        &auth.user_id,
+        "role.add",
+        Some("user"),
+        Some(&user_id),
+        serde_json::json!({ "role_id": role_id }),
+    )
+    .await;
 
     // Broadcast member.update to the space
     let row = db::members::get_member_row(&state.db, &space_id, &user_id).await?;
@@ -309,6 +329,16 @@ pub async fn remove_role(
     }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
     db::members::remove_role_from_member(&state.db, &space_id, &user_id, &role_id).await?;
+    db::audit_log::write(
+        &state.db,
+        Some(&space_id),
+        &auth.user_id,
+        "role.remove",
+        Some("user"),
+        Some(&user_id),
+        serde_json::json!({ "role_id": role_id }),
+    )
+    .await;
 
     // Broadcast member.update to the space
     let row = db::members::get_member_row(&state.db, &space_id, &user_id).await?;

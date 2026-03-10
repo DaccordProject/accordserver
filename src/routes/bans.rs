@@ -70,6 +70,16 @@ pub async fn create_ban(
         &auth.user_id,
     )
     .await?;
+    db::audit_log::write(
+        &state.db,
+        Some(&space_id),
+        &auth.user_id,
+        "ban.create",
+        Some("user"),
+        Some(&user_id),
+        serde_json::json!({ "reason": ban.reason }),
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "data": {
             "user_id": ban.user_id,
@@ -89,5 +99,15 @@ pub async fn delete_ban(
     require_permission(&state.db, &space_id, &auth, "ban_members").await?;
     require_hierarchy(&state.db, &space_id, &auth, &user_id).await?;
     db::bans::delete_ban(&state.db, &space_id, &user_id).await?;
+    db::audit_log::write(
+        &state.db,
+        Some(&space_id),
+        &auth.user_id,
+        "ban.delete",
+        Some("user"),
+        Some(&user_id),
+        serde_json::json!({}),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "data": null })))
 }
