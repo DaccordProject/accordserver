@@ -27,7 +27,7 @@ fn row_to_space(row: sqlx::any::AnyRow) -> SpaceRow {
         nsfw_level: row.get("nsfw_level"),
         premium_tier: row.get("premium_tier"),
         premium_subscription_count: row.get("premium_subscription_count"),
-        public: row.get("public"),
+        public: crate::db::get_bool(&row, "public"),
         max_members: row.get("max_members"),
         created_at: row.get("created_at"),
     }
@@ -149,7 +149,7 @@ pub async fn update_space(
     input: &UpdateSpace,
     is_postgres: bool,
 ) -> Result<SpaceRow, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets: Vec<String> = Vec::new();
     let mut values: Vec<String> = Vec::new();
 
@@ -255,7 +255,7 @@ pub async fn list_public_spaces(pool: &AnyPool) -> Result<Vec<PublicSpaceRow>, A
                 COUNT(m.user_id) AS member_count
          FROM spaces s
          LEFT JOIN members m ON m.space_id = s.id
-         WHERE s.public = 1
+         WHERE s.public = TRUE
          GROUP BY s.id
          ORDER BY s.name",
     )
@@ -271,7 +271,7 @@ pub async fn list_public_spaces(pool: &AnyPool) -> Result<Vec<PublicSpaceRow>, A
             description: row.get("description"),
             icon: row.get("icon"),
             member_count: row.get("member_count"),
-            public: row.get("public"),
+            public: crate::db::get_bool(&row, "public"),
         })
         .collect())
 }

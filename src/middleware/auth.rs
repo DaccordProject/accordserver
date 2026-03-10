@@ -24,7 +24,7 @@ fn hash_token(token: &str) -> String {
 
 async fn resolve_bot_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
-    let row = sqlx::query_as::<_, (String, bool, bool)>(
+    let row = sqlx::query(
         "SELECT bt.user_id, u.is_admin, u.disabled FROM bot_tokens bt JOIN users u ON bt.user_id = u.id WHERE bt.token_hash = ?",
     )
     .bind(&token_hash)
@@ -32,21 +32,26 @@ async fn resolve_bot_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     .await
     .ok()??;
 
+    use sqlx::Row;
+    let user_id: String = row.get("user_id");
+    let is_admin = crate::db::get_bool(&row, "is_admin");
+    let disabled = crate::db::get_bool(&row, "disabled");
+
     // Disabled users cannot authenticate
-    if row.2 {
+    if disabled {
         return None;
     }
 
     Some(AuthUser {
-        user_id: row.0,
+        user_id,
         is_bot: true,
-        is_admin: row.1,
+        is_admin,
     })
 }
 
 async fn resolve_bearer_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
-    let row = sqlx::query_as::<_, (String, String, bool, bool)>(
+    let row = sqlx::query(
         "SELECT ut.user_id, ut.expires_at, u.is_admin, u.disabled FROM user_tokens ut JOIN users u ON ut.user_id = u.id WHERE ut.token_hash = ?",
     )
     .bind(&token_hash)
@@ -54,23 +59,38 @@ async fn resolve_bearer_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     .await
     .ok()??;
 
-    // Parse expiry with chrono instead of string comparison
-    let expires_at = chrono::NaiveDateTime::parse_from_str(&row.1, "%Y-%m-%dT%H:%M:%S")
+    use sqlx::Row;
+    let user_id: String = row.get("user_id");
+    let expires_at: String = row.get("expires_at");
+    let is_admin = crate::db::get_bool(&row, "is_admin");
+    let disabled = crate::db::get_bool(&row, "disabled");
+
+    // Parse expiry — handle both SQLite (NaiveDateTime) and Postgres (with timezone offset) formats
+    let expires_utc = chrono::DateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%S%z")
+        .map(|dt| dt.to_utc())
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%S")
+                .map(|dt| dt.and_utc())
+        })
+        .or_else(|_| {
+            // Postgres may also return "2025-01-01 00:00:00+00" (space-separated)
+            chrono::DateTime::parse_from_str(&expires_at, "%Y-%m-%d %H:%M:%S%z")
+                .map(|dt| dt.to_utc())
+        })
         .ok()?;
-    let expires_utc = expires_at.and_utc();
     if expires_utc < chrono::Utc::now() {
         return None;
     }
 
     // Disabled users cannot authenticate
-    if row.3 {
+    if disabled {
         return None;
     }
 
     Some(AuthUser {
-        user_id: row.0,
+        user_id,
         is_bot: false,
-        is_admin: row.2,
+        is_admin,
     })
 }
 

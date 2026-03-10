@@ -295,19 +295,6 @@ CREATE TABLE IF NOT EXISTS permission_overwrites (
     PRIMARY KEY (id, channel_id)
 );
 
--- SFU nodes (legacy, kept for schema compatibility)
-CREATE TABLE IF NOT EXISTS sfu_nodes (
-    id TEXT PRIMARY KEY NOT NULL,
-    endpoint TEXT NOT NULL,
-    region TEXT NOT NULL,
-    capacity INTEGER NOT NULL DEFAULT 0,
-    current_load INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'offline',
-    last_heartbeat TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 -- Soundboard sounds
 CREATE TABLE IF NOT EXISTS soundboard_sounds (
     id TEXT PRIMARY KEY NOT NULL,

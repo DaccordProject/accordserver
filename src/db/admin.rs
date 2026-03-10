@@ -59,7 +59,7 @@ pub async fn list_all_spaces(
             icon: row.get("icon"),
             owner_id: row.get("owner_id"),
             member_count: row.get("member_count"),
-            public: row.get("public"),
+            public: crate::db::get_bool(&row, "public"),
             created_at: row.get("created_at"),
         })
         .collect())
@@ -71,7 +71,7 @@ pub async fn admin_update_space(
     input: &crate::models::space::AdminUpdateSpace,
     is_postgres: bool,
 ) -> Result<(), AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets = Vec::new();
     let mut str_values: Vec<String> = Vec::new();
 
@@ -119,7 +119,8 @@ pub async fn admin_update_space(
         sets.push("public = ?");
     }
 
-    sets.push(&format!("updated_at = {now_fn}"));
+    let updated_at_set = format!("updated_at = {now_fn}");
+    sets.push(&updated_at_set);
     let set_clause = sets.join(", ");
     let sql = format!("UPDATE spaces SET {set_clause} WHERE id = ?");
     let mut query = sqlx::query(&sql);
@@ -189,10 +190,10 @@ pub async fn list_all_users(
                 "username": row.get::<String, _>("username"),
                 "display_name": row.get::<Option<String>, _>("display_name"),
                 "avatar": row.get::<Option<String>, _>("avatar"),
-                "bot": row.get::<bool, _>("bot"),
-                "system": row.get::<bool, _>("system"),
-                "is_admin": row.get::<bool, _>("is_admin"),
-                "disabled": row.get::<bool, _>("disabled"),
+                "bot": crate::db::get_bool(&row, "bot"),
+                "system": crate::db::get_bool(&row, "system"),
+                "is_admin": crate::db::get_bool(&row, "is_admin"),
+                "disabled": crate::db::get_bool(&row, "disabled"),
                 "created_at": row.get::<String, _>("created_at"),
                 "space_count": row.get::<i64, _>("space_count"),
             })
@@ -206,7 +207,7 @@ pub async fn admin_update_user(
     input: &AdminUpdateUser,
     is_postgres: bool,
 ) -> Result<User, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets = Vec::new();
     let mut str_values: Vec<String> = Vec::new();
 
@@ -238,7 +239,8 @@ pub async fn admin_update_user(
         return get_user(pool, user_id).await;
     }
 
-    sets.push(&format!("updated_at = {now_fn}"));
+    let updated_at_set = format!("updated_at = {now_fn}");
+    sets.push(&updated_at_set);
     let set_clause = sets.join(", ");
     let sql = format!("UPDATE users SET {set_clause} WHERE id = ?");
     let mut query = sqlx::query(&sql);
@@ -255,7 +257,7 @@ pub async fn admin_update_user(
 }
 
 pub async fn count_admins(pool: &AnyPool) -> Result<i64, AppError> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = TRUE")
         .fetch_one(pool)
         .await?;
     Ok(count)

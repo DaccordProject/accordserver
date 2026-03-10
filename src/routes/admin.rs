@@ -229,7 +229,7 @@ pub async fn reset_user_password(
 
     // Update password and set force_password_reset flag
     sqlx::query(
-        "UPDATE users SET password_hash = ?, force_password_reset = 1 WHERE id = ?",
+        "UPDATE users SET password_hash = ?, force_password_reset = TRUE WHERE id = ?",
     )
     .bind(&password_hash)
     .bind(&user_id)
@@ -245,7 +245,7 @@ pub async fn reset_user_password(
         .map_err(AppError::from)?;
 
     // Disable 2FA so the reset password can actually be used to log in
-    sqlx::query("UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?")
+    sqlx::query("UPDATE users SET totp_secret = NULL, totp_enabled = FALSE WHERE id = ?")
         .bind(&user_id)
         .execute(&state.db)
         .await

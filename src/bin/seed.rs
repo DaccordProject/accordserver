@@ -199,10 +199,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("  created 2 custom roles: Developer, Artist");
 
     // Role assignments: bob=Moderator, charlie=Developer, diana=Artist+Developer
-    db::members::add_role_to_member(&pool, space_id, bob, &moderator_role_id).await?;
-    db::members::add_role_to_member(&pool, space_id, charlie, &developer_role.id).await?;
-    db::members::add_role_to_member(&pool, space_id, diana, &artist_role.id).await?;
-    db::members::add_role_to_member(&pool, space_id, diana, &developer_role.id).await?;
+    db::members::add_role_to_member(&pool, space_id, bob, &moderator_role_id, is_postgres).await?;
+    db::members::add_role_to_member(&pool, space_id, charlie, &developer_role.id, is_postgres).await?;
+    db::members::add_role_to_member(&pool, space_id, diana, &artist_role.id, is_postgres).await?;
+    db::members::add_role_to_member(&pool, space_id, diana, &developer_role.id, is_postgres).await?;
 
     // ── Delete auto-created #general channel ───────────────────────
     // create_space makes a default #general — we'll recreate it under a category
@@ -728,9 +728,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("  added {} reactions", reactions.len());
 
     // ── Pinned messages ────────────────────────────────────────────
-    db::messages::pin_message(&pool, &ch_welcome.id, &welcome_msg).await?;
-    db::messages::pin_message(&pool, &ch_rules.id, &rules_msg).await?;
-    db::messages::pin_message(&pool, &ch_announcements.id, &announce1).await?;
+    db::messages::pin_message(&pool, &ch_welcome.id, &welcome_msg, is_postgres).await?;
+    db::messages::pin_message(&pool, &ch_rules.id, &rules_msg, is_postgres).await?;
+    db::messages::pin_message(&pool, &ch_announcements.id, &announce1, is_postgres).await?;
 
     println!("  pinned 3 messages");
 

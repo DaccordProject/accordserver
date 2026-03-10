@@ -11,6 +11,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
+use sqlx::Row;
+
 use crate::db;
 use crate::error::AppError;
 use crate::gateway::events::GatewayBroadcast;
@@ -559,7 +561,7 @@ pub async fn login(
     check_login_rate_limit(&state, &input.username)?;
 
     // Look up user by username (must not be a bot, must have password_hash)
-    let row = sqlx::query_as::<_, (String, String, bool, bool, bool)>(
+    let row = sqlx::query(
         "SELECT id, password_hash, disabled, force_password_reset, totp_enabled FROM users WHERE username = ? AND bot = false AND password_hash IS NOT NULL",
     )
     .bind(&input.username)
@@ -568,7 +570,14 @@ pub async fn login(
     .map_err(AppError::from)?;
 
     let (user_id, stored_hash, disabled, force_password_reset, totp_enabled) = match row {
-        Some(r) => r,
+        Some(r) => {
+            let id: String = r.get("id");
+            let hash: String = r.get("password_hash");
+            let dis = crate::db::get_bool(&r, "disabled");
+            let fpr = crate::db::get_bool(&r, "force_password_reset");
+            let totp = crate::db::get_bool(&r, "totp_enabled");
+            (id, hash, dis, fpr, totp)
+        }
         None => {
             // Run a dummy Argon2 verification to prevent timing-based user enumeration.
             let dummy_salt = SaltString::generate(&mut OsRng);
@@ -716,12 +725,13 @@ pub async fn login_mfa(
     enforce_session_limit(&state.db, user_id).await;
 
     // Check force_password_reset
-    let force_reset: bool = sqlx::query_scalar(
+    let force_reset: bool = sqlx::query_scalar::<_, i64>(
         "SELECT force_password_reset FROM users WHERE id = ?",
     )
     .bind(user_id)
     .fetch_one(&state.db)
     .await
+    .map(|v| v != 0)
     .unwrap_or(false);
 
     let mut data = serde_json::json!({
@@ -816,9 +826,9 @@ pub async fn change_password(
         .to_string();
 
     // Update password and clear force_password_reset flag
-    let now_fn = if state.db_is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(state.db_is_postgres);
     sqlx::query(&format!(
-        "UPDATE users SET password_hash = ?, force_password_reset = 0, updated_at = {now_fn} WHERE id = ?",
+        "UPDATE users SET password_hash = ?, force_password_reset = FALSE, updated_at = {now_fn} WHERE id = ?",
     ))
     .bind(&password_hash)
     .bind(&auth.user_id)
@@ -859,15 +869,16 @@ pub async fn enable_2fa(
     verify_user_password(&state, &auth.user_id, &input.password).await?;
 
     // Check if 2FA is already enabled
-    let row = sqlx::query_as::<_, (bool,)>(
+    let already_enabled: bool = sqlx::query_scalar::<_, i64>(
         "SELECT totp_enabled FROM users WHERE id = ?",
     )
     .bind(&auth.user_id)
     .fetch_one(&state.db)
     .await
+    .map(|v| v != 0)
     .map_err(AppError::from)?;
 
-    if row.0 {
+    if already_enabled {
         return Err(AppError::BadRequest(
             "2FA is already enabled".to_string(),
         ));
@@ -880,7 +891,7 @@ pub async fn enable_2fa(
 
     // Encrypt and store the secret (not yet enabled — user must verify first)
     let encrypted_secret = encrypt_totp_secret(&secret_base32, state.totp_key.as_ref());
-    let now_fn = if state.db_is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(state.db_is_postgres);
     sqlx::query(&format!(
         "UPDATE users SET totp_secret = ?, updated_at = {now_fn} WHERE id = ?",
     ))
@@ -931,7 +942,7 @@ pub async fn verify_2fa(
     check_totp_rate_limit(&state, &auth.user_id)?;
 
     // Fetch the stored secret
-    let row = sqlx::query_as::<_, (Option<String>, bool)>(
+    let confirm_row = sqlx::query(
         "SELECT totp_secret, totp_enabled FROM users WHERE id = ?",
     )
     .bind(&auth.user_id)
@@ -939,13 +950,14 @@ pub async fn verify_2fa(
     .await
     .map_err(AppError::from)?;
 
-    if row.1 {
+    if crate::db::get_bool(&confirm_row, "totp_enabled") {
         return Err(AppError::BadRequest(
             "2FA is already enabled".to_string(),
         ));
     }
 
-    let encrypted_secret = row.0.ok_or_else(|| {
+    let encrypted_secret: Option<String> = confirm_row.get("totp_secret");
+    let encrypted_secret = encrypted_secret.ok_or_else(|| {
         AppError::BadRequest("no 2FA setup in progress — call enable first".to_string())
     })?;
 
@@ -976,9 +988,9 @@ pub async fn verify_2fa(
     clear_totp_failures(&state, &auth.user_id);
 
     // Enable 2FA
-    let now_fn = if state.db_is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(state.db_is_postgres);
     sqlx::query(&format!(
-        "UPDATE users SET totp_enabled = 1, updated_at = {now_fn} WHERE id = ?",
+        "UPDATE users SET totp_enabled = TRUE, updated_at = {now_fn} WHERE id = ?",
     ))
     .bind(&auth.user_id)
     .execute(&state.db)
@@ -1024,9 +1036,9 @@ pub async fn disable_2fa(
     verify_user_password(&state, &auth.user_id, &input.password).await?;
 
     // Disable 2FA and clear secret + backup codes
-    let now_fn = if state.db_is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(state.db_is_postgres);
     sqlx::query(&format!(
-        "UPDATE users SET totp_enabled = 0, totp_secret = NULL, updated_at = {now_fn} WHERE id = ?",
+        "UPDATE users SET totp_enabled = FALSE, totp_secret = NULL, updated_at = {now_fn} WHERE id = ?",
     ))
     .bind(&auth.user_id)
     .execute(&state.db)
@@ -1057,12 +1069,13 @@ pub async fn regenerate_backup_codes(
     verify_user_password(&state, &auth.user_id, &input.password).await?;
 
     // Verify 2FA is enabled
-    let enabled: bool = sqlx::query_scalar(
+    let enabled: bool = sqlx::query_scalar::<_, i64>(
         "SELECT totp_enabled FROM users WHERE id = ?",
     )
     .bind(&auth.user_id)
     .fetch_one(&state.db)
     .await
+    .map(|v| v != 0)
     .map_err(AppError::from)?;
 
     if !enabled {
@@ -1142,7 +1155,7 @@ async fn verify_and_consume_backup_code(
 ) -> Result<(), AppError> {
     let code_hash = hash_backup_code(code);
 
-    let row = sqlx::query_as::<_, (i64, bool)>(
+    let row = sqlx::query(
         "SELECT id, used FROM backup_codes WHERE user_id = ? AND code_hash = ?",
     )
     .bind(user_id)
@@ -1152,7 +1165,9 @@ async fn verify_and_consume_backup_code(
     .map_err(AppError::from)?;
 
     match row {
-        Some((id, used)) => {
+        Some(r) => {
+            let id: i64 = r.get("id");
+            let used = crate::db::get_bool(&r, "used");
             if used {
                 record_totp_failure(state, user_id);
                 return Err(AppError::Unauthorized(
@@ -1160,7 +1175,7 @@ async fn verify_and_consume_backup_code(
                 ));
             }
             // Mark as used
-            sqlx::query("UPDATE backup_codes SET used = 1 WHERE id = ?")
+            sqlx::query("UPDATE backup_codes SET used = TRUE WHERE id = ?")
                 .bind(id)
                 .execute(&state.db)
                 .await

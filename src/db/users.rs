@@ -13,11 +13,11 @@ fn row_to_user(row: sqlx::any::AnyRow) -> User {
         banner: row.get("banner"),
         accent_color: row.get("accent_color"),
         bio: row.get("bio"),
-        bot: row.get("bot"),
-        system: row.get("system"),
-        is_admin: row.get("is_admin"),
-        mfa_enabled: row.get("totp_enabled"),
-        disabled: row.get("disabled"),
+        bot: crate::db::get_bool(&row, "bot"),
+        system: crate::db::get_bool(&row, "system"),
+        is_admin: crate::db::get_bool(&row, "is_admin"),
+        mfa_enabled: crate::db::get_bool(&row, "totp_enabled"),
+        disabled: crate::db::get_bool(&row, "disabled"),
         flags: row.get("flags"),
         public_flags: row.get("public_flags"),
         created_at: row.get("created_at"),
@@ -56,7 +56,7 @@ pub async fn update_user(
     input: &UpdateUser,
     is_postgres: bool,
 ) -> Result<User, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets = Vec::new();
     let mut values: Vec<String> = Vec::new();
 
@@ -104,7 +104,8 @@ pub async fn update_user(
                 .execute(pool)
                 .await?;
         } else {
-            sets.push(&format!("updated_at = {now_fn}"));
+            let updated_at_set = format!("updated_at = {now_fn}");
+            sets.push(&updated_at_set);
             let set_clause = sets.join(", ");
             let query = format!("UPDATE users SET {set_clause}, accent_color = ? WHERE id = ?");
             let mut q = sqlx::query(&query);
@@ -115,7 +116,8 @@ pub async fn update_user(
             q.execute(pool).await?;
         }
     } else {
-        sets.push(&format!("updated_at = {now_fn}"));
+        let updated_at_set = format!("updated_at = {now_fn}");
+        sets.push(&updated_at_set);
         let set_clause = sets.join(", ");
         let query = format!("UPDATE users SET {set_clause} WHERE id = ?");
         let mut q = sqlx::query(&query);
@@ -156,13 +158,13 @@ pub async fn get_user_dm_channels(
             topic: row.get("topic"),
             position: row.get("position"),
             parent_id: row.get("parent_id"),
-            nsfw: row.get("nsfw"),
+            nsfw: crate::db::get_bool(&row, "nsfw"),
             rate_limit: row.get("rate_limit"),
             bitrate: row.get("bitrate"),
             user_limit: row.get("user_limit"),
             owner_id: row.get("owner_id"),
             last_message_id: row.get("last_message_id"),
-            archived: row.get("archived"),
+            archived: crate::db::get_bool(&row, "archived"),
             auto_archive_after: row.get("auto_archive_after"),
             created_at: row.get("created_at"),
         })

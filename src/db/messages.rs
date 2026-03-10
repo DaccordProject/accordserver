@@ -16,9 +16,9 @@ fn row_to_message(row: sqlx::any::AnyRow) -> MessageRow {
         message_type: row.get("type"),
         created_at: row.get("created_at"),
         edited_at: row.get("edited_at"),
-        tts: row.get("tts"),
-        pinned: row.get("pinned"),
-        mention_everyone: row.get("mention_everyone"),
+        tts: crate::db::get_bool(&row, "tts"),
+        pinned: crate::db::get_bool(&row, "pinned"),
+        mention_everyone: crate::db::get_bool(&row, "mention_everyone"),
         mentions: row.get("mentions"),
         mention_roles: row.get("mention_roles"),
         embeds: row.get("embeds"),
@@ -139,7 +139,7 @@ pub async fn update_message(
     input: &UpdateMessage,
     is_postgres: bool,
 ) -> Result<MessageRow, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     if let Some(ref content) = input.content {
         let sql = format!(
             "UPDATE messages SET content = ?, edited_at = {now_fn}, updated_at = {now_fn} WHERE id = ?"
@@ -203,7 +203,7 @@ pub async fn pin_message(
         .bind(message_id)
         .execute(pool)
         .await?;
-    sqlx::query("UPDATE messages SET pinned = 1 WHERE id = ?")
+    sqlx::query("UPDATE messages SET pinned = TRUE WHERE id = ?")
         .bind(message_id)
         .execute(pool)
         .await?;
@@ -220,7 +220,7 @@ pub async fn unpin_message(
         .bind(message_id)
         .execute(pool)
         .await?;
-    sqlx::query("UPDATE messages SET pinned = 0 WHERE id = ?")
+    sqlx::query("UPDATE messages SET pinned = FALSE WHERE id = ?")
         .bind(message_id)
         .execute(pool)
         .await?;

@@ -11,9 +11,9 @@ fn row_to_member(row: sqlx::any::AnyRow) -> MemberRow {
         avatar: row.get("avatar"),
         joined_at: row.get("joined_at"),
         premium_since: row.get("premium_since"),
-        deaf: row.get("deaf"),
-        mute: row.get("mute"),
-        pending: row.get("pending"),
+        deaf: crate::db::get_bool(&row, "deaf"),
+        mute: crate::db::get_bool(&row, "mute"),
+        pending: crate::db::get_bool(&row, "pending"),
         timed_out_until: row.get("timed_out_until"),
     }
 }

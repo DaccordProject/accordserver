@@ -1,85 +1,57 @@
-use sqlx::AnyPool;
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::invite::{CreateInvite, Invite};
 
-pub async fn get_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> {
-    let row = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<i64>, i64, Option<i64>, bool, String, Option<String>)>(
-        "SELECT code, space_id, channel_id, inviter_id, max_uses, uses, max_age, temporary, created_at, expires_at FROM invites WHERE code = ?"
-    )
-    .bind(code)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("invite not found".to_string()))?;
+fn row_to_invite(row: sqlx::any::AnyRow) -> Invite {
+    Invite {
+        code: row.get("code"),
+        space_id: row.get("space_id"),
+        channel_id: row.get("channel_id"),
+        inviter_id: row.get("inviter_id"),
+        max_uses: row.get("max_uses"),
+        uses: row.get("uses"),
+        max_age: row.get("max_age"),
+        temporary: crate::db::get_bool(&row, "temporary"),
+        created_at: row.get("created_at"),
+        expires_at: row.get("expires_at"),
+    }
+}
 
-    Ok(Invite {
-        code: row.0,
-        space_id: row.1,
-        channel_id: row.2,
-        inviter_id: row.3,
-        max_uses: row.4,
-        uses: row.5,
-        max_age: row.6,
-        temporary: row.7,
-        created_at: row.8,
-        expires_at: row.9,
-    })
+const SELECT_INVITES: &str = "SELECT code, space_id, channel_id, inviter_id, max_uses, uses, max_age, temporary, created_at, expires_at FROM invites";
+
+pub async fn get_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> {
+    let row = sqlx::query(&format!("{SELECT_INVITES} WHERE code = ?"))
+        .bind(code)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("invite not found".to_string()))?;
+
+    Ok(row_to_invite(row))
 }
 
 pub async fn list_space_invites(
     pool: &AnyPool,
     space_id: &str,
 ) -> Result<Vec<Invite>, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<i64>, i64, Option<i64>, bool, String, Option<String>)>(
-        "SELECT code, space_id, channel_id, inviter_id, max_uses, uses, max_age, temporary, created_at, expires_at FROM invites WHERE space_id = ?"
-    )
-    .bind(space_id)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query(&format!("{SELECT_INVITES} WHERE space_id = ?"))
+        .bind(space_id)
+        .fetch_all(pool)
+        .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| Invite {
-            code: row.0,
-            space_id: row.1,
-            channel_id: row.2,
-            inviter_id: row.3,
-            max_uses: row.4,
-            uses: row.5,
-            max_age: row.6,
-            temporary: row.7,
-            created_at: row.8,
-            expires_at: row.9,
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_invite).collect())
 }
 
 pub async fn list_channel_invites(
     pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<Invite>, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<i64>, i64, Option<i64>, bool, String, Option<String>)>(
-        "SELECT code, space_id, channel_id, inviter_id, max_uses, uses, max_age, temporary, created_at, expires_at FROM invites WHERE channel_id = ?"
-    )
-    .bind(channel_id)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query(&format!("{SELECT_INVITES} WHERE channel_id = ?"))
+        .bind(channel_id)
+        .fetch_all(pool)
+        .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| Invite {
-            code: row.0,
-            space_id: row.1,
-            channel_id: row.2,
-            inviter_id: row.3,
-            max_uses: row.4,
-            uses: row.5,
-            max_age: row.6,
-            temporary: row.7,
-            created_at: row.8,
-            expires_at: row.9,
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_invite).collect())
 }
 
 fn generate_code() -> String {
@@ -149,7 +121,7 @@ pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
             )
             .await?;
 
-            sqlx::query("UPDATE users SET system = 1 WHERE id = ?")
+            sqlx::query("UPDATE users SET system = TRUE WHERE id = ?")
                 .bind(&system_user.id)
                 .execute(pool)
                 .await?;

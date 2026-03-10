@@ -24,7 +24,7 @@ pub async fn get_settings(pool: &AnyPool) -> Result<ServerSettings, AppError> {
         max_spaces: row.get("max_spaces"),
         max_members_per_space: row.get("max_members_per_space"),
         motd: row.get("motd"),
-        public_listing: row.get("public_listing"),
+        public_listing: crate::db::get_bool(&row, "public_listing"),
         updated_at: row.get("updated_at"),
     })
 }
@@ -34,7 +34,7 @@ pub async fn update_settings(
     input: &UpdateServerSettings,
     is_postgres: bool,
 ) -> Result<ServerSettings, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets = Vec::new();
     if input.max_emoji_size.is_some() {
         sets.push("max_emoji_size = ?");
@@ -74,7 +74,8 @@ pub async fn update_settings(
         return get_settings(pool).await;
     }
 
-    sets.push(&format!("updated_at = {now_fn}"));
+    let updated_at_set = format!("updated_at = {now_fn}");
+    sets.push(&updated_at_set);
 
     let sql = format!("UPDATE server_settings SET {} WHERE id = 1", sets.join(", "));
 

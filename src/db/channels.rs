@@ -14,13 +14,13 @@ fn row_to_channel(row: sqlx::any::AnyRow) -> ChannelRow {
         topic: row.get("topic"),
         position: row.get("position"),
         parent_id: row.get("parent_id"),
-        nsfw: row.get("nsfw"),
+        nsfw: crate::db::get_bool(&row, "nsfw"),
         rate_limit: row.get("rate_limit"),
         bitrate: row.get("bitrate"),
         user_limit: row.get("user_limit"),
         owner_id: row.get("owner_id"),
         last_message_id: row.get("last_message_id"),
-        archived: row.get("archived"),
+        archived: crate::db::get_bool(&row, "archived"),
         auto_archive_after: row.get("auto_archive_after"),
         created_at: row.get("created_at"),
     }
@@ -86,7 +86,7 @@ pub async fn update_channel(
     input: &UpdateChannel,
     is_postgres: bool,
 ) -> Result<ChannelRow, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets = Vec::new();
     let mut str_values: Vec<Option<String>> = Vec::new();
     let mut int_values: Vec<(String, i64)> = Vec::new();

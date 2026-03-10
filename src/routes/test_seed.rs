@@ -205,7 +205,7 @@ async fn find_or_create_application(
 
     let bot_user_id = match existing_bot_id {
         Some(id) => {
-            sqlx::query("UPDATE users SET bot = 1 WHERE id = ?")
+            sqlx::query("UPDATE users SET bot = TRUE WHERE id = ?")
                 .bind(&id)
                 .execute(pool)
                 .await?;
@@ -220,7 +220,7 @@ async fn find_or_create_application(
                 },
             )
             .await?;
-            sqlx::query("UPDATE users SET bot = 1 WHERE id = ?")
+            sqlx::query("UPDATE users SET bot = TRUE WHERE id = ?")
                 .bind(&bot_user.id)
                 .execute(pool)
                 .await?;

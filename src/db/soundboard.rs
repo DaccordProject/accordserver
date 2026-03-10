@@ -87,7 +87,7 @@ pub async fn update_sound(
     input: &UpdateSound,
     is_postgres: bool,
 ) -> Result<SoundboardSound, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     if let Some(ref name) = input.name {
         let sql = format!(
             "UPDATE soundboard_sounds SET name = ?, updated_at = {now_fn} WHERE id = ?"

@@ -307,7 +307,7 @@ impl TestServer {
     /// Create an admin user with a token. Sets `is_admin = true` on the user.
     pub async fn create_admin_with_token(&self, username: &str) -> TestUser {
         let test_user = self.create_user_with_token(username).await;
-        sqlx::query("UPDATE users SET is_admin = 1 WHERE id = ?")
+        sqlx::query("UPDATE users SET is_admin = TRUE WHERE id = ?")
             .bind(&test_user.user.id)
             .execute(self.pool())
             .await

@@ -517,7 +517,7 @@ async fn tool_ban_user(state: &AppState, args: &Value) -> Result<String, String>
 
     // Remove membership first, then ban
     let _ = db::members::remove_member(&state.db, space_id, user_id).await;
-    let ban = db::bans::create_ban(&state.db, space_id, user_id, reason, "mcp")
+    let ban = db::bans::create_ban(&state.db, space_id, user_id, reason, "mcp", state.db_is_postgres)
         .await
         .map_err(map_err)?;
 

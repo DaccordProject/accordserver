@@ -1,55 +1,43 @@
-use sqlx::AnyPool;
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::role::{CreateRole, RoleRow, UpdateRole};
 use crate::snowflake;
 
-pub async fn get_role_row(pool: &AnyPool, role_id: &str) -> Result<RoleRow, AppError> {
-    let row = sqlx::query_as::<_, (String, String, String, i64, bool, Option<String>, i64, String, bool, bool)>(
-        "SELECT id, space_id, name, color, hoist, icon, position, permissions, managed, mentionable FROM roles WHERE id = ?"
-    )
-    .bind(role_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("unknown_role".to_string()))?;
+fn row_to_role(row: sqlx::any::AnyRow) -> RoleRow {
+    RoleRow {
+        id: row.get("id"),
+        space_id: row.get("space_id"),
+        name: row.get("name"),
+        color: row.get("color"),
+        hoist: crate::db::get_bool(&row, "hoist"),
+        icon: row.get("icon"),
+        position: row.get("position"),
+        permissions: row.get("permissions"),
+        managed: crate::db::get_bool(&row, "managed"),
+        mentionable: crate::db::get_bool(&row, "mentionable"),
+    }
+}
 
-    Ok(RoleRow {
-        id: row.0,
-        space_id: row.1,
-        name: row.2,
-        color: row.3,
-        hoist: row.4,
-        icon: row.5,
-        position: row.6,
-        permissions: row.7,
-        managed: row.8,
-        mentionable: row.9,
-    })
+const SELECT_ROLES: &str = "SELECT id, space_id, name, color, hoist, icon, position, permissions, managed, mentionable FROM roles";
+
+pub async fn get_role_row(pool: &AnyPool, role_id: &str) -> Result<RoleRow, AppError> {
+    let row = sqlx::query(&format!("{SELECT_ROLES} WHERE id = ?"))
+        .bind(role_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("unknown_role".to_string()))?;
+
+    Ok(row_to_role(row))
 }
 
 pub async fn list_roles(pool: &AnyPool, space_id: &str) -> Result<Vec<RoleRow>, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, String, i64, bool, Option<String>, i64, String, bool, bool)>(
-        "SELECT id, space_id, name, color, hoist, icon, position, permissions, managed, mentionable FROM roles WHERE space_id = ? ORDER BY position"
-    )
-    .bind(space_id)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query(&format!("{SELECT_ROLES} WHERE space_id = ? ORDER BY position"))
+        .bind(space_id)
+        .fetch_all(pool)
+        .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| RoleRow {
-            id: row.0,
-            space_id: row.1,
-            name: row.2,
-            color: row.3,
-            hoist: row.4,
-            icon: row.5,
-            position: row.6,
-            permissions: row.7,
-            managed: row.8,
-            mentionable: row.9,
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_role).collect())
 }
 
 pub async fn create_role(
@@ -91,7 +79,7 @@ pub async fn update_role(
     input: &UpdateRole,
     is_postgres: bool,
 ) -> Result<RoleRow, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets: Vec<String> = Vec::new();
     let mut str_values: Vec<String> = Vec::new();
     let mut int_vals: Vec<(String, i64)> = Vec::new();

@@ -132,7 +132,7 @@ pub async fn resolve_report(
     action_taken: Option<&str>,
     is_postgres: bool,
 ) -> Result<ReportRow, AppError> {
-    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let now_fn = crate::db::now_sql(is_postgres);
     let sql = format!(
         "UPDATE reports SET status = ?, actioned_by = ?, action_taken = ?, resolved_at = {now_fn} WHERE id = ?"
     );
