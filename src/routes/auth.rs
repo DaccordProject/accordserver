@@ -308,7 +308,7 @@ pub async fn register(
     .map_err(AppError::from)?;
 
     if existing.is_some() {
-        return Err(AppError::Conflict("username already taken".to_string()));
+        return Err(AppError::Conflict("registration failed".to_string()));
     }
 
     // Hash password with Argon2id (OWASP-recommended params: 19 MiB memory, 3 iterations)
