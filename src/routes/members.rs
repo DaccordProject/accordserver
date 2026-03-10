@@ -275,7 +275,7 @@ pub async fn add_role(
         return Err(AppError::NotFound("role not found in this space".into()));
     }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
-    db::members::add_role_to_member(&state.db, &space_id, &user_id, &role_id).await?;
+    db::members::add_role_to_member(&state.db, &space_id, &user_id, &role_id, state.db_is_postgres).await?;
 
     // Broadcast member.update to the space
     let row = db::members::get_member_row(&state.db, &space_id, &user_id).await?;

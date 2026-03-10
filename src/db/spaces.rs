@@ -1,11 +1,11 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::space::{CreateSpace, PublicSpaceRow, SpaceRow, UpdateSpace};
 use crate::slug;
 use crate::snowflake;
 
-fn row_to_space(row: sqlx::sqlite::SqliteRow) -> SpaceRow {
+fn row_to_space(row: sqlx::any::AnyRow) -> SpaceRow {
     SpaceRow {
         id: row.get("id"),
         name: row.get("name"),
@@ -35,7 +35,7 @@ fn row_to_space(row: sqlx::sqlite::SqliteRow) -> SpaceRow {
 
 const SELECT_SPACES: &str = "SELECT id, name, slug, description, icon, banner, splash, owner_id, verification_level, default_notifications, explicit_content_filter, vanity_url_code, preferred_locale, afk_channel_id, afk_timeout, system_channel_id, rules_channel_id, nsfw_level, premium_tier, premium_subscription_count, public, max_members, created_at FROM spaces";
 
-pub async fn get_space_row(pool: &SqlitePool, space_id: &str) -> Result<SpaceRow, AppError> {
+pub async fn get_space_row(pool: &AnyPool, space_id: &str) -> Result<SpaceRow, AppError> {
     let row = sqlx::query(&format!("{SELECT_SPACES} WHERE id = ?"))
         .bind(space_id)
         .fetch_optional(pool)
@@ -46,7 +46,7 @@ pub async fn get_space_row(pool: &SqlitePool, space_id: &str) -> Result<SpaceRow
 }
 
 pub async fn create_space(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     owner_id: &str,
     input: &CreateSpace,
 ) -> Result<SpaceRow, AppError> {
@@ -144,10 +144,12 @@ pub async fn create_space(
 }
 
 pub async fn update_space(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     input: &UpdateSpace,
+    is_postgres: bool,
 ) -> Result<SpaceRow, AppError> {
+    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
     let mut sets: Vec<String> = Vec::new();
     let mut values: Vec<String> = Vec::new();
 
@@ -223,7 +225,7 @@ pub async fn update_space(
         return get_space_row(pool, space_id).await;
     }
 
-    sets.push("updated_at = datetime('now')".to_string());
+    sets.push(format!("updated_at = {now_fn}"));
     let set_clause = sets.join(", ");
     let query = format!("UPDATE spaces SET {set_clause} WHERE id = ?");
     let mut q = sqlx::query(&query);
@@ -239,7 +241,7 @@ pub async fn update_space(
     get_space_row(pool, space_id).await
 }
 
-pub async fn delete_space(pool: &SqlitePool, space_id: &str) -> Result<(), AppError> {
+pub async fn delete_space(pool: &AnyPool, space_id: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM spaces WHERE id = ?")
         .bind(space_id)
         .execute(pool)
@@ -247,7 +249,7 @@ pub async fn delete_space(pool: &SqlitePool, space_id: &str) -> Result<(), AppEr
     Ok(())
 }
 
-pub async fn list_public_spaces(pool: &SqlitePool) -> Result<Vec<PublicSpaceRow>, AppError> {
+pub async fn list_public_spaces(pool: &AnyPool) -> Result<Vec<PublicSpaceRow>, AppError> {
     let rows = sqlx::query(
         "SELECT s.id, s.name, s.slug, s.description, s.icon, s.public,
                 COUNT(m.user_id) AS member_count
@@ -275,7 +277,7 @@ pub async fn list_public_spaces(pool: &SqlitePool) -> Result<Vec<PublicSpaceRow>
 }
 
 pub async fn list_space_ids_for_user(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
 ) -> Result<Vec<String>, AppError> {
     let rows = sqlx::query_as::<_, (String,)>("SELECT space_id FROM members WHERE user_id = ?")
@@ -286,7 +288,7 @@ pub async fn list_space_ids_for_user(
 }
 
 pub async fn list_member_ids_for_space(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
 ) -> Result<Vec<String>, AppError> {
     let rows = sqlx::query_as::<_, (String,)>("SELECT user_id FROM members WHERE space_id = ?")
@@ -296,7 +298,7 @@ pub async fn list_member_ids_for_space(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-pub async fn get_space_by_slug(pool: &SqlitePool, slug: &str) -> Result<SpaceRow, AppError> {
+pub async fn get_space_by_slug(pool: &AnyPool, slug: &str) -> Result<SpaceRow, AppError> {
     let row = sqlx::query(&format!("{SELECT_SPACES} WHERE slug = ?"))
         .bind(slug)
         .fetch_optional(pool)
@@ -309,7 +311,7 @@ pub async fn get_space_by_slug(pool: &SqlitePool, slug: &str) -> Result<SpaceRow
 /// Ensure a slug is unique in the database. If taken, appends `-2`, `-3`, etc.
 /// When `exclude_id` is `Some`, the space with that ID is ignored (for updates).
 async fn ensure_unique_slug(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     base_slug: &str,
     exclude_id: Option<&str>,
 ) -> Result<String, AppError> {

@@ -12,7 +12,7 @@ use accordserver::voice::livekit::LiveKitClient;
 use axum::body::Body;
 use dashmap::DashMap;
 use http::{Method, Request};
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -48,6 +48,7 @@ pub struct TestServer {
 impl TestServer {
     /// Create a new TestServer with an in-memory SQLite database.
     pub async fn new() -> Self {
+        sqlx::any::install_default_drivers();
         let pool = db::create_pool("sqlite::memory:")
             .await
             .expect("failed to create test pool");
@@ -73,6 +74,7 @@ impl TestServer {
 
         let state = AppState {
             db: pool,
+            db_is_postgres: false,
             voice_states: Arc::new(DashMap::new()),
             presences: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
@@ -100,8 +102,8 @@ impl TestServer {
         routes::router(self.state.clone())
     }
 
-    /// Returns a reference to the underlying SQLite pool.
-    pub fn pool(&self) -> &SqlitePool {
+    /// Returns a reference to the underlying database pool.
+    pub fn pool(&self) -> &AnyPool {
         &self.state.db
     }
 
@@ -219,7 +221,7 @@ impl TestServer {
 
     /// Ban a user from a space.
     pub async fn ban_user(&self, space_id: &str, user_id: &str, banned_by: &str) {
-        db::bans::create_ban(self.pool(), space_id, user_id, Some("test ban"), banned_by)
+        db::bans::create_ban(self.pool(), space_id, user_id, Some("test ban"), banned_by, false)
             .await
             .expect("failed to ban test user");
     }
@@ -270,7 +272,7 @@ impl TestServer {
 
     /// Add a user as a member of a space.
     pub async fn add_member(&self, space_id: &str, user_id: &str) {
-        db::members::add_member(self.pool(), space_id, user_id)
+        db::members::add_member(self.pool(), space_id, user_id, false)
             .await
             .expect("failed to add test member");
     }
@@ -297,7 +299,7 @@ impl TestServer {
 
     /// Assign a role to a member via the DB.
     pub async fn assign_role(&self, space_id: &str, user_id: &str, role_id: &str) {
-        db::members::add_role_to_member(self.pool(), space_id, user_id, role_id)
+        db::members::add_role_to_member(self.pool(), space_id, user_id, role_id, false)
             .await
             .expect("failed to assign test role");
     }

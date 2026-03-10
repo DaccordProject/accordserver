@@ -72,7 +72,7 @@ pub async fn update_space(
         db::users::get_user(&state.db, owner_id).await?;
     }
 
-    db::admin::admin_update_space(&state.db, &space_id, &input).await?;
+    db::admin::admin_update_space(&state.db, &space_id, &input, state.db_is_postgres).await?;
 
     let space = db::spaces::get_space_row(&state.db, &space_id).await?;
     Ok(Json(serde_json::json!({ "data": space })))
@@ -150,7 +150,7 @@ pub async fn update_user(
         }
     }
 
-    let user = db::admin::admin_update_user(&state.db, &user_id, &input).await?;
+    let user = db::admin::admin_update_user(&state.db, &user_id, &input, state.db_is_postgres).await?;
     Ok(Json(serde_json::json!({ "data": user })))
 }
 

@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 
@@ -45,7 +45,7 @@ fn row_to_rel(
 }
 
 pub async fn list_relationships(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
 ) -> Result<Vec<RelationshipRow>, AppError> {
     let rows = sqlx::query_as::<
@@ -70,7 +70,7 @@ pub async fn list_relationships(
 }
 
 pub async fn get_relationship(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
     target_id: &str,
 ) -> Result<Option<RelationshipRow>, AppError> {
@@ -98,7 +98,7 @@ pub async fn get_relationship(
 
 /// Insert or update a directed relationship row.
 pub async fn upsert_relationship(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
     target_id: &str,
     rel_type: i64,
@@ -119,7 +119,7 @@ pub async fn upsert_relationship(
 
 /// Delete a single directed relationship row. Returns true if a row was deleted.
 pub async fn delete_relationship(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
     target_id: &str,
 ) -> Result<bool, AppError> {
@@ -134,7 +134,7 @@ pub async fn delete_relationship(
 
 /// Delete both directed relationship rows (mutual remove for unfriend/decline).
 pub async fn delete_both_directions(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_a: &str,
     user_b: &str,
 ) -> Result<(), AppError> {
@@ -153,7 +153,7 @@ pub async fn delete_both_directions(
 }
 
 /// Return all friend user IDs for a user (type = 1).
-pub async fn get_friend_ids(pool: &SqlitePool, user_id: &str) -> Result<Vec<String>, AppError> {
+pub async fn get_friend_ids(pool: &AnyPool, user_id: &str) -> Result<Vec<String>, AppError> {
     let rows = sqlx::query_as::<_, (String,)>(
         "SELECT target_user_id FROM relationships WHERE user_id = ? AND type = 1",
     )
@@ -165,7 +165,7 @@ pub async fn get_friend_ids(pool: &SqlitePool, user_id: &str) -> Result<Vec<Stri
 
 /// Check whether user_b has blocked user_a.
 pub async fn is_blocked_by(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     blocker_id: &str,
     blocked_id: &str,
 ) -> Result<bool, AppError> {

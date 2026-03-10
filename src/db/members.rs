@@ -1,9 +1,9 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::member::{MemberRow, UpdateMember};
 
-fn row_to_member(row: sqlx::sqlite::SqliteRow) -> MemberRow {
+fn row_to_member(row: sqlx::any::AnyRow) -> MemberRow {
     MemberRow {
         user_id: row.get("user_id"),
         space_id: row.get("space_id"),
@@ -21,7 +21,7 @@ fn row_to_member(row: sqlx::sqlite::SqliteRow) -> MemberRow {
 const SELECT_MEMBERS: &str = "SELECT user_id, space_id, nickname, avatar, joined_at, premium_since, deaf, mute, pending, timed_out_until FROM members";
 
 pub async fn get_member_row(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
 ) -> Result<MemberRow, AppError> {
@@ -38,7 +38,7 @@ pub async fn get_member_row(
 }
 
 pub async fn list_members(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     after: Option<&str>,
     limit: i64,
@@ -66,7 +66,7 @@ pub async fn list_members(
 }
 
 pub async fn search_members(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     query: &str,
     limit: i64,
@@ -86,11 +86,17 @@ pub async fn search_members(
 }
 
 pub async fn add_member(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
+    is_postgres: bool,
 ) -> Result<MemberRow, AppError> {
-    sqlx::query("INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)")
+    let sql = if is_postgres {
+        "INSERT INTO members (user_id, space_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)"
+    };
+    sqlx::query(sql)
         .bind(user_id)
         .bind(space_id)
         .execute(pool)
@@ -100,7 +106,7 @@ pub async fn add_member(
 }
 
 pub async fn remove_member(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
 ) -> Result<(), AppError> {
@@ -113,7 +119,7 @@ pub async fn remove_member(
 }
 
 pub async fn update_member(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
     input: &UpdateMember,
@@ -182,7 +188,7 @@ pub async fn update_member(
 }
 
 pub async fn get_member_role_ids(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
 ) -> Result<Vec<String>, AppError> {
@@ -197,12 +203,18 @@ pub async fn get_member_role_ids(
 }
 
 pub async fn add_role_to_member(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
     role_id: &str,
+    is_postgres: bool,
 ) -> Result<(), AppError> {
-    sqlx::query("INSERT OR IGNORE INTO member_roles (user_id, space_id, role_id) VALUES (?, ?, ?)")
+    let sql = if is_postgres {
+        "INSERT INTO member_roles (user_id, space_id, role_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO member_roles (user_id, space_id, role_id) VALUES (?, ?, ?)"
+    };
+    sqlx::query(sql)
         .bind(user_id)
         .bind(space_id)
         .bind(role_id)
@@ -212,7 +224,7 @@ pub async fn add_role_to_member(
 }
 
 pub async fn remove_role_from_member(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
     role_id: &str,

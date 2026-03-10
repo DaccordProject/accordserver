@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::message::{CreateMessage, MessageRow, UpdateMessage};
 use crate::snowflake;
 
-fn row_to_message(row: sqlx::sqlite::SqliteRow) -> MessageRow {
+fn row_to_message(row: sqlx::any::AnyRow) -> MessageRow {
     MessageRow {
         id: row.get("id"),
         channel_id: row.get("channel_id"),
@@ -31,7 +31,7 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> MessageRow {
 
 const SELECT_MESSAGES: &str = "SELECT id, channel_id, space_id, author_id, content, type, created_at, edited_at, tts, pinned, mention_everyone, mentions, mention_roles, embeds, reply_to, flags, webhook_id, thread_id FROM messages";
 
-pub async fn get_message_row(pool: &SqlitePool, message_id: &str) -> Result<MessageRow, AppError> {
+pub async fn get_message_row(pool: &AnyPool, message_id: &str) -> Result<MessageRow, AppError> {
     let row = sqlx::query(&format!("{SELECT_MESSAGES} WHERE id = ?"))
         .bind(message_id)
         .fetch_optional(pool)
@@ -42,7 +42,7 @@ pub async fn get_message_row(pool: &SqlitePool, message_id: &str) -> Result<Mess
 }
 
 pub async fn list_messages(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     after: Option<&str>,
     limit: i64,
@@ -99,7 +99,7 @@ pub async fn list_messages(
 }
 
 pub async fn create_message(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     author_id: &str,
     space_id: Option<&str>,
@@ -134,12 +134,17 @@ pub async fn create_message(
 }
 
 pub async fn update_message(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     message_id: &str,
     input: &UpdateMessage,
+    is_postgres: bool,
 ) -> Result<MessageRow, AppError> {
+    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
     if let Some(ref content) = input.content {
-        sqlx::query("UPDATE messages SET content = ?, edited_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+        let sql = format!(
+            "UPDATE messages SET content = ?, edited_at = {now_fn}, updated_at = {now_fn} WHERE id = ?"
+        );
+        sqlx::query(&sql)
             .bind(content)
             .bind(message_id)
             .execute(pool)
@@ -147,7 +152,10 @@ pub async fn update_message(
     }
     if let Some(ref embeds) = input.embeds {
         let embeds_json = serde_json::to_string(embeds).unwrap();
-        sqlx::query("UPDATE messages SET embeds = ?, edited_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+        let sql = format!(
+            "UPDATE messages SET embeds = ?, edited_at = {now_fn}, updated_at = {now_fn} WHERE id = ?"
+        );
+        sqlx::query(&sql)
             .bind(&embeds_json)
             .bind(message_id)
             .execute(pool)
@@ -156,7 +164,7 @@ pub async fn update_message(
     get_message_row(pool, message_id).await
 }
 
-pub async fn delete_message(pool: &SqlitePool, message_id: &str) -> Result<(), AppError> {
+pub async fn delete_message(pool: &AnyPool, message_id: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(message_id)
         .execute(pool)
@@ -165,7 +173,7 @@ pub async fn delete_message(pool: &SqlitePool, message_id: &str) -> Result<(), A
 }
 
 pub async fn bulk_delete_messages(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     message_ids: &[String],
 ) -> Result<(), AppError> {
@@ -180,11 +188,17 @@ pub async fn bulk_delete_messages(
 }
 
 pub async fn pin_message(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     message_id: &str,
+    is_postgres: bool,
 ) -> Result<(), AppError> {
-    sqlx::query("INSERT OR IGNORE INTO pinned_messages (channel_id, message_id) VALUES (?, ?)")
+    let sql = if is_postgres {
+        "INSERT INTO pinned_messages (channel_id, message_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO pinned_messages (channel_id, message_id) VALUES (?, ?)"
+    };
+    sqlx::query(sql)
         .bind(channel_id)
         .bind(message_id)
         .execute(pool)
@@ -197,7 +211,7 @@ pub async fn pin_message(
 }
 
 pub async fn unpin_message(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     message_id: &str,
 ) -> Result<(), AppError> {
@@ -225,7 +239,7 @@ pub struct SearchMessagesParams<'a> {
 }
 
 pub async fn search_messages(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     params: &SearchMessagesParams<'_>,
 ) -> Result<Vec<MessageRow>, AppError> {
@@ -284,7 +298,7 @@ pub async fn search_messages(
 }
 
 pub async fn list_pinned_messages(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<MessageRow>, AppError> {
     let rows = sqlx::query(
@@ -299,7 +313,7 @@ pub async fn list_pinned_messages(
 
 /// Returns the number of thread replies for a given parent message ID.
 pub async fn get_thread_reply_count(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parent_message_id: &str,
 ) -> Result<i64, AppError> {
     let row = sqlx::query("SELECT COUNT(*) as cnt FROM messages WHERE thread_id = ?")
@@ -312,7 +326,7 @@ pub async fn get_thread_reply_count(
 /// Returns reply counts for multiple parent message IDs in a single query.
 /// Result maps parent_message_id -> reply_count.
 pub async fn get_thread_reply_counts(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     message_ids: &[String],
 ) -> Result<HashMap<String, i64>, AppError> {
     if message_ids.is_empty() {
@@ -340,7 +354,7 @@ pub async fn get_thread_reply_counts(
 /// Returns thread metadata for a parent message: reply count, last reply timestamp,
 /// and participant user IDs.
 pub async fn get_thread_metadata(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parent_message_id: &str,
 ) -> Result<serde_json::Value, AppError> {
     let count_row = sqlx::query(
@@ -376,7 +390,7 @@ pub async fn get_thread_metadata(
 
 /// Lists parent messages that have at least one thread reply in a channel.
 pub async fn list_active_threads(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<MessageRow>, AppError> {
     let sql = format!(
@@ -401,7 +415,7 @@ pub struct ReactionAggregate {
 /// Fetches aggregated reaction data for a set of messages in one query.
 /// Returns a map from message_id to its list of reaction aggregates.
 pub async fn get_reactions_for_messages(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     message_ids: &[String],
     current_user_id: Option<&str>,
 ) -> Result<HashMap<String, Vec<ReactionAggregate>>, AppError> {
@@ -412,11 +426,12 @@ pub async fn get_reactions_for_messages(
     let placeholders: Vec<&str> = message_ids.iter().map(|_| "?").collect();
     let in_clause = placeholders.join(", ");
 
+    // Use MIN(created_at) instead of MIN(rowid) for cross-database compatibility
     let sql = format!(
         "SELECT message_id, emoji_name, COUNT(*) as cnt \
          FROM reactions WHERE message_id IN ({in_clause}) \
          GROUP BY message_id, emoji_name \
-         ORDER BY message_id, MIN(rowid)"
+         ORDER BY message_id, MIN(created_at)"
     );
 
     let mut q = sqlx::query(&sql);

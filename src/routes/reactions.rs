@@ -12,15 +12,18 @@ pub async fn add_reaction(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "add_reactions").await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)",
-    )
-    .bind(&message_id)
-    .bind(&auth.user_id)
-    .bind(&emoji)
-    .execute(&state.db)
-    .await
-    .map_err(crate::error::AppError::from)?;
+    let sql = if state.db_is_postgres {
+        "INSERT INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)"
+    };
+    sqlx::query(sql)
+        .bind(&message_id)
+        .bind(&auth.user_id)
+        .bind(&emoji)
+        .execute(&state.db)
+        .await
+        .map_err(crate::error::AppError::from)?;
 
     Ok(Json(serde_json::json!({ "data": null })))
 }

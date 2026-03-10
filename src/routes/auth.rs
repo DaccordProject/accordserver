@@ -491,7 +491,12 @@ pub async fn register(
             .await
             .map_err(AppError::from)?;
     if let Some((space_id,)) = default_space {
-        let _ = sqlx::query("INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)")
+        let insert_member_sql = if state.db_is_postgres {
+            "INSERT INTO members (user_id, space_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+        } else {
+            "INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)"
+        };
+        let _ = sqlx::query(insert_member_sql)
             .bind(&id)
             .bind(&space_id)
             .execute(&state.db)
@@ -811,9 +816,10 @@ pub async fn change_password(
         .to_string();
 
     // Update password and clear force_password_reset flag
-    sqlx::query(
-        "UPDATE users SET password_hash = ?, force_password_reset = 0, updated_at = datetime('now') WHERE id = ?",
-    )
+    let now_fn = if state.db_is_postgres { "NOW()" } else { "datetime('now')" };
+    sqlx::query(&format!(
+        "UPDATE users SET password_hash = ?, force_password_reset = 0, updated_at = {now_fn} WHERE id = ?",
+    ))
     .bind(&password_hash)
     .bind(&auth.user_id)
     .execute(&state.db)
@@ -874,12 +880,15 @@ pub async fn enable_2fa(
 
     // Encrypt and store the secret (not yet enabled — user must verify first)
     let encrypted_secret = encrypt_totp_secret(&secret_base32, state.totp_key.as_ref());
-    sqlx::query("UPDATE users SET totp_secret = ?, updated_at = datetime('now') WHERE id = ?")
-        .bind(&encrypted_secret)
-        .bind(&auth.user_id)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::from)?;
+    let now_fn = if state.db_is_postgres { "NOW()" } else { "datetime('now')" };
+    sqlx::query(&format!(
+        "UPDATE users SET totp_secret = ?, updated_at = {now_fn} WHERE id = ?",
+    ))
+    .bind(&encrypted_secret)
+    .bind(&auth.user_id)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
 
     // Fetch username for the otpauth URI
     let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
@@ -967,9 +976,10 @@ pub async fn verify_2fa(
     clear_totp_failures(&state, &auth.user_id);
 
     // Enable 2FA
-    sqlx::query(
-        "UPDATE users SET totp_enabled = 1, updated_at = datetime('now') WHERE id = ?",
-    )
+    let now_fn = if state.db_is_postgres { "NOW()" } else { "datetime('now')" };
+    sqlx::query(&format!(
+        "UPDATE users SET totp_enabled = 1, updated_at = {now_fn} WHERE id = ?",
+    ))
     .bind(&auth.user_id)
     .execute(&state.db)
     .await
@@ -1014,9 +1024,10 @@ pub async fn disable_2fa(
     verify_user_password(&state, &auth.user_id, &input.password).await?;
 
     // Disable 2FA and clear secret + backup codes
-    sqlx::query(
-        "UPDATE users SET totp_enabled = 0, totp_secret = NULL, updated_at = datetime('now') WHERE id = ?",
-    )
+    let now_fn = if state.db_is_postgres { "NOW()" } else { "datetime('now')" };
+    sqlx::query(&format!(
+        "UPDATE users SET totp_enabled = 0, totp_secret = NULL, updated_at = {now_fn} WHERE id = ?",
+    ))
     .bind(&auth.user_id)
     .execute(&state.db)
     .await
@@ -1191,7 +1202,7 @@ async fn enforce_session_limit(pool: &sqlx::SqlitePool, user_id: &str) {
 }
 
 /// Delete expired tokens for a user (background cleanup).
-async fn cleanup_expired_tokens(pool: &sqlx::SqlitePool, user_id: &str) {
+async fn cleanup_expired_tokens(pool: &sqlx::AnyPool, user_id: &str) {
     let now = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S")
         .to_string();

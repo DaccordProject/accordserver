@@ -1,4 +1,4 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::space::AdminSpaceRow;
@@ -11,7 +11,7 @@ use super::users::get_user;
 // -------------------------------------------------------------------------
 
 pub async fn list_all_spaces(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     after: Option<&str>,
     limit: i64,
     search: Option<&str>,
@@ -66,10 +66,12 @@ pub async fn list_all_spaces(
 }
 
 pub async fn admin_update_space(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     input: &crate::models::space::AdminUpdateSpace,
+    is_postgres: bool,
 ) -> Result<(), AppError> {
+    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
     let mut sets = Vec::new();
     let mut str_values: Vec<String> = Vec::new();
 
@@ -86,7 +88,12 @@ pub async fn admin_update_space(
         str_values.push(owner_id.clone());
 
         // Ensure the new owner is a member of the space
-        sqlx::query("INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)")
+        let member_sql = if is_postgres {
+            "INSERT INTO members (user_id, space_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+        } else {
+            "INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)"
+        };
+        sqlx::query(member_sql)
             .bind(owner_id)
             .bind(space_id)
             .execute(pool)
@@ -99,7 +106,10 @@ pub async fn admin_update_space(
 
     if let Some(public) = input.public {
         if sets.is_empty() {
-            sqlx::query("UPDATE spaces SET public = ?, updated_at = datetime('now') WHERE id = ?")
+            let sql = format!(
+                "UPDATE spaces SET public = ?, updated_at = {now_fn} WHERE id = ?"
+            );
+            sqlx::query(&sql)
                 .bind(public)
                 .bind(space_id)
                 .execute(pool)
@@ -109,7 +119,7 @@ pub async fn admin_update_space(
         sets.push("public = ?");
     }
 
-    sets.push("updated_at = datetime('now')");
+    sets.push(&format!("updated_at = {now_fn}"));
     let set_clause = sets.join(", ");
     let sql = format!("UPDATE spaces SET {set_clause} WHERE id = ?");
     let mut query = sqlx::query(&sql);
@@ -130,7 +140,7 @@ pub async fn admin_update_space(
 // -------------------------------------------------------------------------
 
 pub async fn list_all_users(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     after: Option<&str>,
     limit: i64,
     search: Option<&str>,
@@ -191,10 +201,12 @@ pub async fn list_all_users(
 }
 
 pub async fn admin_update_user(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
     input: &AdminUpdateUser,
+    is_postgres: bool,
 ) -> Result<User, AppError> {
+    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
     let mut sets = Vec::new();
     let mut str_values: Vec<String> = Vec::new();
 
@@ -226,7 +238,7 @@ pub async fn admin_update_user(
         return get_user(pool, user_id).await;
     }
 
-    sets.push("updated_at = datetime('now')");
+    sets.push(&format!("updated_at = {now_fn}"));
     let set_clause = sets.join(", ");
     let sql = format!("UPDATE users SET {set_clause} WHERE id = ?");
     let mut query = sqlx::query(&sql);
@@ -242,14 +254,14 @@ pub async fn admin_update_user(
     get_user(pool, user_id).await
 }
 
-pub async fn count_admins(pool: &SqlitePool) -> Result<i64, AppError> {
+pub async fn count_admins(pool: &AnyPool) -> Result<i64, AppError> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = 1")
         .fetch_one(pool)
         .await?;
     Ok(count)
 }
 
-pub async fn delete_user(pool: &SqlitePool, user_id: &str) -> Result<(), AppError> {
+pub async fn delete_user(pool: &AnyPool, user_id: &str) -> Result<(), AppError> {
     // Check the user doesn't own any spaces
     let owned: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM spaces WHERE owner_id = ?")
@@ -262,7 +274,7 @@ pub async fn delete_user(pool: &SqlitePool, user_id: &str) -> Result<(), AppErro
         ));
     }
 
-    // Manual cascade deletion (SQLite has no CASCADE from users)
+    // Manual cascade deletion
     sqlx::query("DELETE FROM user_tokens WHERE user_id = ?")
         .bind(user_id)
         .execute(pool)

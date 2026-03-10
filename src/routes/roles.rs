@@ -15,7 +15,7 @@ use crate::state::AppState;
 /// Validate that every permission in the list is known and that the actor holds
 /// all of them. This prevents privilege escalation via role creation/editing.
 async fn validate_role_permissions(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     space_id: &str,
     auth: &AuthUser,
     permissions: &[String],
@@ -90,7 +90,7 @@ pub async fn update_role(
     }
     // Strip position — must use the dedicated reorder_roles endpoint
     input.position = None;
-    let row = db::roles::update_role(&state.db, &role_id, &input).await?;
+    let row = db::roles::update_role(&state.db, &role_id, &input, state.db_is_postgres).await?;
     Ok(Json(serde_json::json!({ "data": role_row_to_json(&row) })))
 }
 

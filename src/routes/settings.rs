@@ -49,7 +49,7 @@ pub async fn update_settings(
 
     let old_public_listing = state.settings.load().public_listing;
 
-    let updated = db::settings::update_settings(&state.db, &input).await?;
+    let updated = db::settings::update_settings(&state.db, &input, state.db_is_postgres).await?;
     state.settings.store(Arc::new(updated.clone()));
 
     // Handle public_listing toggle → start/stop master registration task

@@ -18,22 +18,34 @@ pub mod soundboard;
 pub mod spaces;
 pub mod users;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::SqlitePool;
-use std::str::FromStr;
+use sqlx::AnyPool;
 
-pub async fn create_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
-    let options = SqliteConnectOptions::from_str(database_url)?
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .foreign_keys(true);
+/// Returns true if the database URL targets PostgreSQL.
+pub fn url_is_postgres(database_url: &str) -> bool {
+    database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")
+}
 
-    let pool = SqlitePoolOptions::new()
+pub async fn create_pool(database_url: &str) -> Result<AnyPool, sqlx::Error> {
+    // Install both SQLite and Postgres drivers so AnyPool can pick at runtime.
+    sqlx::any::install_default_drivers();
+
+    let pool = sqlx::any::AnyPoolOptions::new()
         .max_connections(5)
-        .connect_with(options)
+        .connect(database_url)
         .await?;
 
-    sqlx::migrate!().run(&pool).await?;
+    // SQLite-specific PRAGMAs must be sent after connection.
+    if !url_is_postgres(database_url) {
+        sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
+    }
+
+    // Run the correct migration set for this backend.
+    if url_is_postgres(database_url) {
+        sqlx::migrate!("migrations/postgres").run(&pool).await?;
+    } else {
+        sqlx::migrate!("migrations").run(&pool).await?;
+    }
 
     Ok(pool)
 }

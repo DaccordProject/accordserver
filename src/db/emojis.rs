@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 use crate::models::emoji::{CreateEmoji, Emoji, UpdateEmoji};
@@ -30,7 +30,7 @@ fn row_to_emoji(row: EmojiRow, role_ids: Vec<String>) -> Emoji {
 }
 
 /// Verify an emoji belongs to the given space. Returns an error if it doesn't.
-pub async fn require_emoji_in_space(pool: &SqlitePool, emoji_id: &str, space_id: &str) -> Result<(), AppError> {
+pub async fn require_emoji_in_space(pool: &AnyPool, emoji_id: &str, space_id: &str) -> Result<(), AppError> {
     let row: Option<(String,)> = sqlx::query_as("SELECT space_id FROM emojis WHERE id = ?")
         .bind(emoji_id)
         .fetch_optional(pool)
@@ -42,7 +42,7 @@ pub async fn require_emoji_in_space(pool: &SqlitePool, emoji_id: &str, space_id:
     }
 }
 
-pub async fn get_emoji(pool: &SqlitePool, emoji_id: &str) -> Result<Emoji, AppError> {
+pub async fn get_emoji(pool: &AnyPool, emoji_id: &str) -> Result<Emoji, AppError> {
     let row = sqlx::query_as::<_, EmojiRow>(
         "SELECT id, name, animated, managed, available, require_colons, creator_id, image_path FROM emojis WHERE id = ?"
     )
@@ -63,7 +63,7 @@ pub async fn get_emoji(pool: &SqlitePool, emoji_id: &str) -> Result<Emoji, AppEr
     Ok(row_to_emoji(row, role_ids))
 }
 
-pub async fn list_emojis(pool: &SqlitePool, space_id: &str) -> Result<Vec<Emoji>, AppError> {
+pub async fn list_emojis(pool: &AnyPool, space_id: &str) -> Result<Vec<Emoji>, AppError> {
     let rows = sqlx::query_as::<_, EmojiRow>(
         "SELECT id, name, animated, managed, available, require_colons, creator_id, image_path FROM emojis WHERE space_id = ?"
     )
@@ -89,7 +89,7 @@ pub async fn list_emojis(pool: &SqlitePool, space_id: &str) -> Result<Vec<Emoji>
 
 #[allow(clippy::too_many_arguments)]
 pub async fn create_emoji(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     creator_id: &str,
     input: &CreateEmoji,
@@ -124,12 +124,15 @@ pub fn generate_emoji_id() -> String {
 }
 
 pub async fn update_emoji(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     emoji_id: &str,
     input: &UpdateEmoji,
+    is_postgres: bool,
 ) -> Result<Emoji, AppError> {
+    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
     if let Some(ref name) = input.name {
-        sqlx::query("UPDATE emojis SET name = ?, updated_at = datetime('now') WHERE id = ?")
+        let sql = format!("UPDATE emojis SET name = ?, updated_at = {now_fn} WHERE id = ?");
+        sqlx::query(&sql)
             .bind(name)
             .bind(emoji_id)
             .execute(pool)
@@ -139,7 +142,7 @@ pub async fn update_emoji(
 }
 
 /// Delete an emoji. Returns the image_path for file cleanup.
-pub async fn delete_emoji(pool: &SqlitePool, emoji_id: &str) -> Result<Option<String>, AppError> {
+pub async fn delete_emoji(pool: &AnyPool, emoji_id: &str) -> Result<Option<String>, AppError> {
     let image_path: Option<String> =
         sqlx::query_scalar("SELECT image_path FROM emojis WHERE id = ?")
             .bind(emoji_id)

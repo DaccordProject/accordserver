@@ -151,6 +151,7 @@ pub async fn create_message(
         let msg_id = msg.id.clone();
         let space_id = channel.space_id.clone();
         let db = state.db.clone();
+        let is_postgres = state.db_is_postgres;
         let gateway_tx = state.gateway_tx.clone();
         tokio::spawn(async move {
             let embeds = crate::unfurl::unfurl_message_urls(&content).await;
@@ -161,7 +162,7 @@ pub async fn create_message(
                 content: None,
                 embeds: Some(embeds),
             };
-            if let Ok(updated_msg) = db::messages::update_message(&db, &msg_id, &update).await {
+            if let Ok(updated_msg) = db::messages::update_message(&db, &msg_id, &update, is_postgres).await {
                 let attachments = db::attachments::get_attachments_for_message(&db, &msg_id)
                     .await
                     .unwrap_or_default();
@@ -327,7 +328,7 @@ pub async fn update_message(
         require_channel_permission(&state.db, &channel_id, &auth, "manage_messages")
             .await?;
     }
-    let msg = db::messages::update_message(&state.db, &message_id, &input).await?;
+    let msg = db::messages::update_message(&state.db, &message_id, &input, state.db_is_postgres).await?;
 
     // Load existing attachments for the response
     let attachments =
@@ -433,7 +434,7 @@ pub async fn pin_message(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
-    db::messages::pin_message(&state.db, &channel_id, &message_id).await?;
+    db::messages::pin_message(&state.db, &channel_id, &message_id, state.db_is_postgres).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
@@ -687,7 +688,7 @@ pub fn message_row_to_json_full(
 /// Converts a batch of message rows to JSON, enriching each with its
 /// reactions, attachments, and thread reply counts.
 pub async fn messages_to_json(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     rows: &[MessageRow],
     current_user_id: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, crate::error::AppError> {

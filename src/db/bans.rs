@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 
@@ -11,7 +11,7 @@ pub struct BanRow {
     pub created_at: String,
 }
 
-pub async fn get_ban(pool: &SqlitePool, space_id: &str, user_id: &str) -> Result<BanRow, AppError> {
+pub async fn get_ban(pool: &AnyPool, space_id: &str, user_id: &str) -> Result<BanRow, AppError> {
     let row = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, String)>(
         "SELECT user_id, space_id, reason, banned_by, created_at FROM bans WHERE space_id = ? AND user_id = ?"
     )
@@ -30,7 +30,7 @@ pub async fn get_ban(pool: &SqlitePool, space_id: &str, user_id: &str) -> Result
     })
 }
 
-pub async fn list_bans(pool: &SqlitePool, space_id: &str) -> Result<Vec<BanRow>, AppError> {
+pub async fn list_bans(pool: &AnyPool, space_id: &str) -> Result<Vec<BanRow>, AppError> {
     let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, String)>(
         "SELECT user_id, space_id, reason, banned_by, created_at FROM bans WHERE space_id = ? ORDER BY created_at DESC"
     )
@@ -51,11 +51,12 @@ pub async fn list_bans(pool: &SqlitePool, space_id: &str) -> Result<Vec<BanRow>,
 }
 
 pub async fn create_ban(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
     reason: Option<&str>,
     banned_by: &str,
+    is_postgres: bool,
 ) -> Result<BanRow, AppError> {
     // Remove member first
     sqlx::query("DELETE FROM members WHERE space_id = ? AND user_id = ?")
@@ -64,20 +65,23 @@ pub async fn create_ban(
         .execute(pool)
         .await?;
 
-    sqlx::query(
-        "INSERT OR REPLACE INTO bans (user_id, space_id, reason, banned_by) VALUES (?, ?, ?, ?)",
-    )
-    .bind(user_id)
-    .bind(space_id)
-    .bind(reason)
-    .bind(banned_by)
-    .execute(pool)
-    .await?;
+    let sql = if is_postgres {
+        "INSERT INTO bans (user_id, space_id, reason, banned_by) VALUES (?, ?, ?, ?) ON CONFLICT (user_id, space_id) DO UPDATE SET reason = EXCLUDED.reason, banned_by = EXCLUDED.banned_by"
+    } else {
+        "INSERT OR REPLACE INTO bans (user_id, space_id, reason, banned_by) VALUES (?, ?, ?, ?)"
+    };
+    sqlx::query(sql)
+        .bind(user_id)
+        .bind(space_id)
+        .bind(reason)
+        .bind(banned_by)
+        .execute(pool)
+        .await?;
 
     get_ban(pool, space_id, user_id).await
 }
 
-pub async fn delete_ban(pool: &SqlitePool, space_id: &str, user_id: &str) -> Result<(), AppError> {
+pub async fn delete_ban(pool: &AnyPool, space_id: &str, user_id: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM bans WHERE space_id = ? AND user_id = ?")
         .bind(space_id)
         .bind(user_id)

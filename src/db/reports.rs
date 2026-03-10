@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 use crate::snowflake;
@@ -21,7 +21,7 @@ pub struct ReportRow {
 }
 
 pub async fn create_report(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     reporter_id: &str,
     target_type: &str,
@@ -48,7 +48,7 @@ pub async fn create_report(
     get_report(pool, &id).await
 }
 
-pub async fn get_report(pool: &SqlitePool, report_id: &str) -> Result<ReportRow, AppError> {
+pub async fn get_report(pool: &AnyPool, report_id: &str) -> Result<ReportRow, AppError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>, String, Option<String>, String, Option<String>, Option<String>, String, Option<String>)>(
         "SELECT id, space_id, reporter_id, target_type, target_id, channel_id, category, description, status, actioned_by, action_taken, created_at, resolved_at FROM reports WHERE id = ?"
     )
@@ -75,7 +75,7 @@ pub async fn get_report(pool: &SqlitePool, report_id: &str) -> Result<ReportRow,
 }
 
 pub async fn list_reports(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     status_filter: Option<&str>,
     limit: i64,
@@ -125,21 +125,24 @@ pub async fn list_reports(
 }
 
 pub async fn resolve_report(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     report_id: &str,
     actioned_by: &str,
     status: &str,
     action_taken: Option<&str>,
+    is_postgres: bool,
 ) -> Result<ReportRow, AppError> {
-    sqlx::query(
-        "UPDATE reports SET status = ?, actioned_by = ?, action_taken = ?, resolved_at = datetime('now') WHERE id = ?",
-    )
-    .bind(status)
-    .bind(actioned_by)
-    .bind(action_taken)
-    .bind(report_id)
-    .execute(pool)
-    .await?;
+    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
+    let sql = format!(
+        "UPDATE reports SET status = ?, actioned_by = ?, action_taken = ?, resolved_at = {now_fn} WHERE id = ?"
+    );
+    sqlx::query(&sql)
+        .bind(status)
+        .bind(actioned_by)
+        .bind(action_taken)
+        .bind(report_id)
+        .execute(pool)
+        .await?;
 
     get_report(pool, report_id).await
 }

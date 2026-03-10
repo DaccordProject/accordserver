@@ -35,7 +35,7 @@ fn hash_password(password: &str) -> Result<String, Box<dyn Error>> {
 
 /// Generate a bearer token and insert it into user_tokens.
 async fn create_bearer_token(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     user_id: &str,
 ) -> Result<String, Box<dyn Error>> {
     use rand::Rng;
@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("accord-seed: connecting to {database_url}");
     // Ensure data directory exists (matches server startup behaviour)
     std::fs::create_dir_all("data").ok();
+    let is_postgres = db::url_is_postgres(&database_url);
     let pool = db::create_pool(&database_url).await?;
 
     // ── Idempotency check ──────────────────────────────────────────
@@ -145,7 +146,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Add all users as members (alice is already a member from create_space)
     for uid in &user_ids[1..] {
-        db::members::add_member(&pool, space_id, uid).await?;
+        db::members::add_member(&pool, space_id, uid, is_postgres).await?;
     }
 
     // ── Roles ──────────────────────────────────────────────────────
@@ -476,7 +477,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Helper to create a message and return its ID ───────────────
     async fn msg(
-        pool: &sqlx::SqlitePool,
+        pool: &sqlx::AnyPool,
         channel_id: &str,
         author_id: &str,
         space_id: &str,
@@ -710,15 +711,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         (&announce1, alice, "rocket"),
     ];
 
+    let reaction_sql = if is_postgres {
+        "INSERT INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)"
+    };
     for (message_id, user_id, emoji) in reactions {
-        sqlx::query(
-            "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)",
-        )
-        .bind(message_id)
-        .bind(user_id)
-        .bind(emoji)
-        .execute(&pool)
-        .await?;
+        sqlx::query(reaction_sql)
+            .bind(message_id)
+            .bind(user_id)
+            .bind(emoji)
+            .execute(&pool)
+            .await?;
     }
 
     println!("  added {} reactions", reactions.len());

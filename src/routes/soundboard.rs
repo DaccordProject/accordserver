@@ -83,7 +83,7 @@ pub async fn update_sound(
     Json(input): Json<UpdateSound>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_soundboard").await?;
-    let sound = db::soundboard::update_sound(&state.db, &sound_id, &input).await?;
+    let sound = db::soundboard::update_sound(&state.db, &sound_id, &input, state.db_is_postgres).await?;
 
     // Broadcast to gateway
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {

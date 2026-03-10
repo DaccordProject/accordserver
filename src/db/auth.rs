@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 use crate::middleware::auth::{create_token_hash, generate_token};
@@ -7,7 +7,7 @@ use crate::models::user::CreateUser;
 use crate::snowflake;
 
 pub async fn create_application(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     owner_id: &str,
     name: &str,
     description: &str,
@@ -56,7 +56,7 @@ pub async fn create_application(
     Ok((app, token))
 }
 
-pub async fn get_application(pool: &SqlitePool, app_id: &str) -> Result<Application, AppError> {
+pub async fn get_application(pool: &AnyPool, app_id: &str) -> Result<Application, AppError> {
     let row = sqlx::query_as::<_, (String, String, Option<String>, String, bool, String, i64)>(
         "SELECT id, name, icon, description, bot_public, owner_id, flags FROM applications WHERE id = ?"
     )
@@ -77,7 +77,7 @@ pub async fn get_application(pool: &SqlitePool, app_id: &str) -> Result<Applicat
 }
 
 pub async fn get_application_by_owner(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     owner_id: &str,
 ) -> Result<Application, AppError> {
     let row = sqlx::query_as::<_, (String, String, Option<String>, String, bool, String, i64)>(
@@ -99,7 +99,7 @@ pub async fn get_application_by_owner(
     })
 }
 
-pub async fn reset_bot_token(pool: &SqlitePool, app_id: &str) -> Result<String, AppError> {
+pub async fn reset_bot_token(pool: &AnyPool, app_id: &str) -> Result<String, AppError> {
     // Find the bot user for this application
     let bot_user_id: String =
         sqlx::query_scalar("SELECT bot_user_id FROM applications WHERE id = ?")

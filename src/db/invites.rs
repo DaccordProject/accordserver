@@ -1,9 +1,9 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 use crate::models::invite::{CreateInvite, Invite};
 
-pub async fn get_invite(pool: &SqlitePool, code: &str) -> Result<Invite, AppError> {
+pub async fn get_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> {
     let row = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<i64>, i64, Option<i64>, bool, String, Option<String>)>(
         "SELECT code, space_id, channel_id, inviter_id, max_uses, uses, max_age, temporary, created_at, expires_at FROM invites WHERE code = ?"
     )
@@ -27,7 +27,7 @@ pub async fn get_invite(pool: &SqlitePool, code: &str) -> Result<Invite, AppErro
 }
 
 pub async fn list_space_invites(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
 ) -> Result<Vec<Invite>, AppError> {
     let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<i64>, i64, Option<i64>, bool, String, Option<String>)>(
@@ -55,7 +55,7 @@ pub async fn list_space_invites(
 }
 
 pub async fn list_channel_invites(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<Invite>, AppError> {
     let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<i64>, i64, Option<i64>, bool, String, Option<String>)>(
@@ -95,7 +95,7 @@ fn generate_code() -> String {
 }
 
 pub async fn create_invite(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     channel_id: Option<&str>,
     inviter_id: &str,
@@ -129,7 +129,7 @@ pub async fn create_invite(
 /// Ensures a default permanent invite exists for the first space.
 /// If no spaces exist, creates a system user and a default "Accord" space.
 /// Returns the invite code.
-pub async fn ensure_default_invite(pool: &SqlitePool) -> Result<String, AppError> {
+pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
     // Find the first space
     let space: Option<(String,)> =
         sqlx::query_as("SELECT id FROM spaces ORDER BY created_at ASC LIMIT 1")
@@ -215,7 +215,7 @@ pub async fn ensure_default_invite(pool: &SqlitePool) -> Result<String, AppError
     Ok(code)
 }
 
-pub async fn delete_invite(pool: &SqlitePool, code: &str) -> Result<(), AppError> {
+pub async fn delete_invite(pool: &AnyPool, code: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM invites WHERE code = ?")
         .bind(code)
         .execute(pool)
@@ -223,7 +223,7 @@ pub async fn delete_invite(pool: &SqlitePool, code: &str) -> Result<(), AppError
     Ok(())
 }
 
-pub async fn use_invite(pool: &SqlitePool, code: &str) -> Result<Invite, AppError> {
+pub async fn use_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> {
     let invite = get_invite(pool, code).await?;
 
     // Check if expired

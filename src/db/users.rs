@@ -1,10 +1,10 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::user::{CreateUser, UpdateUser, User};
 use crate::snowflake;
 
-fn row_to_user(row: sqlx::sqlite::SqliteRow) -> User {
+fn row_to_user(row: sqlx::any::AnyRow) -> User {
     User {
         id: row.get("id"),
         username: row.get("username"),
@@ -26,7 +26,7 @@ fn row_to_user(row: sqlx::sqlite::SqliteRow) -> User {
 
 const SELECT_USERS: &str = "SELECT id, username, display_name, avatar, banner, accent_color, bio, bot, system, is_admin, totp_enabled, disabled, flags, public_flags, created_at FROM users";
 
-pub async fn get_user(pool: &SqlitePool, user_id: &str) -> Result<User, AppError> {
+pub async fn get_user(pool: &AnyPool, user_id: &str) -> Result<User, AppError> {
     let row = sqlx::query(&format!("{SELECT_USERS} WHERE id = ?"))
         .bind(user_id)
         .fetch_optional(pool)
@@ -36,7 +36,7 @@ pub async fn get_user(pool: &SqlitePool, user_id: &str) -> Result<User, AppError
     Ok(row_to_user(row))
 }
 
-pub async fn create_user(pool: &SqlitePool, input: &CreateUser) -> Result<User, AppError> {
+pub async fn create_user(pool: &AnyPool, input: &CreateUser) -> Result<User, AppError> {
     let id = snowflake::generate();
     let display_name = input.display_name.as_deref().unwrap_or(&input.username);
 
@@ -51,10 +51,12 @@ pub async fn create_user(pool: &SqlitePool, input: &CreateUser) -> Result<User, 
 }
 
 pub async fn update_user(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
     input: &UpdateUser,
+    is_postgres: bool,
 ) -> Result<User, AppError> {
+    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
     let mut sets = Vec::new();
     let mut values: Vec<String> = Vec::new();
 
@@ -93,15 +95,16 @@ pub async fn update_user(
 
     if let Some(color) = input.accent_color {
         if sets.is_empty() {
-            sqlx::query(
-                "UPDATE users SET accent_color = ?, updated_at = datetime('now') WHERE id = ?",
-            )
-            .bind(color)
-            .bind(user_id)
-            .execute(pool)
-            .await?;
+            let sql = format!(
+                "UPDATE users SET accent_color = ?, updated_at = {now_fn} WHERE id = ?"
+            );
+            sqlx::query(&sql)
+                .bind(color)
+                .bind(user_id)
+                .execute(pool)
+                .await?;
         } else {
-            sets.push("updated_at = datetime('now')");
+            sets.push(&format!("updated_at = {now_fn}"));
             let set_clause = sets.join(", ");
             let query = format!("UPDATE users SET {set_clause}, accent_color = ? WHERE id = ?");
             let mut q = sqlx::query(&query);
@@ -112,7 +115,7 @@ pub async fn update_user(
             q.execute(pool).await?;
         }
     } else {
-        sets.push("updated_at = datetime('now')");
+        sets.push(&format!("updated_at = {now_fn}"));
         let set_clause = sets.join(", ");
         let query = format!("UPDATE users SET {set_clause} WHERE id = ?");
         let mut q = sqlx::query(&query);
@@ -127,7 +130,7 @@ pub async fn update_user(
 }
 
 pub async fn get_user_dm_channels(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
 ) -> Result<Vec<crate::models::channel::ChannelRow>, AppError> {
     let rows = sqlx::query(
@@ -166,7 +169,7 @@ pub async fn get_user_dm_channels(
         .collect())
 }
 
-pub async fn get_user_spaces(pool: &SqlitePool, user_id: &str) -> Result<Vec<String>, AppError> {
+pub async fn get_user_spaces(pool: &AnyPool, user_id: &str) -> Result<Vec<String>, AppError> {
     let rows = sqlx::query_as::<_, (String,)>("SELECT space_id FROM members WHERE user_id = ?")
         .bind(user_id)
         .fetch_all(pool)

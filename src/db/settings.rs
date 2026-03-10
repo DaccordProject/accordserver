@@ -1,9 +1,9 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::settings::{ServerSettings, UpdateServerSettings};
 
-pub async fn get_settings(pool: &SqlitePool) -> Result<ServerSettings, AppError> {
+pub async fn get_settings(pool: &AnyPool) -> Result<ServerSettings, AppError> {
     let row = sqlx::query(
         "SELECT max_emoji_size, max_avatar_size, max_sound_size, max_attachment_size, \
          max_attachments_per_message, server_name, registration_policy, max_spaces, \
@@ -30,9 +30,11 @@ pub async fn get_settings(pool: &SqlitePool) -> Result<ServerSettings, AppError>
 }
 
 pub async fn update_settings(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     input: &UpdateServerSettings,
+    is_postgres: bool,
 ) -> Result<ServerSettings, AppError> {
+    let now_fn = if is_postgres { "NOW()" } else { "datetime('now')" };
     let mut sets = Vec::new();
     if input.max_emoji_size.is_some() {
         sets.push("max_emoji_size = ?");
@@ -72,7 +74,7 @@ pub async fn update_settings(
         return get_settings(pool).await;
     }
 
-    sets.push("updated_at = datetime('now')");
+    sets.push(&format!("updated_at = {now_fn}"));
 
     let sql = format!("UPDATE server_settings SET {} WHERE id = 1", sets.join(", "));
 

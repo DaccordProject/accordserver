@@ -1,10 +1,10 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 use crate::models::permission::PermissionOverwrite;
 
 pub async fn list_overwrites(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<PermissionOverwrite>, AppError> {
     let rows = sqlx::query_as::<_, (String, String, String, String)>(
@@ -26,7 +26,7 @@ pub async fn list_overwrites(
 }
 
 pub async fn upsert_overwrite(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     overwrite: &PermissionOverwrite,
 ) -> Result<(), AppError> {
@@ -49,7 +49,7 @@ pub async fn upsert_overwrite(
 }
 
 pub async fn delete_overwrite(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     overwrite_id: &str,
 ) -> Result<(), AppError> {

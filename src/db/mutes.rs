@@ -1,10 +1,10 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 use crate::models::mute::ChannelMute;
 
 pub async fn get_mute(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
     channel_id: &str,
 ) -> Result<Option<ChannelMute>, AppError> {
@@ -24,17 +24,21 @@ pub async fn get_mute(
 }
 
 pub async fn create_mute(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
     channel_id: &str,
+    is_postgres: bool,
 ) -> Result<ChannelMute, AppError> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO channel_mutes (user_id, channel_id) VALUES (?, ?)",
-    )
-    .bind(user_id)
-    .bind(channel_id)
-    .execute(pool)
-    .await?;
+    let sql = if is_postgres {
+        "INSERT INTO channel_mutes (user_id, channel_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO channel_mutes (user_id, channel_id) VALUES (?, ?)"
+    };
+    sqlx::query(sql)
+        .bind(user_id)
+        .bind(channel_id)
+        .execute(pool)
+        .await?;
 
     get_mute(pool, user_id, channel_id)
         .await?
@@ -42,7 +46,7 @@ pub async fn create_mute(
 }
 
 pub async fn delete_mute(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
     channel_id: &str,
 ) -> Result<(), AppError> {
@@ -55,7 +59,7 @@ pub async fn delete_mute(
 }
 
 pub async fn list_mutes_for_user(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
 ) -> Result<Vec<ChannelMute>, AppError> {
     let rows = sqlx::query_as::<_, (String, String, String)>(
@@ -78,7 +82,7 @@ pub async fn list_mutes_for_user(
 /// Returns all muted channel IDs for a user, including channels that inherit
 /// a mute from their parent category.
 pub async fn list_effective_muted_channel_ids(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_id: &str,
 ) -> Result<Vec<String>, AppError> {
     // Get directly muted channel IDs

@@ -1,6 +1,6 @@
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
@@ -51,7 +51,9 @@ pub struct MfaTicket {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: SqlitePool,
+    pub db: AnyPool,
+    /// True when the runtime database is PostgreSQL; false for SQLite.
+    pub db_is_postgres: bool,
     pub voice_states: Arc<DashMap<String, VoiceState>>,
     pub presences: Arc<DashMap<String, Presence>>,
     pub dispatcher: Arc<RwLock<Option<Dispatcher>>>,

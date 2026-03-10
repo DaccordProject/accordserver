@@ -55,7 +55,7 @@ pub async fn accept_invite(
         ));
     }
 
-    let member = db::members::add_member(&state.db, &invite.space_id, &auth.user_id).await?;
+    let member = db::members::add_member(&state.db, &invite.space_id, &auth.user_id, state.db_is_postgres).await?;
 
     // Broadcast member.join to the space
     let user = db::users::get_user(&state.db, &auth.user_id).await?;

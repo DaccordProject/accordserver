@@ -4,7 +4,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::json;
 
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::db;
 use crate::error::AppError;
@@ -93,7 +93,7 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
         .await?;
 
         if is_member == 0 {
-            db::members::add_member(pool, &space.id, uid).await?;
+            db::members::add_member(pool, &space.id, uid, false).await?;
         }
     }
 
@@ -142,7 +142,7 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
 // ---------------------------------------------------------------------------
 
 async fn find_or_create_user(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     username: &str,
     display_name: &str,
 ) -> Result<User, AppError> {
@@ -174,7 +174,7 @@ async fn find_or_create_user(
 /// deleted (e.g. by a test) but the bot *user* still exists, the bot user
 /// is reused instead of hitting a UNIQUE-constraint violation on `username`.
 async fn find_or_create_application(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     owner_id: &str,
     name: &str,
     description: &str,
@@ -262,7 +262,7 @@ async fn find_or_create_application(
 }
 
 async fn find_or_create_space(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     owner_id: &str,
     name: &str,
 ) -> Result<SpaceRow, AppError> {

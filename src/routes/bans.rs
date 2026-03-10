@@ -68,6 +68,7 @@ pub async fn create_ban(
         &user_id,
         reason.as_deref(),
         &auth.user_id,
+        state.db_is_postgres,
     )
     .await?;
     Ok(Json(serde_json::json!({

@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::state::AppState;
 
@@ -22,7 +22,7 @@ fn hash_token(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-async fn resolve_bot_token(pool: &SqlitePool, token: &str) -> Option<AuthUser> {
+async fn resolve_bot_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
     let row = sqlx::query_as::<_, (String, bool, bool)>(
         "SELECT bt.user_id, u.is_admin, u.disabled FROM bot_tokens bt JOIN users u ON bt.user_id = u.id WHERE bt.token_hash = ?",
@@ -44,7 +44,7 @@ async fn resolve_bot_token(pool: &SqlitePool, token: &str) -> Option<AuthUser> {
     })
 }
 
-async fn resolve_bearer_token(pool: &SqlitePool, token: &str) -> Option<AuthUser> {
+async fn resolve_bearer_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
     let row = sqlx::query_as::<_, (String, String, bool, bool)>(
         "SELECT ut.user_id, ut.expires_at, u.is_admin, u.disabled FROM user_tokens ut JOIN users u ON ut.user_id = u.id WHERE ut.token_hash = ?",

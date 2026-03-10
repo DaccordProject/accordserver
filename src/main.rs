@@ -126,6 +126,7 @@ async fn run_main_server(config: Config) {
 
     let state = AppState {
         db,
+        db_is_postgres: accordserver::db::url_is_postgres(&config.database_url),
         voice_states: Arc::new(DashMap::new()),
         presences: Arc::new(DashMap::new()),
         dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
