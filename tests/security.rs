@@ -2603,6 +2603,173 @@ async fn test_user_cannot_kick_self() {
 }
 
 // =========================================================================
+// Brute-force protection (DAC-114)
+// =========================================================================
+
+#[tokio::test]
+async fn test_login_brute_force_blocked_after_5_failures() {
+    let server = TestServer::new().await;
+
+    // Register a real user
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &json!({ "username": "brutus", "password": "correctpassword1" }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 5 bad-password attempts — all should return 401
+    for i in 0..5 {
+        let app = server.router();
+        let req = json_request(
+            Method::POST,
+            "/api/v1/auth/login",
+            &json!({ "username": "brutus", "password": "wrongpassword" }),
+        );
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {} should be 401",
+            i + 1
+        );
+    }
+
+    // 6th attempt should be rate-limited (429)
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &json!({ "username": "brutus", "password": "wrongpassword" }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        response.headers().contains_key("retry-after"),
+        "rate limited response must include Retry-After header"
+    );
+}
+
+#[tokio::test]
+async fn test_login_successful_clears_failure_counter() {
+    let server = TestServer::new().await;
+
+    // Register user
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &json!({ "username": "recovery", "password": "correctpassword1" }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 4 bad-password attempts
+    for _ in 0..4 {
+        let app = server.router();
+        let req = json_request(
+            Method::POST,
+            "/api/v1/auth/login",
+            &json!({ "username": "recovery", "password": "wrongpassword" }),
+        );
+        let _ = app.oneshot(req).await.unwrap();
+    }
+
+    // Successful login clears the counter
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &json!({ "username": "recovery", "password": "correctpassword1" }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "correct password must succeed");
+
+    // After clearing, another bad attempt should be allowed (not rate-limited)
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &json!({ "username": "recovery", "password": "wrongpassword" }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "fresh failure should be 401");
+}
+
+#[tokio::test]
+async fn test_login_nonexistent_username_counts_toward_limit() {
+    let server = TestServer::new().await;
+
+    // 5 attempts on a non-existent username
+    for i in 0..5 {
+        let app = server.router();
+        let req = json_request(
+            Method::POST,
+            "/api/v1/auth/login",
+            &json!({ "username": "ghost_user", "password": "anypassword" }),
+        );
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {} should be 401",
+            i + 1
+        );
+    }
+
+    // 6th attempt should be rate-limited
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &json!({ "username": "ghost_user", "password": "anypassword" }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn test_register_ip_rate_limit_blocked_after_5_attempts() {
+    let server = TestServer::new().await;
+
+    // 5 registration attempts from the same (implicit "unknown") IP
+    for i in 0..5 {
+        let app = server.router();
+        let req = json_request(
+            Method::POST,
+            "/api/v1/auth/register",
+            &json!({
+                "username": format!("reguser{}", i),
+                "password": "securepassword1"
+            }),
+        );
+        let response = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "attempt {} should not be rate-limited",
+            i + 1
+        );
+    }
+
+    // 6th attempt should be rate-limited
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &json!({ "username": "reguser5", "password": "securepassword1" }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        response.headers().contains_key("retry-after"),
+        "rate limited response must include Retry-After header"
+    );
+}
+
+// =========================================================================
 // Session limit tests
 // =========================================================================
 

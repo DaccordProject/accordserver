@@ -16,7 +16,7 @@ use crate::error::AppError;
 use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::{create_token_hash, generate_token, AuthUser};
 use crate::snowflake;
-use crate::state::{AppState, MfaTicket, TotpAttemptTracker};
+use crate::state::{AppState, LoginFailureTracker, MfaTicket, RegisterAttemptTracker, TotpAttemptTracker};
 
 // ---------------------------------------------------------------------------
 // Session limit constant
@@ -28,6 +28,18 @@ const MAX_SESSIONS_PER_USER: i64 = 25;
 // ---------------------------------------------------------------------------
 const TOTP_MAX_FAILURES: u32 = 5;
 const TOTP_WINDOW_SECS: u64 = 900; // 15 minutes
+
+// ---------------------------------------------------------------------------
+// Login brute-force protection constants
+// ---------------------------------------------------------------------------
+const LOGIN_MAX_FAILURES: u32 = 5;
+const LOGIN_WINDOW_SECS: u64 = 900; // 15 minutes
+
+// ---------------------------------------------------------------------------
+// Register rate limiting constants
+// ---------------------------------------------------------------------------
+const REGISTER_MAX_ATTEMPTS: u32 = 5;
+const REGISTER_WINDOW_SECS: u64 = 900; // 15 minutes
 
 // ---------------------------------------------------------------------------
 // Request structs
@@ -195,6 +207,105 @@ fn clear_totp_failures(state: &AppState, user_id: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Login brute-force protection
+// ---------------------------------------------------------------------------
+
+fn check_login_rate_limit(state: &AppState, username: &str) -> Result<(), AppError> {
+    let now = Instant::now();
+    if let Some(tracker) = state.login_failures.get(username) {
+        let elapsed = now.duration_since(tracker.window_start).as_secs();
+        if elapsed < LOGIN_WINDOW_SECS && tracker.failures >= LOGIN_MAX_FAILURES {
+            let retry_after = LOGIN_WINDOW_SECS - elapsed;
+            return Err(AppError::RateLimited { retry_after });
+        }
+    }
+    Ok(())
+}
+
+fn record_login_failure(state: &AppState, username: &str) {
+    let now = Instant::now();
+    state
+        .login_failures
+        .entry(username.to_string())
+        .and_modify(|t| {
+            let elapsed = now.duration_since(t.window_start).as_secs();
+            if elapsed >= LOGIN_WINDOW_SECS {
+                t.failures = 1;
+                t.window_start = now;
+            } else {
+                t.failures += 1;
+            }
+        })
+        .or_insert(LoginFailureTracker {
+            failures: 1,
+            window_start: now,
+        });
+}
+
+fn clear_login_failures(state: &AppState, username: &str) {
+    state.login_failures.remove(username);
+}
+
+// ---------------------------------------------------------------------------
+// Register rate limiting (per IP)
+// ---------------------------------------------------------------------------
+
+fn hash_ip(ip: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ip.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn extract_request_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("X-Forwarded-For")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            headers
+                .get("X-Real-IP")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn check_register_rate_limit(state: &AppState, ip: &str) -> Result<(), AppError> {
+    let ip_hash = hash_ip(ip);
+    let now = Instant::now();
+    if let Some(tracker) = state.register_attempts.get(&ip_hash) {
+        let elapsed = now.duration_since(tracker.window_start).as_secs();
+        if elapsed < REGISTER_WINDOW_SECS && tracker.attempts >= REGISTER_MAX_ATTEMPTS {
+            let retry_after = REGISTER_WINDOW_SECS - elapsed;
+            return Err(AppError::RateLimited { retry_after });
+        }
+    }
+    Ok(())
+}
+
+fn record_register_attempt(state: &AppState, ip: &str) {
+    let ip_hash = hash_ip(ip);
+    let now = Instant::now();
+    state
+        .register_attempts
+        .entry(ip_hash)
+        .and_modify(|t| {
+            let elapsed = now.duration_since(t.window_start).as_secs();
+            if elapsed >= REGISTER_WINDOW_SECS {
+                t.attempts = 1;
+                t.window_start = now;
+            } else {
+                t.attempts += 1;
+            }
+        })
+        .or_insert(RegisterAttemptTracker {
+            attempts: 1,
+            window_start: now,
+        });
+}
+
+// ---------------------------------------------------------------------------
 // Backup code helpers
 // ---------------------------------------------------------------------------
 
@@ -270,8 +381,14 @@ async fn verify_user_password(
 
 pub async fn register(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Per-IP rate limit: max 5 registration attempts per 15 minutes
+    let ip = extract_request_ip(&headers);
+    check_register_rate_limit(&state, &ip)?;
+    record_register_attempt(&state, &ip);
+
     // Check registration policy
     let policy = &state.settings.load().registration_policy;
     match policy.as_str() {
@@ -433,6 +550,9 @@ pub async fn login(
     State(state): State<AppState>,
     Json(input): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Per-username brute-force protection: max 5 failed attempts per 15 minutes
+    check_login_rate_limit(&state, &input.username)?;
+
     // Look up user by username (must not be a bot, must have password_hash)
     let row = sqlx::query_as::<_, (String, String, bool, bool, bool)>(
         "SELECT id, password_hash, disabled, force_password_reset, totp_enabled FROM users WHERE username = ? AND bot = false AND password_hash IS NOT NULL",
@@ -448,6 +568,8 @@ pub async fn login(
             // Run a dummy Argon2 verification to prevent timing-based user enumeration.
             let dummy_salt = SaltString::generate(&mut OsRng);
             let _ = Argon2::default().hash_password(b"dummy", &dummy_salt);
+            // Count as a failure against this username to prevent enumeration abuse
+            record_login_failure(&state, &input.username);
             return Err(AppError::Unauthorized(
                 "invalid credentials".to_string(),
             ));
@@ -469,10 +591,14 @@ pub async fn login(
         .verify_password(input.password.as_bytes(), &parsed_hash)
         .is_err()
     {
+        record_login_failure(&state, &input.username);
         return Err(AppError::Unauthorized(
             "invalid credentials".to_string(),
         ));
     }
+
+    // Password is correct — clear any tracked failures for this username
+    clear_login_failures(&state, &input.username);
 
     // If 2FA is enabled, issue a short-lived MFA ticket instead of a token
     if totp_enabled {

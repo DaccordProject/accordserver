@@ -28,6 +28,20 @@ pub struct TotpAttemptTracker {
     pub window_start: Instant,
 }
 
+/// Tracks failed login attempts per username for brute-force protection.
+#[derive(Clone)]
+pub struct LoginFailureTracker {
+    pub failures: u32,
+    pub window_start: Instant,
+}
+
+/// Tracks registration attempts per IP for rate limiting.
+#[derive(Clone)]
+pub struct RegisterAttemptTracker {
+    pub attempts: u32,
+    pub window_start: Instant,
+}
+
 /// Short-lived MFA ticket issued after password verification when 2FA is required.
 #[derive(Clone)]
 pub struct MfaTicket {
@@ -57,4 +71,8 @@ pub struct AppState {
     pub totp_key: Option<[u8; 32]>,
     /// Optional API key for MCP endpoint authentication
     pub mcp_api_key: Option<String>,
+    /// username -> LoginFailureTracker; per-username brute-force protection for /auth/login
+    pub login_failures: Arc<DashMap<String, LoginFailureTracker>>,
+    /// ip_hash -> RegisterAttemptTracker; per-IP rate limiting for /auth/register
+    pub register_attempts: Arc<DashMap<String, RegisterAttemptTracker>>,
 }
