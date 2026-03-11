@@ -350,9 +350,15 @@ impl TestServer {
 
     /// Assign a role to a member via the DB.
     pub async fn assign_role(&self, space_id: &str, user_id: &str, role_id: &str) {
-        db::members::add_role_to_member(self.pool(), space_id, user_id, role_id, self.state.db_is_postgres)
-            .await
-            .expect("failed to assign test role");
+        db::members::add_role_to_member(
+            self.pool(),
+            space_id,
+            user_id,
+            role_id,
+            self.state.db_is_postgres,
+        )
+        .await
+        .expect("failed to assign test role");
     }
 
     /// Create an admin user with a token. Sets `is_admin = true` on the user.
