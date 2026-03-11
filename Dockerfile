@@ -7,7 +7,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy sources to build dependencies
-RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && echo "fn main() {}" > src/bin/seed.rs
+RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && echo "fn main() {}" > src/bin/seed.rs && echo "fn main() {}" > src/bin/migrate_to_postgres.rs
 COPY build.rs ./
 RUN cargo build --release && rm -rf src
 
