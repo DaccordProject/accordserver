@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 use crate::middleware::auth::{create_token_hash, generate_token};
@@ -7,7 +7,7 @@ use crate::models::user::CreateUser;
 use crate::snowflake;
 
 pub async fn create_application(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     owner_id: &str,
     name: &str,
     description: &str,
@@ -25,7 +25,7 @@ pub async fn create_application(
     .await?;
 
     // Mark as bot
-    sqlx::query("UPDATE users SET bot = 1 WHERE id = ?")
+    sqlx::query("UPDATE users SET bot = TRUE WHERE id = ?")
         .bind(&bot_user.id)
         .execute(pool)
         .await?;
@@ -56,50 +56,45 @@ pub async fn create_application(
     Ok((app, token))
 }
 
-pub async fn get_application(pool: &SqlitePool, app_id: &str) -> Result<Application, AppError> {
-    let row = sqlx::query_as::<_, (String, String, Option<String>, String, bool, String, i64)>(
-        "SELECT id, name, icon, description, bot_public, owner_id, flags FROM applications WHERE id = ?"
-    )
-    .bind(app_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("application not found".to_string()))?;
+fn row_to_application(row: sqlx::any::AnyRow) -> Application {
+    use sqlx::Row;
+    Application {
+        id: row.get("id"),
+        name: row.get("name"),
+        icon: row.get("icon"),
+        description: row.get("description"),
+        bot_public: crate::db::get_bool(&row, "bot_public"),
+        owner_id: row.get("owner_id"),
+        flags: row.get("flags"),
+    }
+}
 
-    Ok(Application {
-        id: row.0,
-        name: row.1,
-        icon: row.2,
-        description: row.3,
-        bot_public: row.4,
-        owner_id: row.5,
-        flags: row.6,
-    })
+const SELECT_APPLICATIONS: &str = "SELECT id, name, icon, description, bot_public, owner_id, flags FROM applications";
+
+pub async fn get_application(pool: &AnyPool, app_id: &str) -> Result<Application, AppError> {
+    let row = sqlx::query(&format!("{SELECT_APPLICATIONS} WHERE id = ?"))
+        .bind(app_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("application not found".to_string()))?;
+
+    Ok(row_to_application(row))
 }
 
 pub async fn get_application_by_owner(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     owner_id: &str,
 ) -> Result<Application, AppError> {
-    let row = sqlx::query_as::<_, (String, String, Option<String>, String, bool, String, i64)>(
-        "SELECT id, name, icon, description, bot_public, owner_id, flags FROM applications WHERE owner_id = ? LIMIT 1"
-    )
-    .bind(owner_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("application not found".to_string()))?;
+    let row = sqlx::query(&format!("{SELECT_APPLICATIONS} WHERE owner_id = ? LIMIT 1"))
+        .bind(owner_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("application not found".to_string()))?;
 
-    Ok(Application {
-        id: row.0,
-        name: row.1,
-        icon: row.2,
-        description: row.3,
-        bot_public: row.4,
-        owner_id: row.5,
-        flags: row.6,
-    })
+    Ok(row_to_application(row))
 }
 
-pub async fn reset_bot_token(pool: &SqlitePool, app_id: &str) -> Result<String, AppError> {
+pub async fn reset_bot_token(pool: &AnyPool, app_id: &str) -> Result<String, AppError> {
     // Find the bot user for this application
     let bot_user_id: String =
         sqlx::query_scalar("SELECT bot_user_id FROM applications WHERE id = ?")

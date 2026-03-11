@@ -162,6 +162,7 @@ pub async fn resolve_report(
         &auth.user_id,
         &body.status,
         body.action_taken.as_deref(),
+        state.db_is_postgres,
     )
     .await?;
 

@@ -126,7 +126,7 @@ pub async fn update_emoji(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_emojis").await?;
     db::emojis::require_emoji_in_space(&state.db, &emoji_id, &space_id).await?;
-    let emoji = db::emojis::update_emoji(&state.db, &emoji_id, &input).await?;
+    let emoji = db::emojis::update_emoji(&state.db, &emoji_id, &input, state.db_is_postgres).await?;
 
     // Broadcast to gateway
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {

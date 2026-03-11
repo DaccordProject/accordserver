@@ -72,7 +72,7 @@ pub async fn update_space(
         db::users::get_user(&state.db, owner_id).await?;
     }
 
-    db::admin::admin_update_space(&state.db, &space_id, &input).await?;
+    db::admin::admin_update_space(&state.db, &space_id, &input, state.db_is_postgres).await?;
 
     let space = db::spaces::get_space_row(&state.db, &space_id).await?;
     Ok(Json(serde_json::json!({ "data": space })))
@@ -150,7 +150,7 @@ pub async fn update_user(
         }
     }
 
-    let user = db::admin::admin_update_user(&state.db, &user_id, &input).await?;
+    let user = db::admin::admin_update_user(&state.db, &user_id, &input, state.db_is_postgres).await?;
     Ok(Json(serde_json::json!({ "data": user })))
 }
 
@@ -229,7 +229,7 @@ pub async fn reset_user_password(
 
     // Update password and set force_password_reset flag
     sqlx::query(
-        "UPDATE users SET password_hash = ?, force_password_reset = 1 WHERE id = ?",
+        "UPDATE users SET password_hash = ?, force_password_reset = TRUE WHERE id = ?",
     )
     .bind(&password_hash)
     .bind(&user_id)
@@ -245,7 +245,7 @@ pub async fn reset_user_password(
         .map_err(AppError::from)?;
 
     // Disable 2FA so the reset password can actually be used to log in
-    sqlx::query("UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?")
+    sqlx::query("UPDATE users SET totp_secret = NULL, totp_enabled = FALSE WHERE id = ?")
         .bind(&user_id)
         .execute(&state.db)
         .await

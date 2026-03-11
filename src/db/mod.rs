@@ -10,6 +10,7 @@ pub mod members;
 pub mod messages;
 pub mod mutes;
 pub mod permission_overwrites;
+pub mod read_states;
 pub mod relationships;
 pub mod reports;
 pub mod roles;
@@ -18,22 +19,75 @@ pub mod soundboard;
 pub mod spaces;
 pub mod users;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::any::AnyConnectOptions;
+use sqlx::AnyPool;
 use std::str::FromStr;
 
-pub async fn create_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
-    let options = SqliteConnectOptions::from_str(database_url)?
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .foreign_keys(true);
+/// Read a boolean column from an `AnyRow`.
+///
+/// The `Any` driver maps SQLite `INTEGER` columns to `BIGINT`, which cannot be
+/// decoded directly as Rust `bool`.  This helper tries `bool` first (works for
+/// Postgres) and falls back to reading an `i64` (works for SQLite).
+pub fn get_bool(row: &sqlx::any::AnyRow, col: &str) -> bool {
+    use sqlx::Row;
+    row.try_get::<bool, _>(col)
+        .unwrap_or_else(|_| row.get::<i64, _>(col) != 0)
+}
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(options)
-        .await?;
+/// Returns the SQL expression for the current timestamp for the given backend.
+pub fn now_sql(is_postgres: bool) -> &'static str {
+    if is_postgres {
+        "NOW()"
+    } else {
+        "datetime('now')"
+    }
+}
 
-    sqlx::migrate!().run(&pool).await?;
+/// Returns true if the database URL targets PostgreSQL.
+pub fn url_is_postgres(database_url: &str) -> bool {
+    database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")
+}
+
+pub async fn create_pool(database_url: &str) -> Result<AnyPool, sqlx::Error> {
+    // Install both SQLite and Postgres drivers so AnyPool can pick at runtime.
+    sqlx::any::install_default_drivers();
+
+    let is_pg = url_is_postgres(database_url);
+    let connect_opts = AnyConnectOptions::from_str(database_url)?;
+
+    // In-memory SQLite creates a separate database per connection, so restrict
+    // to a single connection to keep schema and data visible across operations.
+    let max_conns = if database_url.contains(":memory:") { 1 } else { 5 };
+    let mut pool_opts = sqlx::any::AnyPoolOptions::new().max_connections(max_conns);
+
+    // foreign_keys is a per-connection PRAGMA in SQLite — must be set on every
+    // new connection, not just once after pool creation.
+    if !is_pg {
+        pool_opts = pool_opts.after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys=ON")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        });
+    }
+
+    let pool = pool_opts.connect_with(connect_opts).await?;
+
+    // journal_mode=WAL is database-level (persists across connections), so once is fine.
+    if !is_pg {
+        sqlx::query("PRAGMA journal_mode=WAL")
+            .execute(&pool)
+            .await?;
+    }
+
+    // Run the correct migration set for this backend.
+    if is_pg {
+        sqlx::migrate!("./migrations/postgres").run(&pool).await?;
+    } else {
+        sqlx::migrate!("./migrations").run(&pool).await?;
+    }
 
     Ok(pool)
 }

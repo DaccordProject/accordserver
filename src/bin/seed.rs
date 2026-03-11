@@ -35,7 +35,7 @@ fn hash_password(password: &str) -> Result<String, Box<dyn Error>> {
 
 /// Generate a bearer token and insert it into user_tokens.
 async fn create_bearer_token(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     user_id: &str,
 ) -> Result<String, Box<dyn Error>> {
     use rand::Rng;
@@ -49,7 +49,7 @@ async fn create_bearer_token(
     let token_hash = format!("{:x}", hasher.finalize());
 
     let expires_at = (chrono::Utc::now() + chrono::Duration::days(365))
-        .format("%Y-%m-%dT%H:%M:%S")
+        .format("%Y-%m-%dT%H:%M:%S+00:00")
         .to_string();
 
     sqlx::query("INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)")
@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("accord-seed: connecting to {database_url}");
     // Ensure data directory exists (matches server startup behaviour)
     std::fs::create_dir_all("data").ok();
+    let is_postgres = db::url_is_postgres(&database_url);
     let pool = db::create_pool(&database_url).await?;
 
     // ── Idempotency check ──────────────────────────────────────────
@@ -145,7 +146,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Add all users as members (alice is already a member from create_space)
     for uid in &user_ids[1..] {
-        db::members::add_member(&pool, space_id, uid).await?;
+        db::members::add_member(&pool, space_id, uid, is_postgres).await?;
     }
 
     // ── Roles ──────────────────────────────────────────────────────
@@ -198,10 +199,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("  created 2 custom roles: Developer, Artist");
 
     // Role assignments: bob=Moderator, charlie=Developer, diana=Artist+Developer
-    db::members::add_role_to_member(&pool, space_id, bob, &moderator_role_id).await?;
-    db::members::add_role_to_member(&pool, space_id, charlie, &developer_role.id).await?;
-    db::members::add_role_to_member(&pool, space_id, diana, &artist_role.id).await?;
-    db::members::add_role_to_member(&pool, space_id, diana, &developer_role.id).await?;
+    db::members::add_role_to_member(&pool, space_id, bob, &moderator_role_id, is_postgres).await?;
+    db::members::add_role_to_member(&pool, space_id, charlie, &developer_role.id, is_postgres).await?;
+    db::members::add_role_to_member(&pool, space_id, diana, &artist_role.id, is_postgres).await?;
+    db::members::add_role_to_member(&pool, space_id, diana, &developer_role.id, is_postgres).await?;
 
     // ── Delete auto-created #general channel ───────────────────────
     // create_space makes a default #general — we'll recreate it under a category
@@ -476,7 +477,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Helper to create a message and return its ID ───────────────
     async fn msg(
-        pool: &sqlx::SqlitePool,
+        pool: &sqlx::AnyPool,
         channel_id: &str,
         author_id: &str,
         space_id: &str,
@@ -710,23 +711,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         (&announce1, alice, "rocket"),
     ];
 
+    let reaction_sql = if is_postgres {
+        "INSERT INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)"
+    };
     for (message_id, user_id, emoji) in reactions {
-        sqlx::query(
-            "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)",
-        )
-        .bind(message_id)
-        .bind(user_id)
-        .bind(emoji)
-        .execute(&pool)
-        .await?;
+        sqlx::query(reaction_sql)
+            .bind(message_id)
+            .bind(user_id)
+            .bind(emoji)
+            .execute(&pool)
+            .await?;
     }
 
     println!("  added {} reactions", reactions.len());
 
     // ── Pinned messages ────────────────────────────────────────────
-    db::messages::pin_message(&pool, &ch_welcome.id, &welcome_msg).await?;
-    db::messages::pin_message(&pool, &ch_rules.id, &rules_msg).await?;
-    db::messages::pin_message(&pool, &ch_announcements.id, &announce1).await?;
+    db::messages::pin_message(&pool, &ch_welcome.id, &welcome_msg, is_postgres).await?;
+    db::messages::pin_message(&pool, &ch_rules.id, &rules_msg, is_postgres).await?;
+    db::messages::pin_message(&pool, &ch_announcements.id, &announce1, is_postgres).await?;
 
     println!("  pinned 3 messages");
 

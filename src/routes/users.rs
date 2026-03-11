@@ -99,7 +99,7 @@ pub async fn update_current_user(
         }
     }
 
-    let user = db::users::update_user(&state.db, &auth.user_id, &input).await?;
+    let user = db::users::update_user(&state.db, &auth.user_id, &input, state.db_is_postgres).await?;
     Ok(Json(serde_json::json!({ "data": user })))
 }
 
@@ -192,7 +192,7 @@ pub async fn create_dm_channel(
     }
 
     let channel =
-        db::dm_participants::create_dm_channel(&state.db, &auth.user_id, &recipient_ids).await?;
+        db::dm_participants::create_dm_channel(&state.db, &auth.user_id, &recipient_ids, state.db_is_postgres).await?;
 
     let json = super::spaces::channel_row_to_json_pub(&state.db, &channel).await;
 

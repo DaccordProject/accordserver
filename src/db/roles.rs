@@ -1,59 +1,47 @@
-use sqlx::SqlitePool;
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::role::{CreateRole, RoleRow, UpdateRole};
 use crate::snowflake;
 
-pub async fn get_role_row(pool: &SqlitePool, role_id: &str) -> Result<RoleRow, AppError> {
-    let row = sqlx::query_as::<_, (String, String, String, i64, bool, Option<String>, i64, String, bool, bool)>(
-        "SELECT id, space_id, name, color, hoist, icon, position, permissions, managed, mentionable FROM roles WHERE id = ?"
-    )
-    .bind(role_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("unknown_role".to_string()))?;
-
-    Ok(RoleRow {
-        id: row.0,
-        space_id: row.1,
-        name: row.2,
-        color: row.3,
-        hoist: row.4,
-        icon: row.5,
-        position: row.6,
-        permissions: row.7,
-        managed: row.8,
-        mentionable: row.9,
-    })
+fn row_to_role(row: sqlx::any::AnyRow) -> RoleRow {
+    RoleRow {
+        id: row.get("id"),
+        space_id: row.get("space_id"),
+        name: row.get("name"),
+        color: row.get("color"),
+        hoist: crate::db::get_bool(&row, "hoist"),
+        icon: row.get("icon"),
+        position: row.get("position"),
+        permissions: row.get("permissions"),
+        managed: crate::db::get_bool(&row, "managed"),
+        mentionable: crate::db::get_bool(&row, "mentionable"),
+    }
 }
 
-pub async fn list_roles(pool: &SqlitePool, space_id: &str) -> Result<Vec<RoleRow>, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, String, i64, bool, Option<String>, i64, String, bool, bool)>(
-        "SELECT id, space_id, name, color, hoist, icon, position, permissions, managed, mentionable FROM roles WHERE space_id = ? ORDER BY position"
-    )
-    .bind(space_id)
-    .fetch_all(pool)
-    .await?;
+const SELECT_ROLES: &str = "SELECT id, space_id, name, color, hoist, icon, position, permissions, managed, mentionable FROM roles";
 
-    Ok(rows
-        .into_iter()
-        .map(|row| RoleRow {
-            id: row.0,
-            space_id: row.1,
-            name: row.2,
-            color: row.3,
-            hoist: row.4,
-            icon: row.5,
-            position: row.6,
-            permissions: row.7,
-            managed: row.8,
-            mentionable: row.9,
-        })
-        .collect())
+pub async fn get_role_row(pool: &AnyPool, role_id: &str) -> Result<RoleRow, AppError> {
+    let row = sqlx::query(&format!("{SELECT_ROLES} WHERE id = ?"))
+        .bind(role_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("unknown_role".to_string()))?;
+
+    Ok(row_to_role(row))
+}
+
+pub async fn list_roles(pool: &AnyPool, space_id: &str) -> Result<Vec<RoleRow>, AppError> {
+    let rows = sqlx::query(&format!("{SELECT_ROLES} WHERE space_id = ? ORDER BY position"))
+        .bind(space_id)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows.into_iter().map(row_to_role).collect())
 }
 
 pub async fn create_role(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     input: &CreateRole,
 ) -> Result<RoleRow, AppError> {
@@ -86,10 +74,12 @@ pub async fn create_role(
 }
 
 pub async fn update_role(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     role_id: &str,
     input: &UpdateRole,
+    is_postgres: bool,
 ) -> Result<RoleRow, AppError> {
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets: Vec<String> = Vec::new();
     let mut str_values: Vec<String> = Vec::new();
     let mut int_vals: Vec<(String, i64)> = Vec::new();
@@ -129,7 +119,7 @@ pub async fn update_role(
         return get_role_row(pool, role_id).await;
     }
 
-    sets.push("updated_at = datetime('now')".to_string());
+    sets.push(format!("updated_at = {now_fn}"));
     let set_clause = sets.join(", ");
     let query = format!("UPDATE roles SET {set_clause} WHERE id = ?");
     let mut q = sqlx::query(&query);
@@ -145,7 +135,7 @@ pub async fn update_role(
     get_role_row(pool, role_id).await
 }
 
-pub async fn delete_role(pool: &SqlitePool, role_id: &str) -> Result<(), AppError> {
+pub async fn delete_role(pool: &AnyPool, role_id: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM roles WHERE id = ?")
         .bind(role_id)
         .execute(pool)
@@ -154,7 +144,7 @@ pub async fn delete_role(pool: &SqlitePool, role_id: &str) -> Result<(), AppErro
 }
 
 pub async fn reorder_roles(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     updates: &[(String, i64)],
 ) -> Result<(), AppError> {

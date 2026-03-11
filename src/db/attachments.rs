@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::attachment::Attachment;
@@ -8,7 +8,7 @@ use crate::snowflake;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_attachment(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     message_id: &str,
     channel_id: &str,
     filename: &str,
@@ -47,7 +47,7 @@ pub async fn insert_attachment(
 }
 
 pub async fn get_attachments_for_message(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     message_id: &str,
 ) -> Result<Vec<Attachment>, AppError> {
     let rows = sqlx::query(
@@ -62,7 +62,7 @@ pub async fn get_attachments_for_message(
 }
 
 pub async fn get_attachments_for_messages(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     message_ids: &[String],
 ) -> Result<HashMap<String, Vec<Attachment>>, AppError> {
     if message_ids.is_empty() {
@@ -92,7 +92,7 @@ pub async fn get_attachments_for_messages(
     Ok(result)
 }
 
-fn row_to_attachment(row: sqlx::sqlite::SqliteRow) -> Attachment {
+fn row_to_attachment(row: sqlx::any::AnyRow) -> Attachment {
     Attachment {
         id: row.get("id"),
         filename: row.get("filename"),

@@ -114,25 +114,29 @@ impl From<sqlx::Error> for AppError {
             sqlx::Error::RowNotFound => AppError::NotFound("resource not found".to_string()),
             sqlx::Error::Database(db_err) => {
                 match db_err.code().as_deref() {
-                    // SQLITE_CONSTRAINT_UNIQUE (2067)
-                    Some("2067") => {
+                    // SQLite: SQLITE_CONSTRAINT_UNIQUE (2067)
+                    // Postgres: unique_violation (23505)
+                    Some("2067") | Some("23505") => {
                         tracing::warn!("unique constraint violation: {}", db_err.message());
                         AppError::Conflict("resource already exists".to_string())
                     }
-                    // SQLITE_CONSTRAINT_NOTNULL (1299)
-                    Some("1299") => {
+                    // SQLite: SQLITE_CONSTRAINT_NOTNULL (1299)
+                    // Postgres: not_null_violation (23502)
+                    Some("1299") | Some("23502") => {
                         tracing::warn!("not-null constraint violation: {}", db_err.message());
                         AppError::BadRequest("missing required field".to_string())
                     }
-                    // SQLITE_CONSTRAINT_FOREIGNKEY (787)
-                    Some("787") => {
+                    // SQLite: SQLITE_CONSTRAINT_FOREIGNKEY (787)
+                    // Postgres: foreign_key_violation (23503)
+                    Some("787") | Some("23503") => {
                         tracing::warn!("foreign key constraint violation: {}", db_err.message());
                         AppError::BadRequest(
                             "referenced resource does not exist".to_string(),
                         )
                     }
-                    // SQLITE_CONSTRAINT_CHECK (275)
-                    Some("275") => {
+                    // SQLite: SQLITE_CONSTRAINT_CHECK (275)
+                    // Postgres: check_violation (23514)
+                    Some("275") | Some("23514") => {
                         tracing::warn!("check constraint violation: {}", db_err.message());
                         AppError::BadRequest("invalid field value".to_string())
                     }

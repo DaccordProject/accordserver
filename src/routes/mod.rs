@@ -12,6 +12,7 @@ mod members;
 pub mod messages;
 mod mutes;
 mod reactions;
+mod read_states;
 mod relationships;
 mod reports;
 mod roles;
@@ -82,6 +83,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/users/@me/channels",
             get(users::get_current_user_channels).post(users::create_dm_channel),
         )
+        .route("/users/@me/read-states", get(read_states::get_unread_channels))
         .route("/users/@me/mutes", get(mutes::list_mutes))
         .route(
             "/users/@me/relationships",
@@ -170,6 +172,11 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/channels/{channel_id}/recipients/{user_id}",
             put(channels::add_recipient).delete(channels::remove_recipient),
+        )
+        // Read states
+        .route(
+            "/channels/{channel_id}/ack",
+            post(read_states::ack_channel),
         )
         // Channel mutes
         .route(

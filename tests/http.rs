@@ -285,7 +285,7 @@ async fn test_message_search_pinned_filter() {
     .unwrap();
 
     // Pin the first message
-    accordserver::db::messages::pin_message(server.pool(), &channel_id, &created.id)
+    accordserver::db::messages::pin_message(server.pool(), &channel_id, &created.id, false)
         .await
         .unwrap();
 

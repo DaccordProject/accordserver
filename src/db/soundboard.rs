@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::error::AppError;
 use crate::models::soundboard::{CreateSound, SoundboardSound, UpdateSound};
@@ -26,7 +26,7 @@ fn row_to_sound(row: SoundRow) -> SoundboardSound {
     }
 }
 
-pub async fn get_sound(pool: &SqlitePool, sound_id: &str) -> Result<SoundboardSound, AppError> {
+pub async fn get_sound(pool: &AnyPool, sound_id: &str) -> Result<SoundboardSound, AppError> {
     let row = sqlx::query_as::<_, SoundRow>(
         "SELECT id, name, audio_path, volume, creator_id, created_at, updated_at FROM soundboard_sounds WHERE id = ?"
     )
@@ -39,7 +39,7 @@ pub async fn get_sound(pool: &SqlitePool, sound_id: &str) -> Result<SoundboardSo
 }
 
 pub async fn list_sounds(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
 ) -> Result<Vec<SoundboardSound>, AppError> {
     let rows = sqlx::query_as::<_, SoundRow>(
@@ -53,7 +53,7 @@ pub async fn list_sounds(
 }
 
 pub async fn create_sound(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     creator_id: &str,
     input: &CreateSound,
@@ -82,34 +82,38 @@ pub async fn create_sound(
 }
 
 pub async fn update_sound(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     sound_id: &str,
     input: &UpdateSound,
+    is_postgres: bool,
 ) -> Result<SoundboardSound, AppError> {
+    let now_fn = crate::db::now_sql(is_postgres);
     if let Some(ref name) = input.name {
-        sqlx::query(
-            "UPDATE soundboard_sounds SET name = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(name)
-        .bind(sound_id)
-        .execute(pool)
-        .await?;
+        let sql = format!(
+            "UPDATE soundboard_sounds SET name = ?, updated_at = {now_fn} WHERE id = ?"
+        );
+        sqlx::query(&sql)
+            .bind(name)
+            .bind(sound_id)
+            .execute(pool)
+            .await?;
     }
     if let Some(volume) = input.volume {
         let volume = volume.clamp(0.0, 2.0);
-        sqlx::query(
-            "UPDATE soundboard_sounds SET volume = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(volume)
-        .bind(sound_id)
-        .execute(pool)
-        .await?;
+        let sql = format!(
+            "UPDATE soundboard_sounds SET volume = ?, updated_at = {now_fn} WHERE id = ?"
+        );
+        sqlx::query(&sql)
+            .bind(volume)
+            .bind(sound_id)
+            .execute(pool)
+            .await?;
     }
     get_sound(pool, sound_id).await
 }
 
 /// Delete a sound. Returns the audio_path for file cleanup.
-pub async fn delete_sound(pool: &SqlitePool, sound_id: &str) -> Result<Option<String>, AppError> {
+pub async fn delete_sound(pool: &AnyPool, sound_id: &str) -> Result<Option<String>, AppError> {
     let audio_path: Option<String> =
         sqlx::query_scalar("SELECT audio_path FROM soundboard_sounds WHERE id = ?")
             .bind(sound_id)

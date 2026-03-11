@@ -12,7 +12,7 @@ use accordserver::voice::livekit::LiveKitClient;
 use axum::body::Body;
 use dashmap::DashMap;
 use http::{Method, Request};
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -39,18 +39,45 @@ impl TestUser {
     }
 }
 
-/// Test server that owns an in-memory SQLite pool and full AppState.
-/// Each instance is isolated — safe for parallel tests.
+/// Test server that owns a database pool and full AppState.
+/// Uses DATABASE_URL from the environment if set (e.g. for Postgres CI),
+/// otherwise falls back to an in-memory SQLite database.
 pub struct TestServer {
     pub state: AppState,
 }
 
 impl TestServer {
-    /// Create a new TestServer with an in-memory SQLite database.
+    /// Create a new TestServer. Uses DATABASE_URL if set, otherwise in-memory SQLite.
     pub async fn new() -> Self {
-        let pool = db::create_pool("sqlite::memory:")
+        sqlx::any::install_default_drivers();
+        let db_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "sqlite::memory:".to_string());
+        let is_postgres = db::url_is_postgres(&db_url);
+        let pool = db::create_pool(&db_url)
             .await
             .expect("failed to create test pool");
+
+        // For Postgres, truncate all tables to ensure test isolation.
+        // In-memory SQLite starts empty each time so this is not needed there.
+        if is_postgres {
+            // Truncate all application tables (order doesn't matter with CASCADE).
+            // server_settings is re-created by get_settings() below.
+            for table in &[
+                "read_states", "reactions", "pinned_messages", "attachments",
+                "messages", "permission_overwrites", "channel_mutes",
+                "dm_participants", "member_roles", "members", "bans",
+                "invites", "emoji_roles", "emojis", "soundboard_sounds",
+                "bot_tokens", "applications", "user_tokens", "backup_codes",
+                "channels", "roles", "reports", "relationships",
+                "spaces", "users", "server_settings",
+            ] {
+                let sql = format!("TRUNCATE TABLE {} CASCADE", table);
+                sqlx::query(&sql)
+                    .execute(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("failed to truncate {}: {}", table, e));
+            }
+        }
 
         let (dispatcher, gateway_tx) = Dispatcher::new();
 
@@ -73,6 +100,7 @@ impl TestServer {
 
         let state = AppState {
             db: pool,
+            db_is_postgres: is_postgres,
             voice_states: Arc::new(DashMap::new()),
             presences: Arc::new(DashMap::new()),
             dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
@@ -100,8 +128,8 @@ impl TestServer {
         routes::router(self.state.clone())
     }
 
-    /// Returns a reference to the underlying SQLite pool.
-    pub fn pool(&self) -> &SqlitePool {
+    /// Returns a reference to the underlying database pool.
+    pub fn pool(&self) -> &AnyPool {
         &self.state.db
     }
 
@@ -219,7 +247,7 @@ impl TestServer {
 
     /// Ban a user from a space.
     pub async fn ban_user(&self, space_id: &str, user_id: &str, banned_by: &str) {
-        db::bans::create_ban(self.pool(), space_id, user_id, Some("test ban"), banned_by)
+        db::bans::create_ban(self.pool(), space_id, user_id, Some("test ban"), banned_by, false)
             .await
             .expect("failed to ban test user");
     }
@@ -270,7 +298,7 @@ impl TestServer {
 
     /// Add a user as a member of a space.
     pub async fn add_member(&self, space_id: &str, user_id: &str) {
-        db::members::add_member(self.pool(), space_id, user_id)
+        db::members::add_member(self.pool(), space_id, user_id, false)
             .await
             .expect("failed to add test member");
     }
@@ -297,7 +325,7 @@ impl TestServer {
 
     /// Assign a role to a member via the DB.
     pub async fn assign_role(&self, space_id: &str, user_id: &str, role_id: &str) {
-        db::members::add_role_to_member(self.pool(), space_id, user_id, role_id)
+        db::members::add_role_to_member(self.pool(), space_id, user_id, role_id, false)
             .await
             .expect("failed to assign test role");
     }
@@ -305,7 +333,7 @@ impl TestServer {
     /// Create an admin user with a token. Sets `is_admin = true` on the user.
     pub async fn create_admin_with_token(&self, username: &str) -> TestUser {
         let test_user = self.create_user_with_token(username).await;
-        sqlx::query("UPDATE users SET is_admin = 1 WHERE id = ?")
+        sqlx::query("UPDATE users SET is_admin = TRUE WHERE id = ?")
             .bind(&test_user.user.id)
             .execute(self.pool())
             .await

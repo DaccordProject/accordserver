@@ -705,8 +705,12 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
         (row.0, true)
     } else if let Some(tok) = token.strip_prefix("Bearer ") {
         let token_hash = auth_resolve::create_token_hash(tok);
+        let now_fn = crate::db::now_sql(state.db_is_postgres);
+        let sql = format!(
+            "SELECT user_id FROM user_tokens WHERE token_hash = ? AND expires_at > {now_fn}",
+        );
         let row =
-            sqlx::query_as::<_, (String,)>("SELECT user_id FROM user_tokens WHERE token_hash = ? AND expires_at > datetime('now')")
+            sqlx::query_as::<_, (String,)>(&sql)
                 .bind(&token_hash)
                 .fetch_optional(&state.db)
                 .await

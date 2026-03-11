@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::db;
 use crate::error::AppError;
@@ -110,7 +110,7 @@ pub fn require_server_admin(auth: &AuthUser) -> Result<(), AppError> {
 /// - If the user is not a member, returns `Forbidden`.
 /// - Otherwise, merges @everyone permissions with all assigned role permissions.
 pub async fn resolve_member_permissions(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
 ) -> Result<Vec<String>, AppError> {
@@ -119,7 +119,7 @@ pub async fn resolve_member_permissions(
 
 /// Like `resolve_member_permissions` but allows an instance-admin bypass.
 pub async fn resolve_member_permissions_with_admin(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
     is_server_admin: bool,
@@ -128,7 +128,7 @@ pub async fn resolve_member_permissions_with_admin(
 }
 
 async fn resolve_member_permissions_inner(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
     is_server_admin: bool,
@@ -186,7 +186,7 @@ async fn resolve_member_permissions_inner(
 /// Instance admins (`auth.is_admin`) bypass all permission checks.
 /// Returns `Forbidden` if the user lacks the permission or is not a member.
 pub async fn require_permission(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     auth: &AuthUser,
     perm: &str,
@@ -201,7 +201,7 @@ pub async fn require_permission(
 
 /// Shorthand: require that a user is a member of the space (has view_channel).
 pub async fn require_membership(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
 ) -> Result<(), AppError> {
@@ -222,7 +222,7 @@ pub async fn require_membership(
 /// 4. Union of user's role overwrites: collect all allow/deny, allow wins, then apply.
 /// 5. Apply member-specific overwrite: deny removes, allow adds.
 pub async fn resolve_channel_permissions(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     space_id: &str,
     user_id: &str,
@@ -316,7 +316,7 @@ pub async fn resolve_channel_permissions(
 
 /// Check that a user is a participant in a DM channel.
 pub async fn require_dm_access(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     user_id: &str,
 ) -> Result<(), AppError> {
@@ -334,7 +334,7 @@ pub async fn require_dm_access(
 /// For DM/group_dm channels, checks participant access instead.
 /// Returns the space_id on success (empty string for DMs).
 pub async fn require_channel_permission(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     auth: &AuthUser,
     perm: &str,
@@ -360,7 +360,7 @@ pub async fn require_channel_permission(
 /// Shorthand: require that a user is a member of the channel's space.
 /// Returns the space_id on success.
 pub async fn require_channel_membership(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     user_id: &str,
 ) -> Result<String, AppError> {
@@ -377,7 +377,7 @@ pub async fn require_channel_membership(
 /// Returns a user's highest role position in a space.
 /// Space owner returns `i64::MAX`. A member with only @everyone returns 0.
 pub async fn get_highest_role_position(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     user_id: &str,
 ) -> Result<i64, AppError> {
@@ -407,7 +407,7 @@ pub async fn get_highest_role_position(
 /// the target user's highest role position. Prevents lateral or upward actions.
 /// Instance admins (`auth.is_admin`) bypass this check.
 pub async fn require_hierarchy(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     auth: &AuthUser,
     target_id: &str,
@@ -428,7 +428,7 @@ pub async fn require_hierarchy(
 /// Requires that the actor's highest role position is strictly greater than
 /// the given role's position. Used for role management operations.
 pub async fn require_role_hierarchy(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     actor_id: &str,
     role_position: i64,

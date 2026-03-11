@@ -1,10 +1,10 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::channel::{ChannelRow, CreateChannel, UpdateChannel};
 use crate::snowflake;
 
-fn row_to_channel(row: sqlx::sqlite::SqliteRow) -> ChannelRow {
+fn row_to_channel(row: sqlx::any::AnyRow) -> ChannelRow {
     ChannelRow {
         id: row.get("id"),
         channel_type: row.get("type"),
@@ -14,13 +14,13 @@ fn row_to_channel(row: sqlx::sqlite::SqliteRow) -> ChannelRow {
         topic: row.get("topic"),
         position: row.get("position"),
         parent_id: row.get("parent_id"),
-        nsfw: row.get("nsfw"),
+        nsfw: crate::db::get_bool(&row, "nsfw"),
         rate_limit: row.get("rate_limit"),
         bitrate: row.get("bitrate"),
         user_limit: row.get("user_limit"),
         owner_id: row.get("owner_id"),
         last_message_id: row.get("last_message_id"),
-        archived: row.get("archived"),
+        archived: crate::db::get_bool(&row, "archived"),
         auto_archive_after: row.get("auto_archive_after"),
         created_at: row.get("created_at"),
     }
@@ -28,7 +28,7 @@ fn row_to_channel(row: sqlx::sqlite::SqliteRow) -> ChannelRow {
 
 const SELECT_CHANNELS: &str = "SELECT id, type, space_id, name, description, topic, position, parent_id, nsfw, rate_limit, bitrate, user_limit, owner_id, last_message_id, archived, auto_archive_after, created_at FROM channels";
 
-pub async fn get_channel_row(pool: &SqlitePool, channel_id: &str) -> Result<ChannelRow, AppError> {
+pub async fn get_channel_row(pool: &AnyPool, channel_id: &str) -> Result<ChannelRow, AppError> {
     let row = sqlx::query(&format!("{SELECT_CHANNELS} WHERE id = ?"))
         .bind(channel_id)
         .fetch_optional(pool)
@@ -39,7 +39,7 @@ pub async fn get_channel_row(pool: &SqlitePool, channel_id: &str) -> Result<Chan
 }
 
 pub async fn list_channels_in_space(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
 ) -> Result<Vec<ChannelRow>, AppError> {
     let rows = sqlx::query(&format!(
@@ -53,7 +53,7 @@ pub async fn list_channels_in_space(
 }
 
 pub async fn create_channel(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     input: &CreateChannel,
 ) -> Result<ChannelRow, AppError> {
@@ -81,10 +81,12 @@ pub async fn create_channel(
 }
 
 pub async fn update_channel(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     input: &UpdateChannel,
+    is_postgres: bool,
 ) -> Result<ChannelRow, AppError> {
+    let now_fn = crate::db::now_sql(is_postgres);
     let mut sets = Vec::new();
     let mut str_values: Vec<Option<String>> = Vec::new();
     let mut int_values: Vec<(String, i64)> = Vec::new();
@@ -129,7 +131,7 @@ pub async fn update_channel(
         return get_channel_row(pool, channel_id).await;
     }
 
-    sets.push("updated_at = datetime('now')".to_string());
+    sets.push(format!("updated_at = {now_fn}"));
     let set_clause = sets.join(", ");
     let query = format!("UPDATE channels SET {set_clause} WHERE id = ?");
     let mut q = sqlx::query(&query);
@@ -145,7 +147,7 @@ pub async fn update_channel(
     get_channel_row(pool, channel_id).await
 }
 
-pub async fn delete_channel(pool: &SqlitePool, channel_id: &str) -> Result<(), AppError> {
+pub async fn delete_channel(pool: &AnyPool, channel_id: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM channels WHERE id = ?")
         .bind(channel_id)
         .execute(pool)
@@ -154,7 +156,7 @@ pub async fn delete_channel(pool: &SqlitePool, channel_id: &str) -> Result<(), A
 }
 
 pub async fn reorder_channels(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     space_id: &str,
     updates: &[(String, i64)],
 ) -> Result<(), AppError> {

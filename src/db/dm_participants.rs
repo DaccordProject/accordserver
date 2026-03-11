@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 use crate::db;
 use crate::error::AppError;
@@ -8,7 +8,7 @@ use crate::snowflake;
 
 /// Check whether a user is a participant in a DM channel.
 pub async fn is_participant(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     user_id: &str,
 ) -> Result<bool, AppError> {
@@ -23,7 +23,7 @@ pub async fn is_participant(
 
 /// List all participant user IDs for a DM channel.
 pub async fn list_participant_ids(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<String>, AppError> {
     let rows =
@@ -36,7 +36,7 @@ pub async fn list_participant_ids(
 
 /// Get full User objects for all participants in a DM channel.
 pub async fn get_participant_users(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<User>, AppError> {
     let ids = list_participant_ids(pool, channel_id).await?;
@@ -51,11 +51,17 @@ pub async fn get_participant_users(
 
 /// Add a participant to a DM channel. No-op if already present.
 pub async fn add_participant(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     user_id: &str,
+    is_postgres: bool,
 ) -> Result<(), AppError> {
-    sqlx::query("INSERT OR IGNORE INTO dm_participants (channel_id, user_id) VALUES (?, ?)")
+    let sql = if is_postgres {
+        "INSERT INTO dm_participants (channel_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO dm_participants (channel_id, user_id) VALUES (?, ?)"
+    };
+    sqlx::query(sql)
         .bind(channel_id)
         .bind(user_id)
         .execute(pool)
@@ -65,7 +71,7 @@ pub async fn add_participant(
 
 /// Remove a participant from a DM channel.
 pub async fn remove_participant(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
     user_id: &str,
 ) -> Result<(), AppError> {
@@ -79,7 +85,7 @@ pub async fn remove_participant(
 
 /// Find an existing 1:1 DM channel between two users.
 pub async fn find_existing_dm(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     user_a: &str,
     user_b: &str,
 ) -> Result<Option<ChannelRow>, AppError> {
@@ -127,9 +133,10 @@ pub async fn find_existing_dm(
 /// channel if one already exists. For group DMs (multiple recipients), always
 /// creates a new channel.
 pub async fn create_dm_channel(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     creator_id: &str,
     recipient_ids: &[String],
+    is_postgres: bool,
 ) -> Result<ChannelRow, AppError> {
     if recipient_ids.is_empty() {
         return Err(AppError::BadRequest(
@@ -141,7 +148,7 @@ pub async fn create_dm_channel(
     if recipient_ids.len() == 1 {
         if let Some(existing) = find_existing_dm(pool, creator_id, &recipient_ids[0]).await? {
             // Re-add the creator as a participant in case they left
-            add_participant(pool, &existing.id, creator_id).await?;
+            add_participant(pool, &existing.id, creator_id, is_postgres).await?;
             return Ok(existing);
         }
     }
@@ -164,9 +171,9 @@ pub async fn create_dm_channel(
     .await?;
 
     // Add creator and all recipients as participants
-    add_participant(pool, &id, creator_id).await?;
+    add_participant(pool, &id, creator_id, is_postgres).await?;
     for rid in recipient_ids {
-        add_participant(pool, &id, rid).await?;
+        add_participant(pool, &id, rid, is_postgres).await?;
     }
 
     db::channels::get_channel_row(pool, &id).await
@@ -174,7 +181,7 @@ pub async fn create_dm_channel(
 
 /// Count the number of participants in a DM channel.
 pub async fn count_participants(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     channel_id: &str,
 ) -> Result<i64, AppError> {
     let count: i64 =

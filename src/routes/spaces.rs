@@ -110,7 +110,7 @@ pub async fn update_space(
         }
     }
 
-    let space = db::spaces::update_space(&state.db, &space_id, &input).await?;
+    let space = db::spaces::update_space(&state.db, &space_id, &input, state.db_is_postgres).await?;
 
     // Broadcast space.update to space members
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
@@ -259,7 +259,7 @@ pub async fn reorder_channels(
 /// Build channel JSON for external callers (e.g. channels.rs).
 /// Loads overwrites from the DB. For DM/group_dm channels, includes recipients.
 pub async fn channel_row_to_json_pub(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     row: &ChannelRow,
 ) -> serde_json::Value {
     let overwrites = db::permission_overwrites::list_overwrites(pool, &row.id)
@@ -304,7 +304,7 @@ fn channel_row_to_json_with_overwrites(
 }
 
 async fn channels_to_json_async(
-    pool: &sqlx::SqlitePool,
+    pool: &sqlx::AnyPool,
     rows: &[ChannelRow],
 ) -> Result<Vec<serde_json::Value>, AppError> {
     let mut result = Vec::with_capacity(rows.len());
@@ -349,7 +349,7 @@ pub async fn join_public_space(
         ));
     }
 
-    let member = db::members::add_member(&state.db, &space.id, &auth.user_id).await?;
+    let member = db::members::add_member(&state.db, &space.id, &auth.user_id, state.db_is_postgres).await?;
 
     // Broadcast member.join to the space
     let user = db::users::get_user(&state.db, &auth.user_id).await?;

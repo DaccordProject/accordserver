@@ -51,7 +51,7 @@ pub async fn update_channel(
         require_channel_permission(&state.db, &channel_id, &auth, "manage_channels")
             .await?;
     }
-    let channel = db::channels::update_channel(&state.db, &channel_id, &input).await?;
+    let channel = db::channels::update_channel(&state.db, &channel_id, &input, state.db_is_postgres).await?;
     let json = super::spaces::channel_row_to_json_pub(&state.db, &channel).await;
 
     // Broadcast channel.update
@@ -276,7 +276,7 @@ pub async fn add_recipient(
         ));
     }
 
-    db::dm_participants::add_participant(&state.db, &channel_id, &user_id).await?;
+    db::dm_participants::add_participant(&state.db, &channel_id, &user_id, state.db_is_postgres).await?;
 
     let updated = db::channels::get_channel_row(&state.db, &channel_id).await?;
     let json = super::spaces::channel_row_to_json_pub(&state.db, &updated).await;
