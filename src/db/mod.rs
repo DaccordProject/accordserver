@@ -74,9 +74,12 @@ pub fn get_bool(row: &sqlx::any::AnyRow, col: &str) -> bool {
 }
 
 /// Returns the SQL expression for the current timestamp for the given backend.
+///
+/// Both SQLite and PostgreSQL return timestamps as TEXT in `'YYYY-MM-DD HH24:MI:SS'`
+/// format so that `row.get::<String, _>()` works identically across backends.
 pub fn now_sql(is_postgres: bool) -> &'static str {
     if is_postgres {
-        "NOW()"
+        "to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
     } else {
         "datetime('now')"
     }
