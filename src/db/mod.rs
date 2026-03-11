@@ -104,10 +104,7 @@ pub fn url_is_postgres(database_url: &str) -> bool {
 
 /// Validate that a PostgreSQL identifier contains only safe characters.
 fn is_safe_pg_identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Connect to the `postgres` maintenance database and ensure the target
@@ -124,9 +121,7 @@ async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error
 
     let opts = PgConnectOptions::from_str(database_url)?;
     let db_name = opts.get_database().unwrap_or("accord").to_owned();
-    let user_name = opts
-        .get_username()
-        .to_owned();
+    let user_name = opts.get_username().to_owned();
 
     tracing::info!("checking if postgres database `{db_name}` exists");
 
@@ -167,15 +162,13 @@ async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error
     // On PostgreSQL 15+, CREATE on the public schema is revoked from PUBLIC,
     // so non-superuser roles may not be able to run migrations without this.
     let target_opts = opts.database(&db_name);
-    let mut target_conn =
-        sqlx::postgres::PgConnection::connect_with(&target_opts).await?;
+    let mut target_conn = sqlx::postgres::PgConnection::connect_with(&target_opts).await?;
 
     // Check if we have CREATE privilege on the public schema.
-    let has_create: bool = sqlx::query_scalar(
-        "SELECT has_schema_privilege(current_user, 'public', 'CREATE')",
-    )
-    .fetch_one(&mut target_conn)
-    .await?;
+    let has_create: bool =
+        sqlx::query_scalar("SELECT has_schema_privilege(current_user, 'public', 'CREATE')")
+            .fetch_one(&mut target_conn)
+            .await?;
 
     if !has_create {
         tracing::info!("granting CREATE on schema public to `{user_name}`");
@@ -187,10 +180,7 @@ async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error
         } else {
             "GRANT ALL ON SCHEMA public TO PUBLIC".to_string()
         };
-        if let Err(e) = sqlx::query(&grant_sql)
-            .execute(&mut target_conn)
-            .await
-        {
+        if let Err(e) = sqlx::query(&grant_sql).execute(&mut target_conn).await {
             tracing::warn!(
                 "could not grant schema privileges (you may need to run as the database owner or superuser): {e}"
             );
