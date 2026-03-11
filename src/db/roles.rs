@@ -22,7 +22,7 @@ fn row_to_role(row: sqlx::any::AnyRow) -> RoleRow {
 const SELECT_ROLES: &str = "SELECT id, space_id, name, color, hoist, icon, position, permissions, managed, mentionable FROM roles";
 
 pub async fn get_role_row(pool: &AnyPool, role_id: &str) -> Result<RoleRow, AppError> {
-    let row = sqlx::query(&format!("{SELECT_ROLES} WHERE id = ?"))
+    let row = sqlx::query(&super::q(&format!("{SELECT_ROLES} WHERE id = ?")))
         .bind(role_id)
         .fetch_optional(pool)
         .await?
@@ -32,10 +32,12 @@ pub async fn get_role_row(pool: &AnyPool, role_id: &str) -> Result<RoleRow, AppE
 }
 
 pub async fn list_roles(pool: &AnyPool, space_id: &str) -> Result<Vec<RoleRow>, AppError> {
-    let rows = sqlx::query(&format!("{SELECT_ROLES} WHERE space_id = ? ORDER BY position"))
-        .bind(space_id)
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(&super::q(&format!(
+        "{SELECT_ROLES} WHERE space_id = ? ORDER BY position"
+    )))
+    .bind(space_id)
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows.into_iter().map(row_to_role).collect())
 }
@@ -49,15 +51,16 @@ pub async fn create_role(
     let permissions = serde_json::to_string(&input.permissions.as_deref().unwrap_or(&[])).unwrap();
 
     // Get max position
-    let max_pos: Option<i64> =
-        sqlx::query_scalar("SELECT MAX(position) FROM roles WHERE space_id = ?")
-            .bind(space_id)
-            .fetch_one(pool)
-            .await?;
+    let max_pos: Option<i64> = sqlx::query_scalar(&super::q(
+        "SELECT MAX(position) FROM roles WHERE space_id = ?",
+    ))
+    .bind(space_id)
+    .fetch_one(pool)
+    .await?;
     let position = max_pos.unwrap_or(0) + 1;
 
     sqlx::query(
-        "INSERT INTO roles (id, space_id, name, color, hoist, permissions, mentionable, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        &super::q("INSERT INTO roles (id, space_id, name, color, hoist, permissions, mentionable, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     )
     .bind(&id)
     .bind(space_id)
@@ -122,7 +125,8 @@ pub async fn update_role(
     sets.push(format!("updated_at = {now_fn}"));
     let set_clause = sets.join(", ");
     let query = format!("UPDATE roles SET {set_clause} WHERE id = ?");
-    let mut q = sqlx::query(&query);
+    let query_str = super::q(&query);
+    let mut q = sqlx::query(&query_str);
     for v in &str_values {
         q = q.bind(v);
     }
@@ -136,7 +140,7 @@ pub async fn update_role(
 }
 
 pub async fn delete_role(pool: &AnyPool, role_id: &str) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM roles WHERE id = ?")
+    sqlx::query(&super::q("DELETE FROM roles WHERE id = ?"))
         .bind(role_id)
         .execute(pool)
         .await?;
@@ -149,12 +153,14 @@ pub async fn reorder_roles(
     updates: &[(String, i64)],
 ) -> Result<(), AppError> {
     for (id, position) in updates {
-        sqlx::query("UPDATE roles SET position = ? WHERE id = ? AND space_id = ?")
-            .bind(position)
-            .bind(id)
-            .bind(space_id)
-            .execute(pool)
-            .await?;
+        sqlx::query(&super::q(
+            "UPDATE roles SET position = ? WHERE id = ? AND space_id = ?",
+        ))
+        .bind(position)
+        .bind(id)
+        .bind(space_id)
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }

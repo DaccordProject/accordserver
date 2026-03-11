@@ -78,8 +78,8 @@ pub async fn delete_relationship(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Check what relationship exists
-    let existing = db::relationships::get_relationship(&state.db, &auth.user_id, &target_id)
-        .await?;
+    let existing =
+        db::relationships::get_relationship(&state.db, &auth.user_id, &target_id).await?;
 
     if existing.is_none() {
         return Err(AppError::NotFound("relationship not found".into()));
@@ -132,19 +132,14 @@ async fn handle_friend_or_accept(
     }
 
     // Check if there's already an incoming pending from the target (type=3 on my side)
-    let my_existing =
-        db::relationships::get_relationship(&state.db, user_id, target_id).await?;
+    let my_existing = db::relationships::get_relationship(&state.db, user_id, target_id).await?;
 
     // Check if target already sent me a request (their type=4, my type=3)
     let target_existing =
         db::relationships::get_relationship(&state.db, target_id, user_id).await?;
 
-    let is_accepting = my_existing
-        .as_ref()
-        .is_some_and(|r| r.rel_type == 3)
-        || target_existing
-            .as_ref()
-            .is_some_and(|r| r.rel_type == 4);
+    let is_accepting = my_existing.as_ref().is_some_and(|r| r.rel_type == 3)
+        || target_existing.as_ref().is_some_and(|r| r.rel_type == 4);
 
     if is_accepting {
         // Accept: set both rows to type=1 (friend)

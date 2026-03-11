@@ -20,6 +20,7 @@ pub struct ReportRow {
     pub resolved_at: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_report(
     pool: &AnyPool,
     space_id: &str,
@@ -32,7 +33,7 @@ pub async fn create_report(
 ) -> Result<ReportRow, AppError> {
     let id = snowflake::generate();
     sqlx::query(
-        "INSERT INTO reports (id, space_id, reporter_id, target_type, target_id, channel_id, category, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        &super::q("INSERT INTO reports (id, space_id, reporter_id, target_type, target_id, channel_id, category, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
     )
     .bind(&id)
     .bind(space_id)
@@ -50,7 +51,7 @@ pub async fn create_report(
 
 pub async fn get_report(pool: &AnyPool, report_id: &str) -> Result<ReportRow, AppError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>, String, Option<String>, String, Option<String>, Option<String>, String, Option<String>)>(
-        "SELECT id, space_id, reporter_id, target_type, target_id, channel_id, category, description, status, actioned_by, action_taken, created_at, resolved_at FROM reports WHERE id = ?"
+        &super::q("SELECT id, space_id, reporter_id, target_type, target_id, channel_id, category, description, status, actioned_by, action_taken, created_at, resolved_at FROM reports WHERE id = ?")
     )
     .bind(report_id)
     .fetch_optional(pool)
@@ -91,8 +92,26 @@ pub async fn list_reports(
     }
     query.push_str(" ORDER BY created_at DESC LIMIT ?");
 
-    let mut q = sqlx::query_as::<_, (String, String, String, String, String, Option<String>, String, Option<String>, String, Option<String>, Option<String>, String, Option<String>)>(&query)
-        .bind(space_id);
+    let query = super::q(&query);
+    let mut q = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        ),
+    >(&query)
+    .bind(space_id);
 
     if let Some(s) = status_filter {
         q = q.bind(s);
@@ -136,6 +155,7 @@ pub async fn resolve_report(
     let sql = format!(
         "UPDATE reports SET status = ?, actioned_by = ?, action_taken = ?, resolved_at = {now_fn} WHERE id = ?"
     );
+    let sql = super::q(&sql);
     sqlx::query(&sql)
         .bind(status)
         .bind(actioned_by)

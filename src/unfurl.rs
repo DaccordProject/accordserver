@@ -150,8 +150,7 @@ fn extract_meta_tags(html: &str) -> Vec<(String, String)> {
             continue;
         };
 
-        let property = extract_attr(segment, "property")
-            .or_else(|| extract_attr(segment, "name"));
+        let property = extract_attr(segment, "property").or_else(|| extract_attr(segment, "name"));
         let content = extract_attr(segment, "content");
 
         if let (Some(prop), Some(cont)) = (property, content) {
@@ -208,7 +207,11 @@ fn resolve_url(url: &str, base: &str) -> String {
         return format!("{}/{}", &base[..slash_idx], url);
     }
     // Last resort: just append
-    format!("{}/{}", base.trim_end_matches('/'), url.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        url.trim_start_matches('/')
+    )
 }
 
 /// Decode common HTML entities.
@@ -269,7 +272,8 @@ mod tests {
 
     #[test]
     fn test_extract_urls_max_limit() {
-        let content = "https://a.com https://b.com https://c.com https://d.com https://e.com https://f.com";
+        let content =
+            "https://a.com https://b.com https://c.com https://d.com https://e.com https://f.com";
         let urls = extract_urls(content);
         assert_eq!(urls.len(), MAX_URLS);
     }
@@ -295,7 +299,10 @@ mod tests {
         assert_eq!(embed.title.as_deref(), Some("Test Page"));
         assert_eq!(embed.description.as_deref(), Some("A test description"));
         assert_eq!(embed.url.as_deref(), Some("https://example.com/page"));
-        assert_eq!(embed.image.as_ref().unwrap().url, "https://example.com/img.png");
+        assert_eq!(
+            embed.image.as_ref().unwrap().url,
+            "https://example.com/img.png"
+        );
         assert_eq!(embed.author.as_ref().unwrap().name, "Example");
         assert_eq!(embed.embed_type.as_deref(), Some("link"));
     }

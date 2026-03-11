@@ -28,7 +28,7 @@ pub async fn get_unread_channels(
 ) -> Result<Vec<UnreadChannel>, AppError> {
     // Get channels the user is a member of (space channels + DMs) that have
     // messages newer than their last read position.
-    let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, i64)>(
+    let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, i64)>(&super::q(
         "SELECT c.id, rs.last_read_message_id, c.last_message_id, COALESCE(rs.mention_count, 0)
          FROM channels c
          LEFT JOIN read_states rs ON rs.channel_id = c.id AND rs.user_id = ?
@@ -48,7 +48,7 @@ pub async fn get_unread_channels(
              rs.last_read_message_id IS NULL
              OR c.last_message_id > rs.last_read_message_id
            )",
-    )
+    ))
     .bind(user_id)
     .bind(user_id)
     .bind(user_id)
@@ -88,6 +88,7 @@ pub async fn ack_channel(
            mention_count = 0,
            updated_at = {now}"
     );
+    let sql = super::q(&sql);
     sqlx::query(&sql)
         .bind(user_id)
         .bind(channel_id)
@@ -113,6 +114,7 @@ pub async fn increment_mention_count(
            mention_count = read_states.mention_count + 1,
            updated_at = {now}"
     );
+    let sql = super::q(&sql);
     sqlx::query(&sql)
         .bind(user_id)
         .bind(channel_id)

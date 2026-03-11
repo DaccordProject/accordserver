@@ -36,7 +36,7 @@ fn row_to_space(row: sqlx::any::AnyRow) -> SpaceRow {
 const SELECT_SPACES: &str = "SELECT id, name, slug, description, icon, banner, splash, owner_id, verification_level, default_notifications, explicit_content_filter, vanity_url_code, preferred_locale, afk_channel_id, afk_timeout, system_channel_id, rules_channel_id, nsfw_level, premium_tier, premium_subscription_count, public, max_members, created_at FROM spaces";
 
 pub async fn get_space_row(pool: &AnyPool, space_id: &str) -> Result<SpaceRow, AppError> {
-    let row = sqlx::query(&format!("{SELECT_SPACES} WHERE id = ?"))
+    let row = sqlx::query(&super::q(&format!("{SELECT_SPACES} WHERE id = ?")))
         .bind(space_id)
         .fetch_optional(pool)
         .await?
@@ -55,17 +55,16 @@ pub async fn create_space(
     // Determine slug: use provided slug (after validation) or generate from name
     let base_slug = match &input.slug {
         Some(s) => {
-            slug::validate_slug(s)
-                .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            slug::validate_slug(s).map_err(|e| AppError::BadRequest(e.to_string()))?;
             s.clone()
         }
         None => slug::slugify(&input.name),
     };
     let final_slug = ensure_unique_slug(pool, &base_slug, None).await?;
 
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO spaces (id, name, slug, description, owner_id, public) VALUES (?, ?, ?, ?, ?, ?)",
-    )
+    ))
     .bind(&id)
     .bind(&input.name)
     .bind(&final_slug)
@@ -80,9 +79,9 @@ pub async fn create_space(
     let default_perms =
         serde_json::to_string(&crate::middleware::permissions::DEFAULT_EVERYONE_PERMISSIONS)
             .unwrap();
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO roles (id, space_id, name, position, permissions) VALUES (?, ?, '@everyone', 0, ?)"
-    )
+    ))
     .bind(&role_id)
     .bind(&id)
     .bind(&default_perms)
@@ -93,9 +92,9 @@ pub async fn create_space(
     let mod_role_id = snowflake::generate();
     let mod_perms =
         serde_json::to_string(&crate::middleware::permissions::MODERATOR_PERMISSIONS).unwrap();
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO roles (id, space_id, name, color, hoist, position, permissions) VALUES (?, ?, 'Moderator', 3447003, 1, 1, ?)"
-    )
+    ))
     .bind(&mod_role_id)
     .bind(&id)
     .bind(&mod_perms)
@@ -106,9 +105,9 @@ pub async fn create_space(
     let admin_role_id = snowflake::generate();
     let admin_perms =
         serde_json::to_string(&crate::middleware::permissions::ADMIN_PERMISSIONS).unwrap();
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO roles (id, space_id, name, color, hoist, position, permissions) VALUES (?, ?, 'Admin', 15158332, 1, 2, ?)"
-    )
+    ))
     .bind(&admin_role_id)
     .bind(&id)
     .bind(&admin_perms)
@@ -117,28 +116,32 @@ pub async fn create_space(
 
     // Create default #general text channel
     let channel_id = snowflake::generate();
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO channels (id, name, type, space_id, position) VALUES (?, 'general', 'text', ?, 0)"
-    )
+    ))
     .bind(&channel_id)
     .bind(&id)
     .execute(pool)
     .await?;
 
     // Add the owner as a member
-    sqlx::query("INSERT INTO members (user_id, space_id) VALUES (?, ?)")
-        .bind(owner_id)
-        .bind(&id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "INSERT INTO members (user_id, space_id) VALUES (?, ?)",
+    ))
+    .bind(owner_id)
+    .bind(&id)
+    .execute(pool)
+    .await?;
 
     // Assign Admin role to owner
-    sqlx::query("INSERT INTO member_roles (user_id, space_id, role_id) VALUES (?, ?, ?)")
-        .bind(owner_id)
-        .bind(&id)
-        .bind(&admin_role_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "INSERT INTO member_roles (user_id, space_id, role_id) VALUES (?, ?, ?)",
+    ))
+    .bind(owner_id)
+    .bind(&id)
+    .bind(&admin_role_id)
+    .execute(pool)
+    .await?;
 
     get_space_row(pool, &id).await
 }
@@ -158,8 +161,7 @@ pub async fn update_space(
         values.push(name.clone());
     }
     if let Some(ref new_slug) = input.slug {
-        slug::validate_slug(new_slug)
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        slug::validate_slug(new_slug).map_err(|e| AppError::BadRequest(e.to_string()))?;
         let final_slug = ensure_unique_slug(pool, new_slug, Some(space_id)).await?;
         sets.push("slug = ?".to_string());
         values.push(final_slug);
@@ -228,6 +230,7 @@ pub async fn update_space(
     sets.push(format!("updated_at = {now_fn}"));
     let set_clause = sets.join(", ");
     let query = format!("UPDATE spaces SET {set_clause} WHERE id = ?");
+    let query = super::q(&query);
     let mut q = sqlx::query(&query);
     for v in &values {
         q = q.bind(v);
@@ -242,7 +245,7 @@ pub async fn update_space(
 }
 
 pub async fn delete_space(pool: &AnyPool, space_id: &str) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM spaces WHERE id = ?")
+    sqlx::query(&super::q("DELETE FROM spaces WHERE id = ?"))
         .bind(space_id)
         .execute(pool)
         .await?;
@@ -280,10 +283,11 @@ pub async fn list_space_ids_for_user(
     pool: &AnyPool,
     user_id: &str,
 ) -> Result<Vec<String>, AppError> {
-    let rows = sqlx::query_as::<_, (String,)>("SELECT space_id FROM members WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_all(pool)
-        .await?;
+    let rows =
+        sqlx::query_as::<_, (String,)>(&super::q("SELECT space_id FROM members WHERE user_id = ?"))
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
@@ -291,15 +295,16 @@ pub async fn list_member_ids_for_space(
     pool: &AnyPool,
     space_id: &str,
 ) -> Result<Vec<String>, AppError> {
-    let rows = sqlx::query_as::<_, (String,)>("SELECT user_id FROM members WHERE space_id = ?")
-        .bind(space_id)
-        .fetch_all(pool)
-        .await?;
+    let rows =
+        sqlx::query_as::<_, (String,)>(&super::q("SELECT user_id FROM members WHERE space_id = ?"))
+            .bind(space_id)
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
 pub async fn get_space_by_slug(pool: &AnyPool, slug: &str) -> Result<SpaceRow, AppError> {
-    let row = sqlx::query(&format!("{SELECT_SPACES} WHERE slug = ?"))
+    let row = sqlx::query(&super::q(&format!("{SELECT_SPACES} WHERE slug = ?")))
         .bind(slug)
         .fetch_optional(pool)
         .await?
@@ -321,14 +326,16 @@ async fn ensure_unique_slug(
     loop {
         let count: i64 = match exclude_id {
             Some(eid) => {
-                sqlx::query_scalar("SELECT COUNT(*) FROM spaces WHERE slug = ? AND id != ?")
-                    .bind(&candidate)
-                    .bind(eid)
-                    .fetch_one(pool)
-                    .await?
+                sqlx::query_scalar(&super::q(
+                    "SELECT COUNT(*) FROM spaces WHERE slug = ? AND id != ?",
+                ))
+                .bind(&candidate)
+                .bind(eid)
+                .fetch_one(pool)
+                .await?
             }
             None => {
-                sqlx::query_scalar("SELECT COUNT(*) FROM spaces WHERE slug = ?")
+                sqlx::query_scalar(&super::q("SELECT COUNT(*) FROM spaces WHERE slug = ?"))
                     .bind(&candidate)
                     .fetch_one(pool)
                     .await?

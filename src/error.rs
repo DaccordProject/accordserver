@@ -130,9 +130,7 @@ impl From<sqlx::Error> for AppError {
                     // Postgres: foreign_key_violation (23503)
                     Some("787") | Some("23503") => {
                         tracing::warn!("foreign key constraint violation: {}", db_err.message());
-                        AppError::BadRequest(
-                            "referenced resource does not exist".to_string(),
-                        )
+                        AppError::BadRequest("referenced resource does not exist".to_string())
                     }
                     // SQLite: SQLITE_CONSTRAINT_CHECK (275)
                     // Postgres: check_violation (23514)
@@ -147,4 +145,3 @@ impl From<sqlx::Error> for AppError {
         }
     }
 }
-

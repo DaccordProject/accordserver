@@ -25,7 +25,7 @@ fn hash_token(token: &str) -> String {
 async fn resolve_bot_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
     let row = sqlx::query(
-        "SELECT bt.user_id, u.is_admin, u.disabled FROM bot_tokens bt JOIN users u ON bt.user_id = u.id WHERE bt.token_hash = ?",
+        &crate::db::q("SELECT bt.user_id, u.is_admin, u.disabled FROM bot_tokens bt JOIN users u ON bt.user_id = u.id WHERE bt.token_hash = ?"),
     )
     .bind(&token_hash)
     .fetch_optional(pool)
@@ -52,7 +52,7 @@ async fn resolve_bot_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
 async fn resolve_bearer_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
     let row = sqlx::query(
-        "SELECT ut.user_id, ut.expires_at, u.is_admin, u.disabled FROM user_tokens ut JOIN users u ON ut.user_id = u.id WHERE ut.token_hash = ?",
+        &crate::db::q("SELECT ut.user_id, ut.expires_at, u.is_admin, u.disabled FROM user_tokens ut JOIN users u ON ut.user_id = u.id WHERE ut.token_hash = ?"),
     )
     .bind(&token_hash)
     .fetch_optional(pool)

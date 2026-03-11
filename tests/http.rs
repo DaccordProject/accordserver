@@ -350,9 +350,7 @@ async fn test_message_search_pagination() {
     let app = server.router();
     let req = authenticated_request(
         Method::GET,
-        &format!(
-            "/api/v1/spaces/{space_id}/messages/search?query=message&limit=2&cursor={cursor}"
-        ),
+        &format!("/api/v1/spaces/{space_id}/messages/search?query=message&limit=2&cursor={cursor}"),
         &alice.auth_header(),
     );
     let response = app.oneshot(req).await.unwrap();
@@ -412,8 +410,8 @@ fn test_png_data_uri() -> String {
         0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
         0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, // 8-bit RGB
         0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, // IDAT chunk
-        0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21,
-        0xBC, 0x33, // compressed pixel data
+        0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC,
+        0x33, // compressed pixel data
         0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, // IEND chunk
         0xAE, 0x42, 0x60, 0x82,
     ];
@@ -1055,9 +1053,11 @@ async fn test_voice_join_unauthenticated() {
     // No auth header
     let req = Request::builder()
         .method(Method::POST)
-        .uri(&format!("/api/v1/channels/{vc_id}/voice/join"))
+        .uri(format!("/api/v1/channels/{vc_id}/voice/join"))
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_vec(&serde_json::json!({})).unwrap()))
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({})).unwrap(),
+        ))
         .unwrap();
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1161,7 +1161,10 @@ async fn test_user_avatar_remove() {
         .state
         .storage_path
         .join(avatar_path.strip_prefix("/cdn/").unwrap());
-    assert!(file_path.exists(), "avatar file should exist before removal");
+    assert!(
+        file_path.exists(),
+        "avatar file should exist before removal"
+    );
 
     // Remove avatar by sending empty string
     let req = authenticated_json_request(

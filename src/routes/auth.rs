@@ -18,7 +18,9 @@ use crate::error::AppError;
 use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::{create_token_hash, generate_token, AuthUser};
 use crate::snowflake;
-use crate::state::{AppState, LoginFailureTracker, MfaTicket, RegisterAttemptTracker, TotpAttemptTracker};
+use crate::state::{
+    AppState, LoginFailureTracker, MfaTicket, RegisterAttemptTracker, TotpAttemptTracker,
+};
 
 // ---------------------------------------------------------------------------
 // Session limit constant
@@ -132,7 +134,9 @@ fn decrypt_totp_secret(stored: &str, key: Option<&[u8; 32]>) -> Result<String, A
 
     let parts: Vec<&str> = stored.splitn(3, ':').collect();
     if parts.len() != 3 {
-        return Err(AppError::Internal("malformed encrypted TOTP secret".to_string()));
+        return Err(AppError::Internal(
+            "malformed encrypted TOTP secret".to_string(),
+        ));
     }
 
     let nonce_bytes =
@@ -175,9 +179,7 @@ fn check_totp_rate_limit(state: &AppState, user_id: &str) -> Result<(), AppError
         let elapsed = now.duration_since(tracker.window_start).as_secs();
         if elapsed < TOTP_WINDOW_SECS && tracker.failures >= TOTP_MAX_FAILURES {
             let retry_after = TOTP_WINDOW_SECS - elapsed;
-            return Err(AppError::RateLimited {
-                retry_after,
-            });
+            return Err(AppError::RateLimited { retry_after });
         }
     }
     Ok(())
@@ -336,8 +338,7 @@ fn generate_backup_codes() -> Vec<String> {
 // Token helpers
 // ---------------------------------------------------------------------------
 
-fn issue_bearer_token(
-) -> (String, String, String) {
+fn issue_bearer_token() -> (String, String, String) {
     let token = generate_token();
     let token_hash = create_token_hash(&token);
     let expires_at = (chrono::Utc::now() + chrono::Duration::days(30))
@@ -352,9 +353,9 @@ async fn verify_user_password(
     user_id: &str,
     password: &str,
 ) -> Result<(), AppError> {
-    let row = sqlx::query_as::<_, (Option<String>,)>(
+    let row = sqlx::query_as::<_, (Option<String>,)>(&crate::db::q(
         "SELECT password_hash FROM users WHERE id = ?",
-    )
+    ))
     .bind(user_id)
     .fetch_one(&state.db)
     .await
@@ -432,9 +433,9 @@ pub async fn register(
     }
 
     // Check for username conflict
-    let existing = sqlx::query_scalar::<_, String>(
+    let existing = sqlx::query_scalar::<_, String>(&crate::db::q(
         "SELECT id FROM users WHERE username = ? AND bot = false",
-    )
+    ))
     .bind(username)
     .fetch_optional(&state.db)
     .await
@@ -459,10 +460,7 @@ pub async fn register(
 
     // Create user
     let id = snowflake::generate();
-    let display_name = input
-        .display_name
-        .as_deref()
-        .unwrap_or(username);
+    let display_name = input.display_name.as_deref().unwrap_or(username);
 
     // First registered (non-bot, non-system) user becomes admin
     let user_count: i64 =
@@ -473,7 +471,7 @@ pub async fn register(
     let is_admin = user_count == 0;
 
     sqlx::query(
-        "INSERT INTO users (id, username, display_name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)",
+        &crate::db::q("INSERT INTO users (id, username, display_name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)"),
     )
     .bind(&id)
     .bind(username)
@@ -498,7 +496,7 @@ pub async fn register(
         } else {
             "INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)"
         };
-        let _ = sqlx::query(insert_member_sql)
+        let _ = sqlx::query(&crate::db::q(insert_member_sql))
             .bind(&id)
             .bind(&space_id)
             .execute(&state.db)
@@ -529,13 +527,15 @@ pub async fn register(
     // Generate bearer token with 30-day expiry
     let (token, token_hash, expires_at) = issue_bearer_token();
 
-    sqlx::query("INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)")
-        .bind(&token_hash)
-        .bind(&id)
-        .bind(&expires_at)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::from)?;
+    sqlx::query(&crate::db::q(
+        "INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+    ))
+    .bind(&token_hash)
+    .bind(&id)
+    .bind(&expires_at)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
 
     // Clean up expired tokens and enforce session limit
     cleanup_expired_tokens(&state.db, &id).await;
@@ -562,7 +562,7 @@ pub async fn login(
 
     // Look up user by username (must not be a bot, must have password_hash)
     let row = sqlx::query(
-        "SELECT id, password_hash, disabled, force_password_reset, totp_enabled FROM users WHERE username = ? AND bot = false AND password_hash IS NOT NULL",
+        &crate::db::q("SELECT id, password_hash, disabled, force_password_reset, totp_enabled FROM users WHERE username = ? AND bot = false AND password_hash IS NOT NULL"),
     )
     .bind(&input.username)
     .fetch_optional(&state.db)
@@ -584,17 +584,13 @@ pub async fn login(
             let _ = Argon2::default().hash_password(b"dummy", &dummy_salt);
             // Count as a failure against this username to prevent enumeration abuse
             record_login_failure(&state, &input.username);
-            return Err(AppError::Unauthorized(
-                "invalid credentials".to_string(),
-            ));
+            return Err(AppError::Unauthorized("invalid credentials".to_string()));
         }
     };
 
     // Disabled users cannot log in
     if disabled {
-        return Err(AppError::Forbidden(
-            "account is disabled".to_string(),
-        ));
+        return Err(AppError::Forbidden("account is disabled".to_string()));
     }
 
     // Verify password
@@ -606,9 +602,7 @@ pub async fn login(
         .is_err()
     {
         record_login_failure(&state, &input.username);
-        return Err(AppError::Unauthorized(
-            "invalid credentials".to_string(),
-        ));
+        return Err(AppError::Unauthorized("invalid credentials".to_string()));
     }
 
     // Password is correct — clear any tracked failures for this username
@@ -644,13 +638,15 @@ pub async fn login(
     let user = db::users::get_user(&state.db, &user_id).await?;
     let (token, token_hash, expires_at) = issue_bearer_token();
 
-    sqlx::query("INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)")
-        .bind(&token_hash)
-        .bind(&user_id)
-        .bind(&expires_at)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::from)?;
+    sqlx::query(&crate::db::q(
+        "INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+    ))
+    .bind(&token_hash)
+    .bind(&user_id)
+    .bind(&expires_at)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
 
     cleanup_expired_tokens(&state.db, &user_id).await;
     enforce_session_limit(&state.db, &user_id).await;
@@ -713,21 +709,23 @@ pub async fn login_mfa(
     let user = db::users::get_user(&state.db, user_id).await?;
     let (token, token_hash, expires_at) = issue_bearer_token();
 
-    sqlx::query("INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)")
-        .bind(&token_hash)
-        .bind(user_id)
-        .bind(&expires_at)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::from)?;
+    sqlx::query(&crate::db::q(
+        "INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+    ))
+    .bind(&token_hash)
+    .bind(user_id)
+    .bind(&expires_at)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
 
     cleanup_expired_tokens(&state.db, user_id).await;
     enforce_session_limit(&state.db, user_id).await;
 
     // Check force_password_reset
-    let force_reset = sqlx::query(
+    let force_reset = sqlx::query(&crate::db::q(
         "SELECT force_password_reset FROM users WHERE id = ?",
-    )
+    ))
     .bind(user_id)
     .fetch_optional(&state.db)
     .await
@@ -764,11 +762,13 @@ pub async fn logout(
     let raw_token = auth_header.strip_prefix("Bearer ").unwrap_or("");
     let token_hash = create_token_hash(raw_token);
 
-    sqlx::query("DELETE FROM user_tokens WHERE token_hash = ?")
-        .bind(&token_hash)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::from)?;
+    sqlx::query(&crate::db::q(
+        "DELETE FROM user_tokens WHERE token_hash = ?",
+    ))
+    .bind(&token_hash)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
 
     Ok(Json(serde_json::json!({
         "data": { "ok": true }
@@ -783,7 +783,7 @@ pub async fn revoke_all_sessions(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    sqlx::query("DELETE FROM user_tokens WHERE user_id = ?")
+    sqlx::query(&crate::db::q("DELETE FROM user_tokens WHERE user_id = ?"))
         .bind(&auth.user_id)
         .execute(&state.db)
         .await
@@ -829,9 +829,9 @@ pub async fn change_password(
 
     // Update password and clear force_password_reset flag
     let now_fn = crate::db::now_sql(state.db_is_postgres);
-    sqlx::query(&format!(
+    sqlx::query(&crate::db::q(&format!(
         "UPDATE users SET password_hash = ?, force_password_reset = FALSE, updated_at = {now_fn} WHERE id = ?",
-    ))
+    )))
     .bind(&password_hash)
     .bind(&auth.user_id)
     .execute(&state.db)
@@ -846,12 +846,14 @@ pub async fn change_password(
     let raw_token = auth_header.strip_prefix("Bearer ").unwrap_or("");
     let current_token_hash = create_token_hash(raw_token);
 
-    sqlx::query("DELETE FROM user_tokens WHERE user_id = ? AND token_hash != ?")
-        .bind(&auth.user_id)
-        .bind(&current_token_hash)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::from)?;
+    sqlx::query(&crate::db::q(
+        "DELETE FROM user_tokens WHERE user_id = ? AND token_hash != ?",
+    ))
+    .bind(&auth.user_id)
+    .bind(&current_token_hash)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
 
     Ok(Json(serde_json::json!({
         "data": { "ok": true }
@@ -872,7 +874,7 @@ pub async fn enable_2fa(
 
     // Check if 2FA is already enabled
     let already_enabled = {
-        let row = sqlx::query("SELECT totp_enabled FROM users WHERE id = ?")
+        let row = sqlx::query(&crate::db::q("SELECT totp_enabled FROM users WHERE id = ?"))
             .bind(&auth.user_id)
             .fetch_one(&state.db)
             .await
@@ -881,9 +883,7 @@ pub async fn enable_2fa(
     };
 
     if already_enabled {
-        return Err(AppError::BadRequest(
-            "2FA is already enabled".to_string(),
-        ));
+        return Err(AppError::BadRequest("2FA is already enabled".to_string()));
     }
 
     // Generate a TOTP secret (20 bytes = 160 bits, standard for TOTP)
@@ -894,9 +894,9 @@ pub async fn enable_2fa(
     // Encrypt and store the secret (not yet enabled — user must verify first)
     let encrypted_secret = encrypt_totp_secret(&secret_base32, state.totp_key.as_ref());
     let now_fn = crate::db::now_sql(state.db_is_postgres);
-    sqlx::query(&format!(
+    sqlx::query(&crate::db::q(&format!(
         "UPDATE users SET totp_secret = ?, updated_at = {now_fn} WHERE id = ?",
-    ))
+    )))
     .bind(&encrypted_secret)
     .bind(&auth.user_id)
     .execute(&state.db)
@@ -904,11 +904,12 @@ pub async fn enable_2fa(
     .map_err(AppError::from)?;
 
     // Fetch username for the otpauth URI
-    let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
-        .bind(&auth.user_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(AppError::from)?;
+    let username: String =
+        sqlx::query_scalar(&crate::db::q("SELECT username FROM users WHERE id = ?"))
+            .bind(&auth.user_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(AppError::from)?;
 
     let otpauth_uri = format!(
         "otpauth://totp/Accord:{}?secret={}&issuer=Accord&algorithm=SHA1&digits=6&period=30",
@@ -944,18 +945,16 @@ pub async fn verify_2fa(
     check_totp_rate_limit(&state, &auth.user_id)?;
 
     // Fetch the stored secret
-    let confirm_row = sqlx::query(
+    let confirm_row = sqlx::query(&crate::db::q(
         "SELECT totp_secret, totp_enabled FROM users WHERE id = ?",
-    )
+    ))
     .bind(&auth.user_id)
     .fetch_one(&state.db)
     .await
     .map_err(AppError::from)?;
 
     if crate::db::get_bool(&confirm_row, "totp_enabled") {
-        return Err(AppError::BadRequest(
-            "2FA is already enabled".to_string(),
-        ));
+        return Err(AppError::BadRequest("2FA is already enabled".to_string()));
     }
 
     let encrypted_secret: Option<String> = confirm_row.get("totp_secret");
@@ -970,14 +969,8 @@ pub async fn verify_2fa(
         .decode(secret_base32.as_bytes())
         .map_err(|_| AppError::Internal("stored secret is invalid".to_string()))?;
 
-    let totp = totp_rs::TOTP::new(
-        totp_rs::Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-    )
-    .map_err(|e| AppError::Internal(format!("TOTP init failed: {e}")))?;
+    let totp = totp_rs::TOTP::new(totp_rs::Algorithm::SHA1, 6, 1, 30, secret_bytes)
+        .map_err(|e| AppError::Internal(format!("TOTP init failed: {e}")))?;
 
     if !totp
         .check_current(code)
@@ -991,9 +984,9 @@ pub async fn verify_2fa(
 
     // Enable 2FA
     let now_fn = crate::db::now_sql(state.db_is_postgres);
-    sqlx::query(&format!(
+    sqlx::query(&crate::db::q(&format!(
         "UPDATE users SET totp_enabled = TRUE, updated_at = {now_fn} WHERE id = ?",
-    ))
+    )))
     .bind(&auth.user_id)
     .execute(&state.db)
     .await
@@ -1002,7 +995,7 @@ pub async fn verify_2fa(
     // Generate and store hashed backup codes
     let codes = generate_backup_codes();
 
-    sqlx::query("DELETE FROM backup_codes WHERE user_id = ?")
+    sqlx::query(&crate::db::q("DELETE FROM backup_codes WHERE user_id = ?"))
         .bind(&auth.user_id)
         .execute(&state.db)
         .await
@@ -1010,12 +1003,14 @@ pub async fn verify_2fa(
 
     for code in &codes {
         let code_hash = hash_backup_code(code);
-        sqlx::query("INSERT INTO backup_codes (user_id, code_hash) VALUES (?, ?)")
-            .bind(&auth.user_id)
-            .bind(&code_hash)
-            .execute(&state.db)
-            .await
-            .map_err(AppError::from)?;
+        sqlx::query(&crate::db::q(
+            "INSERT INTO backup_codes (user_id, code_hash) VALUES (?, ?)",
+        ))
+        .bind(&auth.user_id)
+        .bind(&code_hash)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::from)?;
     }
 
     Ok(Json(serde_json::json!({
@@ -1039,15 +1034,15 @@ pub async fn disable_2fa(
 
     // Disable 2FA and clear secret + backup codes
     let now_fn = crate::db::now_sql(state.db_is_postgres);
-    sqlx::query(&format!(
+    sqlx::query(&crate::db::q(&format!(
         "UPDATE users SET totp_enabled = FALSE, totp_secret = NULL, updated_at = {now_fn} WHERE id = ?",
-    ))
+    )))
     .bind(&auth.user_id)
     .execute(&state.db)
     .await
     .map_err(AppError::from)?;
 
-    sqlx::query("DELETE FROM backup_codes WHERE user_id = ?")
+    sqlx::query(&crate::db::q("DELETE FROM backup_codes WHERE user_id = ?"))
         .bind(&auth.user_id)
         .execute(&state.db)
         .await
@@ -1072,7 +1067,7 @@ pub async fn regenerate_backup_codes(
 
     // Verify 2FA is enabled
     let enabled = {
-        let row = sqlx::query("SELECT totp_enabled FROM users WHERE id = ?")
+        let row = sqlx::query(&crate::db::q("SELECT totp_enabled FROM users WHERE id = ?"))
             .bind(&auth.user_id)
             .fetch_one(&state.db)
             .await
@@ -1081,15 +1076,13 @@ pub async fn regenerate_backup_codes(
     };
 
     if !enabled {
-        return Err(AppError::BadRequest(
-            "2FA is not enabled".to_string(),
-        ));
+        return Err(AppError::BadRequest("2FA is not enabled".to_string()));
     }
 
     // Regenerate backup codes (hashed)
     let codes = generate_backup_codes();
 
-    sqlx::query("DELETE FROM backup_codes WHERE user_id = ?")
+    sqlx::query(&crate::db::q("DELETE FROM backup_codes WHERE user_id = ?"))
         .bind(&auth.user_id)
         .execute(&state.db)
         .await
@@ -1097,12 +1090,14 @@ pub async fn regenerate_backup_codes(
 
     for code in &codes {
         let code_hash = hash_backup_code(code);
-        sqlx::query("INSERT INTO backup_codes (user_id, code_hash) VALUES (?, ?)")
-            .bind(&auth.user_id)
-            .bind(&code_hash)
-            .execute(&state.db)
-            .await
-            .map_err(AppError::from)?;
+        sqlx::query(&crate::db::q(
+            "INSERT INTO backup_codes (user_id, code_hash) VALUES (?, ?)",
+        ))
+        .bind(&auth.user_id)
+        .bind(&code_hash)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::from)?;
     }
 
     Ok(Json(serde_json::json!({
@@ -1118,13 +1113,12 @@ pub async fn regenerate_backup_codes(
 
 /// Verify a TOTP code for a given user.
 async fn verify_totp_code(state: &AppState, user_id: &str, code: &str) -> Result<(), AppError> {
-    let encrypted_secret: Option<String> = sqlx::query_scalar(
-        "SELECT totp_secret FROM users WHERE id = ?",
-    )
-    .bind(user_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(AppError::from)?;
+    let encrypted_secret: Option<String> =
+        sqlx::query_scalar(&crate::db::q("SELECT totp_secret FROM users WHERE id = ?"))
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(AppError::from)?;
 
     let encrypted_secret = encrypted_secret
         .ok_or_else(|| AppError::Internal("2FA is enabled but no secret stored".to_string()))?;
@@ -1157,9 +1151,9 @@ async fn verify_and_consume_backup_code(
 ) -> Result<(), AppError> {
     let code_hash = hash_backup_code(code);
 
-    let row = sqlx::query(
+    let row = sqlx::query(&crate::db::q(
         "SELECT id, used FROM backup_codes WHERE user_id = ? AND code_hash = ?",
-    )
+    ))
     .bind(user_id)
     .bind(&code_hash)
     .fetch_optional(&state.db)
@@ -1177,18 +1171,18 @@ async fn verify_and_consume_backup_code(
                 ));
             }
             // Mark as used
-            sqlx::query("UPDATE backup_codes SET used = TRUE WHERE id = ?")
-                .bind(id)
-                .execute(&state.db)
-                .await
-                .map_err(AppError::from)?;
+            sqlx::query(&crate::db::q(
+                "UPDATE backup_codes SET used = TRUE WHERE id = ?",
+            ))
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .map_err(AppError::from)?;
             Ok(())
         }
         None => {
             record_totp_failure(state, user_id);
-            Err(AppError::Unauthorized(
-                "invalid code".to_string(),
-            ))
+            Err(AppError::Unauthorized("invalid code".to_string()))
         }
     }
 }
@@ -1196,20 +1190,21 @@ async fn verify_and_consume_backup_code(
 /// Enforce maximum concurrent session limit per user.
 /// Deletes the oldest tokens when the user exceeds MAX_SESSIONS_PER_USER active tokens.
 async fn enforce_session_limit(pool: &sqlx::AnyPool, user_id: &str) {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM user_tokens WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0);
+    let count: i64 = sqlx::query_scalar(&crate::db::q(
+        "SELECT COUNT(*) FROM user_tokens WHERE user_id = ?",
+    ))
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
 
     let excess = count - MAX_SESSIONS_PER_USER;
     if excess > 0 {
-        let _ = sqlx::query(
+        let _ = sqlx::query(&crate::db::q(
             "DELETE FROM user_tokens WHERE user_id = ? AND token_hash IN \
              (SELECT token_hash FROM user_tokens WHERE user_id = ? \
               ORDER BY created_at ASC LIMIT ?)",
-        )
+        ))
         .bind(user_id)
         .bind(user_id)
         .bind(excess)
@@ -1223,11 +1218,13 @@ async fn cleanup_expired_tokens(pool: &sqlx::AnyPool, user_id: &str) {
     let now = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S+00:00")
         .to_string();
-    let _ = sqlx::query("DELETE FROM user_tokens WHERE user_id = ? AND expires_at < ?")
-        .bind(user_id)
-        .bind(&now)
-        .execute(pool)
-        .await;
+    let _ = sqlx::query(&crate::db::q(
+        "DELETE FROM user_tokens WHERE user_id = ? AND expires_at < ?",
+    ))
+    .bind(user_id)
+    .bind(&now)
+    .execute(pool)
+    .await;
 }
 
 /// Minimal percent-encoding for otpauth URI values.

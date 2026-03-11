@@ -20,8 +20,8 @@ pub async fn insert_attachment(
 ) -> Result<Attachment, AppError> {
     let id = snowflake::generate();
     sqlx::query(
-        "INSERT INTO attachments (id, message_id, filename, content_type, size, url, width, height) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        &super::q("INSERT INTO attachments (id, message_id, filename, content_type, size, url, width, height) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
     )
     .bind(&id)
     .bind(message_id)
@@ -50,10 +50,10 @@ pub async fn get_attachments_for_message(
     pool: &AnyPool,
     message_id: &str,
 ) -> Result<Vec<Attachment>, AppError> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&super::q(
         "SELECT id, filename, description, content_type, size, url, width, height \
          FROM attachments WHERE message_id = ?",
-    )
+    ))
     .bind(message_id)
     .fetch_all(pool)
     .await?;
@@ -76,6 +76,7 @@ pub async fn get_attachments_for_messages(
          FROM attachments WHERE message_id IN ({in_clause}) ORDER BY id ASC"
     );
 
+    let sql = super::q(&sql);
     let mut q = sqlx::query(&sql);
     for id in message_ids {
         q = q.bind(id);

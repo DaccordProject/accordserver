@@ -19,9 +19,48 @@ pub mod soundboard;
 pub mod spaces;
 pub mod users;
 
+use std::str::FromStr;
+use std::sync::OnceLock;
+
 use sqlx::any::AnyConnectOptions;
 use sqlx::AnyPool;
-use std::str::FromStr;
+
+// ---------------------------------------------------------------------------
+// Global backend flag + placeholder rewriter
+// ---------------------------------------------------------------------------
+
+static DB_IS_POSTGRES: OnceLock<bool> = OnceLock::new();
+
+/// Record the database backend once at startup (called from `create_pool`).
+pub fn set_is_postgres(v: bool) {
+    DB_IS_POSTGRES.set(v).ok();
+}
+
+/// Returns `true` when the runtime database is PostgreSQL.
+pub fn is_pg() -> bool {
+    DB_IS_POSTGRES.get().copied().unwrap_or(false)
+}
+
+/// Rewrite `?` placeholders to `$1, $2, …` when running on PostgreSQL.
+/// On SQLite the string is returned as-is (as an owned copy — the allocation
+/// cost is negligible compared to actual query I/O).
+pub fn q(sql: &str) -> String {
+    if !is_pg() {
+        return sql.to_string();
+    }
+    let mut result = String::with_capacity(sql.len() + 16);
+    let mut idx = 0u32;
+    for ch in sql.chars() {
+        if ch == '?' {
+            idx += 1;
+            result.push('$');
+            result.push_str(&idx.to_string());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
 
 /// Read a boolean column from an `AnyRow`.
 ///
@@ -53,11 +92,16 @@ pub async fn create_pool(database_url: &str) -> Result<AnyPool, sqlx::Error> {
     sqlx::any::install_default_drivers();
 
     let is_pg = url_is_postgres(database_url);
+    set_is_postgres(is_pg);
     let connect_opts = AnyConnectOptions::from_str(database_url)?;
 
     // In-memory SQLite creates a separate database per connection, so restrict
     // to a single connection to keep schema and data visible across operations.
-    let max_conns = if database_url.contains(":memory:") { 1 } else { 5 };
+    let max_conns = if database_url.contains(":memory:") {
+        1
+    } else {
+        5
+    };
     let mut pool_opts = sqlx::any::AnyPoolOptions::new().max_connections(max_conns);
 
     // foreign_keys is a per-connection PRAGMA in SQLite — must be set on every

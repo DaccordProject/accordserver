@@ -5,9 +5,7 @@ use crate::db;
 use crate::error::AppError;
 use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::AuthUser;
-use crate::middleware::permissions::{
-    require_channel_permission, require_permission,
-};
+use crate::middleware::permissions::{require_channel_permission, require_permission};
 use crate::models::invite::CreateInvite;
 use crate::state::AppState;
 
@@ -27,13 +25,7 @@ pub async fn delete_invite(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let invite = db::invites::get_invite(&state.db, &code).await?;
-    require_permission(
-        &state.db,
-        &invite.space_id,
-        &auth,
-        "manage_channels",
-    )
-    .await?;
+    require_permission(&state.db, &invite.space_id, &auth, "manage_channels").await?;
     db::invites::delete_invite(&state.db, &code).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }
@@ -55,7 +47,13 @@ pub async fn accept_invite(
         ));
     }
 
-    let member = db::members::add_member(&state.db, &invite.space_id, &auth.user_id, state.db_is_postgres).await?;
+    let member = db::members::add_member(
+        &state.db,
+        &invite.space_id,
+        &auth.user_id,
+        state.db_is_postgres,
+    )
+    .await?;
 
     // Broadcast member.join to the space
     let user = db::users::get_user(&state.db, &auth.user_id).await?;

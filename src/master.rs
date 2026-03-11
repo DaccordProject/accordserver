@@ -21,11 +21,11 @@ async fn register(client: &Client, config: &MasterServerConfig) -> Result<(), re
 }
 
 async fn heartbeat(client: &Client, config: &MasterServerConfig) -> Result<u16, reqwest::Error> {
-    let url = format!("{}/api/v1/servers/{}/heartbeat", config.url, config.server_id);
-    let resp = client
-        .post(&url)
-        .send()
-        .await?;
+    let url = format!(
+        "{}/api/v1/servers/{}/heartbeat",
+        config.url, config.server_id
+    );
+    let resp = client.post(&url).send().await?;
     let status = resp.status().as_u16();
     if status != 404 {
         resp.error_for_status()?;
@@ -35,11 +35,7 @@ async fn heartbeat(client: &Client, config: &MasterServerConfig) -> Result<u16, 
 
 async fn deregister(client: &Client, config: &MasterServerConfig) -> Result<(), reqwest::Error> {
     let url = format!("{}/api/v1/servers/{}", config.url, config.server_id);
-    client
-        .delete(&url)
-        .send()
-        .await?
-        .error_for_status()?;
+    client.delete(&url).send().await?.error_for_status()?;
     Ok(())
 }
 

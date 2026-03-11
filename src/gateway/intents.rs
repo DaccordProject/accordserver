@@ -47,9 +47,7 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
         "soundboard.create" | "soundboard.update" | "soundboard.delete" | "soundboard.play" => {
             Some("soundboard")
         }
-        "relationship.add" | "relationship.update" | "relationship.remove" => {
-            Some("relationships")
-        }
+        "relationship.add" | "relationship.update" | "relationship.remove" => Some("relationships"),
         "interaction.create" => None, // always delivered
         _ => None,
     }

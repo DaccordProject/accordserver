@@ -25,14 +25,14 @@ pub async fn create_application(
     .await?;
 
     // Mark as bot
-    sqlx::query("UPDATE users SET bot = TRUE WHERE id = ?")
+    sqlx::query(&super::q("UPDATE users SET bot = TRUE WHERE id = ?"))
         .bind(&bot_user.id)
         .execute(pool)
         .await?;
 
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO applications (id, name, description, owner_id, bot_user_id) VALUES (?, ?, ?, ?, ?)"
-    )
+    ))
     .bind(&app_id)
     .bind(name)
     .bind(description)
@@ -45,12 +45,14 @@ pub async fn create_application(
     let token = generate_token();
     let token_hash = create_token_hash(&token);
 
-    sqlx::query("INSERT INTO bot_tokens (token_hash, application_id, user_id) VALUES (?, ?, ?)")
-        .bind(&token_hash)
-        .bind(&app_id)
-        .bind(&bot_user.id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "INSERT INTO bot_tokens (token_hash, application_id, user_id) VALUES (?, ?, ?)",
+    ))
+    .bind(&token_hash)
+    .bind(&app_id)
+    .bind(&bot_user.id)
+    .execute(pool)
+    .await?;
 
     let app = get_application(pool, &app_id).await?;
     Ok((app, token))
@@ -69,10 +71,11 @@ fn row_to_application(row: sqlx::any::AnyRow) -> Application {
     }
 }
 
-const SELECT_APPLICATIONS: &str = "SELECT id, name, icon, description, bot_public, owner_id, flags FROM applications";
+const SELECT_APPLICATIONS: &str =
+    "SELECT id, name, icon, description, bot_public, owner_id, flags FROM applications";
 
 pub async fn get_application(pool: &AnyPool, app_id: &str) -> Result<Application, AppError> {
-    let row = sqlx::query(&format!("{SELECT_APPLICATIONS} WHERE id = ?"))
+    let row = sqlx::query(&super::q(&format!("{SELECT_APPLICATIONS} WHERE id = ?")))
         .bind(app_id)
         .fetch_optional(pool)
         .await?
@@ -85,25 +88,28 @@ pub async fn get_application_by_owner(
     pool: &AnyPool,
     owner_id: &str,
 ) -> Result<Application, AppError> {
-    let row = sqlx::query(&format!("{SELECT_APPLICATIONS} WHERE owner_id = ? LIMIT 1"))
-        .bind(owner_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("application not found".to_string()))?;
+    let row = sqlx::query(&super::q(&format!(
+        "{SELECT_APPLICATIONS} WHERE owner_id = ? LIMIT 1"
+    )))
+    .bind(owner_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("application not found".to_string()))?;
 
     Ok(row_to_application(row))
 }
 
 pub async fn reset_bot_token(pool: &AnyPool, app_id: &str) -> Result<String, AppError> {
     // Find the bot user for this application
-    let bot_user_id: String =
-        sqlx::query_scalar("SELECT bot_user_id FROM applications WHERE id = ?")
-            .bind(app_id)
-            .fetch_one(pool)
-            .await?;
+    let bot_user_id: String = sqlx::query_scalar(&super::q(
+        "SELECT bot_user_id FROM applications WHERE id = ?",
+    ))
+    .bind(app_id)
+    .fetch_one(pool)
+    .await?;
 
     // Delete old tokens
-    sqlx::query("DELETE FROM bot_tokens WHERE application_id = ?")
+    sqlx::query(&super::q("DELETE FROM bot_tokens WHERE application_id = ?"))
         .bind(app_id)
         .execute(pool)
         .await?;
@@ -112,12 +118,14 @@ pub async fn reset_bot_token(pool: &AnyPool, app_id: &str) -> Result<String, App
     let token = generate_token();
     let token_hash = create_token_hash(&token);
 
-    sqlx::query("INSERT INTO bot_tokens (token_hash, application_id, user_id) VALUES (?, ?, ?)")
-        .bind(&token_hash)
-        .bind(app_id)
-        .bind(&bot_user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "INSERT INTO bot_tokens (token_hash, application_id, user_id) VALUES (?, ?, ?)",
+    ))
+    .bind(&token_hash)
+    .bind(app_id)
+    .bind(&bot_user_id)
+    .execute(pool)
+    .await?;
 
     Ok(token)
 }

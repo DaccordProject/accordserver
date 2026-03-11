@@ -29,7 +29,7 @@ fn row_to_channel(row: sqlx::any::AnyRow) -> ChannelRow {
 const SELECT_CHANNELS: &str = "SELECT id, type, space_id, name, description, topic, position, parent_id, nsfw, rate_limit, bitrate, user_limit, owner_id, last_message_id, archived, auto_archive_after, created_at FROM channels";
 
 pub async fn get_channel_row(pool: &AnyPool, channel_id: &str) -> Result<ChannelRow, AppError> {
-    let row = sqlx::query(&format!("{SELECT_CHANNELS} WHERE id = ?"))
+    let row = sqlx::query(&super::q(&format!("{SELECT_CHANNELS} WHERE id = ?")))
         .bind(channel_id)
         .fetch_optional(pool)
         .await?
@@ -42,9 +42,9 @@ pub async fn list_channels_in_space(
     pool: &AnyPool,
     space_id: &str,
 ) -> Result<Vec<ChannelRow>, AppError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(&super::q(&format!(
         "{SELECT_CHANNELS} WHERE space_id = ? ORDER BY position"
-    ))
+    )))
     .bind(space_id)
     .fetch_all(pool)
     .await?;
@@ -60,9 +60,9 @@ pub async fn create_channel(
     let id = snowflake::generate();
     let position = input.position.unwrap_or(0);
 
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO channels (id, name, type, space_id, topic, parent_id, nsfw, bitrate, user_limit, rate_limit, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+    ))
     .bind(&id)
     .bind(&input.name)
     .bind(&input.channel_type)
@@ -134,6 +134,7 @@ pub async fn update_channel(
     sets.push(format!("updated_at = {now_fn}"));
     let set_clause = sets.join(", ");
     let query = format!("UPDATE channels SET {set_clause} WHERE id = ?");
+    let query = super::q(&query);
     let mut q = sqlx::query(&query);
     for v in &str_values {
         q = q.bind(v);
@@ -148,7 +149,7 @@ pub async fn update_channel(
 }
 
 pub async fn delete_channel(pool: &AnyPool, channel_id: &str) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM channels WHERE id = ?")
+    sqlx::query(&super::q("DELETE FROM channels WHERE id = ?"))
         .bind(channel_id)
         .execute(pool)
         .await?;
@@ -161,12 +162,14 @@ pub async fn reorder_channels(
     updates: &[(String, i64)],
 ) -> Result<(), AppError> {
     for (id, position) in updates {
-        sqlx::query("UPDATE channels SET position = ? WHERE id = ? AND space_id = ?")
-            .bind(position)
-            .bind(id)
-            .bind(space_id)
-            .execute(pool)
-            .await?;
+        sqlx::query(&super::q(
+            "UPDATE channels SET position = ? WHERE id = ? AND space_id = ?",
+        ))
+        .bind(position)
+        .bind(id)
+        .bind(space_id)
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }

@@ -21,7 +21,7 @@ fn row_to_invite(row: sqlx::any::AnyRow) -> Invite {
 const SELECT_INVITES: &str = "SELECT code, space_id, channel_id, inviter_id, max_uses, uses, max_age, temporary, created_at, expires_at FROM invites";
 
 pub async fn get_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> {
-    let row = sqlx::query(&format!("{SELECT_INVITES} WHERE code = ?"))
+    let row = sqlx::query(&super::q(&format!("{SELECT_INVITES} WHERE code = ?")))
         .bind(code)
         .fetch_optional(pool)
         .await?
@@ -30,11 +30,8 @@ pub async fn get_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> 
     Ok(row_to_invite(row))
 }
 
-pub async fn list_space_invites(
-    pool: &AnyPool,
-    space_id: &str,
-) -> Result<Vec<Invite>, AppError> {
-    let rows = sqlx::query(&format!("{SELECT_INVITES} WHERE space_id = ?"))
+pub async fn list_space_invites(pool: &AnyPool, space_id: &str) -> Result<Vec<Invite>, AppError> {
+    let rows = sqlx::query(&super::q(&format!("{SELECT_INVITES} WHERE space_id = ?")))
         .bind(space_id)
         .fetch_all(pool)
         .await?;
@@ -46,7 +43,7 @@ pub async fn list_channel_invites(
     pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<Invite>, AppError> {
-    let rows = sqlx::query(&format!("{SELECT_INVITES} WHERE channel_id = ?"))
+    let rows = sqlx::query(&super::q(&format!("{SELECT_INVITES} WHERE channel_id = ?")))
         .bind(channel_id)
         .fetch_all(pool)
         .await?;
@@ -82,7 +79,7 @@ pub async fn create_invite(
     });
 
     sqlx::query(
-        "INSERT INTO invites (code, space_id, channel_id, inviter_id, max_uses, max_age, temporary, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        &super::q("INSERT INTO invites (code, space_id, channel_id, inviter_id, max_uses, max_age, temporary, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     )
     .bind(&code)
     .bind(space_id)
@@ -121,7 +118,7 @@ pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
             )
             .await?;
 
-            sqlx::query("UPDATE users SET system = TRUE WHERE id = ?")
+            sqlx::query(&super::q("UPDATE users SET system = TRUE WHERE id = ?"))
                 .bind(&system_user.id)
                 .execute(pool)
                 .await?;
@@ -144,16 +141,17 @@ pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
     };
 
     // Ensure the space has at least one channel
-    let has_channels: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM channels WHERE space_id = ? LIMIT 1")
-            .bind(&space_id)
-            .fetch_optional(pool)
-            .await?;
+    let has_channels: Option<(String,)> = sqlx::query_as(&super::q(
+        "SELECT id FROM channels WHERE space_id = ? LIMIT 1",
+    ))
+    .bind(&space_id)
+    .fetch_optional(pool)
+    .await?;
 
     if has_channels.is_none() {
         let channel_id = crate::snowflake::generate();
         sqlx::query(
-            "INSERT INTO channels (id, name, type, space_id, position) VALUES (?, 'general', 'text', ?, 0)"
+            &super::q("INSERT INTO channels (id, name, type, space_id, position) VALUES (?, 'general', 'text', ?, 0)")
         )
         .bind(&channel_id)
         .bind(&space_id)
@@ -164,7 +162,7 @@ pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
 
     // Check for an existing permanent invite (no expiry, no max uses)
     let existing: Option<(String,)> = sqlx::query_as(
-        "SELECT code FROM invites WHERE space_id = ? AND max_uses IS NULL AND expires_at IS NULL LIMIT 1"
+        &super::q("SELECT code FROM invites WHERE space_id = ? AND max_uses IS NULL AND expires_at IS NULL LIMIT 1")
     )
     .bind(&space_id)
     .fetch_optional(pool)
@@ -177,7 +175,7 @@ pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
     // Create a permanent space-level invite (no channel)
     let code = generate_code();
     sqlx::query(
-        "INSERT INTO invites (code, space_id, channel_id, inviter_id, max_uses, max_age, temporary) VALUES (?, ?, NULL, NULL, NULL, NULL, FALSE)"
+        &super::q("INSERT INTO invites (code, space_id, channel_id, inviter_id, max_uses, max_age, temporary) VALUES (?, ?, NULL, NULL, NULL, NULL, FALSE)")
     )
     .bind(&code)
     .bind(&space_id)
@@ -188,7 +186,7 @@ pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
 }
 
 pub async fn delete_invite(pool: &AnyPool, code: &str) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM invites WHERE code = ?")
+    sqlx::query(&super::q("DELETE FROM invites WHERE code = ?"))
         .bind(code)
         .execute(pool)
         .await?;
@@ -200,7 +198,9 @@ pub async fn use_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> 
 
     // Check if expired
     if let Some(ref expires_at) = invite.expires_at {
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S+00:00")
+            .to_string();
         if *expires_at < now {
             return Err(AppError::BadRequest("invite has expired".to_string()));
         }
@@ -216,10 +216,12 @@ pub async fn use_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> 
     }
 
     // Increment uses
-    sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = ?")
-        .bind(code)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "UPDATE invites SET uses = uses + 1 WHERE code = ?",
+    ))
+    .bind(code)
+    .execute(pool)
+    .await?;
 
     get_invite(pool, code).await
 }

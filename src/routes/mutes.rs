@@ -20,7 +20,8 @@ pub async fn mute_channel(
         require_channel_membership(&state.db, &channel_id, &auth.user_id).await?;
     }
 
-    let mute = db::mutes::create_mute(&state.db, &auth.user_id, &channel_id, state.db_is_postgres).await?;
+    let mute =
+        db::mutes::create_mute(&state.db, &auth.user_id, &channel_id, state.db_is_postgres).await?;
 
     // Notify this user's gateway sessions to refresh their mute list
     if let Some(ref gtx) = *state.gateway_tx.read().await {

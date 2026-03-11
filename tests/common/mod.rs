@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use arc_swap::ArcSwap;
 use accordserver::db;
 use accordserver::gateway::dispatcher::Dispatcher;
 use accordserver::middleware::auth::{create_token_hash, generate_token};
@@ -9,6 +8,7 @@ use accordserver::routes;
 use accordserver::state::AppState;
 use accordserver::storage;
 use accordserver::voice::livekit::LiveKitClient;
+use arc_swap::ArcSwap;
 use axum::body::Body;
 use dashmap::DashMap;
 use http::{Method, Request};
@@ -50,8 +50,8 @@ impl TestServer {
     /// Create a new TestServer. Uses DATABASE_URL if set, otherwise in-memory SQLite.
     pub async fn new() -> Self {
         sqlx::any::install_default_drivers();
-        let db_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite::memory:".to_string());
+        let db_url =
+            std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
         let is_postgres = db::url_is_postgres(&db_url);
         let pool = db::create_pool(&db_url)
             .await
@@ -63,13 +63,32 @@ impl TestServer {
             // Truncate all application tables (order doesn't matter with CASCADE).
             // server_settings is re-created by get_settings() below.
             for table in &[
-                "read_states", "reactions", "pinned_messages", "attachments",
-                "messages", "permission_overwrites", "channel_mutes",
-                "dm_participants", "member_roles", "members", "bans",
-                "invites", "emoji_roles", "emojis", "soundboard_sounds",
-                "bot_tokens", "applications", "user_tokens", "backup_codes",
-                "channels", "roles", "reports", "relationships",
-                "spaces", "users", "server_settings",
+                "read_states",
+                "reactions",
+                "pinned_messages",
+                "attachments",
+                "messages",
+                "permission_overwrites",
+                "channel_mutes",
+                "dm_participants",
+                "member_roles",
+                "members",
+                "bans",
+                "invites",
+                "emoji_roles",
+                "emojis",
+                "soundboard_sounds",
+                "bot_tokens",
+                "applications",
+                "user_tokens",
+                "backup_codes",
+                "channels",
+                "roles",
+                "reports",
+                "relationships",
+                "spaces",
+                "users",
+                "server_settings",
             ] {
                 let sql = format!("TRUNCATE TABLE {} CASCADE", table);
                 sqlx::query(&sql)
@@ -94,9 +113,7 @@ impl TestServer {
             "secret",
         ));
 
-        let settings = db::settings::get_settings(&pool)
-            .await
-            .unwrap_or_default();
+        let settings = db::settings::get_settings(&pool).await.unwrap_or_default();
 
         let state = AppState {
             db: pool,
@@ -161,7 +178,7 @@ impl TestServer {
         let token_hash = create_token_hash(&token);
 
         sqlx::query(
-            "INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, '2099-12-31T23:59:59')",
+            &accordserver::db::q("INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, '2099-12-31T23:59:59')"),
         )
         .bind(&token_hash)
         .bind(&user.id)
@@ -191,12 +208,13 @@ impl TestServer {
                 .expect("failed to create test application");
 
         // Fetch the bot user (created by create_application)
-        let bot_user_id: String =
-            sqlx::query_scalar("SELECT bot_user_id FROM applications WHERE name = ?")
-                .bind(app_name)
-                .fetch_one(self.pool())
-                .await
-                .expect("failed to find bot user");
+        let bot_user_id: String = sqlx::query_scalar(&accordserver::db::q(
+            "SELECT bot_user_id FROM applications WHERE name = ?",
+        ))
+        .bind(app_name)
+        .fetch_one(self.pool())
+        .await
+        .expect("failed to find bot user");
 
         let bot_user = db::users::get_user(self.pool(), &bot_user_id)
             .await
@@ -247,9 +265,16 @@ impl TestServer {
 
     /// Ban a user from a space.
     pub async fn ban_user(&self, space_id: &str, user_id: &str, banned_by: &str) {
-        db::bans::create_ban(self.pool(), space_id, user_id, Some("test ban"), banned_by, false)
-            .await
-            .expect("failed to ban test user");
+        db::bans::create_ban(
+            self.pool(),
+            space_id,
+            user_id,
+            Some("test ban"),
+            banned_by,
+            false,
+        )
+        .await
+        .expect("failed to ban test user");
     }
 
     /// Create a channel in the given space. Returns the channel ID.
@@ -304,12 +329,7 @@ impl TestServer {
     }
 
     /// Create a role in a space via the DB. Returns the role ID.
-    pub async fn create_role(
-        &self,
-        space_id: &str,
-        name: &str,
-        permissions: &[&str],
-    ) -> String {
+    pub async fn create_role(&self, space_id: &str, name: &str, permissions: &[&str]) -> String {
         let input = accordserver::models::role::CreateRole {
             name: name.to_string(),
             color: None,
@@ -333,11 +353,13 @@ impl TestServer {
     /// Create an admin user with a token. Sets `is_admin = true` on the user.
     pub async fn create_admin_with_token(&self, username: &str) -> TestUser {
         let test_user = self.create_user_with_token(username).await;
-        sqlx::query("UPDATE users SET is_admin = TRUE WHERE id = ?")
-            .bind(&test_user.user.id)
-            .execute(self.pool())
-            .await
-            .expect("failed to set admin flag");
+        sqlx::query(&accordserver::db::q(
+            "UPDATE users SET is_admin = TRUE WHERE id = ?",
+        ))
+        .bind(&test_user.user.id)
+        .execute(self.pool())
+        .await
+        .expect("failed to set admin flag");
         test_user
     }
 }

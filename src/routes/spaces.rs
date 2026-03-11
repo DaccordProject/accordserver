@@ -20,16 +20,22 @@ pub async fn create_space(
     // Input validation
     let name = input.name.trim();
     if name.is_empty() || name.len() > 100 {
-        return Err(AppError::BadRequest("space name must be between 1 and 100 characters".into()));
+        return Err(AppError::BadRequest(
+            "space name must be between 1 and 100 characters".into(),
+        ));
     }
     if let Some(ref slug) = input.slug {
         if slug.len() > 100 {
-            return Err(AppError::BadRequest("slug must be at most 100 characters".into()));
+            return Err(AppError::BadRequest(
+                "slug must be at most 100 characters".into(),
+            ));
         }
     }
     if let Some(ref desc) = input.description {
         if desc.len() > 1000 {
-            return Err(AppError::BadRequest("description must be at most 1000 characters".into()));
+            return Err(AppError::BadRequest(
+                "description must be at most 1000 characters".into(),
+            ));
         }
     }
 
@@ -45,9 +51,7 @@ pub async fn get_space(
     // Try ID lookup first, fall back to slug lookup
     let space = match db::spaces::get_space_row(&state.db, &id_or_slug).await {
         Ok(s) => s,
-        Err(AppError::NotFound(_)) => {
-            db::spaces::get_space_by_slug(&state.db, &id_or_slug).await?
-        }
+        Err(AppError::NotFound(_)) => db::spaces::get_space_by_slug(&state.db, &id_or_slug).await?,
         Err(e) => return Err(e),
     };
     if !space.public {
@@ -76,8 +80,14 @@ pub async fn update_space(
             if let Some(ref old_icon) = old_space.icon {
                 let _ = storage::delete_file(&state.storage_path, old_icon).await;
             }
-            let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "icons", &space_id, icon, max_avatar_size).await?;
+            let (url, _, _, _) = storage::save_avatar_image(
+                &state.storage_path,
+                "icons",
+                &space_id,
+                icon,
+                max_avatar_size,
+            )
+            .await?;
             input.icon = Some(url);
         } else if icon.is_empty() {
             let old_space = db::spaces::get_space_row(&state.db, &space_id).await?;
@@ -96,9 +106,14 @@ pub async fn update_space(
             if let Some(ref old_banner) = old_space.banner {
                 let _ = storage::delete_file(&state.storage_path, old_banner).await;
             }
-            let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "banners", &space_id, banner, max_avatar_size)
-                    .await?;
+            let (url, _, _, _) = storage::save_avatar_image(
+                &state.storage_path,
+                "banners",
+                &space_id,
+                banner,
+                max_avatar_size,
+            )
+            .await?;
             input.banner = Some(url);
         } else if banner.is_empty() {
             let old_space = db::spaces::get_space_row(&state.db, &space_id).await?;
@@ -110,7 +125,8 @@ pub async fn update_space(
         }
     }
 
-    let space = db::spaces::update_space(&state.db, &space_id, &input, state.db_is_postgres).await?;
+    let space =
+        db::spaces::update_space(&state.db, &space_id, &input, state.db_is_postgres).await?;
 
     // Broadcast space.update to space members
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
@@ -186,21 +202,29 @@ pub async fn create_channel(
     // Input validation
     let name = input.name.trim();
     if name.is_empty() || name.len() > 100 {
-        return Err(AppError::BadRequest("channel name must be between 1 and 100 characters".into()));
+        return Err(AppError::BadRequest(
+            "channel name must be between 1 and 100 characters".into(),
+        ));
     }
     if let Some(ref topic) = input.topic {
         if topic.len() > 1024 {
-            return Err(AppError::BadRequest("topic must be at most 1024 characters".into()));
+            return Err(AppError::BadRequest(
+                "topic must be at most 1024 characters".into(),
+            ));
         }
     }
     if let Some(bitrate) = input.bitrate {
         if !(0..=384_000).contains(&bitrate) {
-            return Err(AppError::BadRequest("bitrate must be between 0 and 384000".into()));
+            return Err(AppError::BadRequest(
+                "bitrate must be between 0 and 384000".into(),
+            ));
         }
     }
     if let Some(user_limit) = input.user_limit {
         if !(0..=99).contains(&user_limit) {
-            return Err(AppError::BadRequest("user_limit must be between 0 and 99".into()));
+            return Err(AppError::BadRequest(
+                "user_limit must be between 0 and 99".into(),
+            ));
         }
     }
 
@@ -258,10 +282,7 @@ pub async fn reorder_channels(
 
 /// Build channel JSON for external callers (e.g. channels.rs).
 /// Loads overwrites from the DB. For DM/group_dm channels, includes recipients.
-pub async fn channel_row_to_json_pub(
-    pool: &sqlx::AnyPool,
-    row: &ChannelRow,
-) -> serde_json::Value {
+pub async fn channel_row_to_json_pub(pool: &sqlx::AnyPool, row: &ChannelRow) -> serde_json::Value {
     let overwrites = db::permission_overwrites::list_overwrites(pool, &row.id)
         .await
         .unwrap_or_default();
@@ -330,9 +351,7 @@ pub async fn join_public_space(
     // Try ID lookup first, fall back to slug lookup
     let space = match db::spaces::get_space_row(&state.db, &id_or_slug).await {
         Ok(s) => s,
-        Err(AppError::NotFound(_)) => {
-            db::spaces::get_space_by_slug(&state.db, &id_or_slug).await?
-        }
+        Err(AppError::NotFound(_)) => db::spaces::get_space_by_slug(&state.db, &id_or_slug).await?,
         Err(e) => return Err(e),
     };
     if !space.public {
@@ -349,7 +368,8 @@ pub async fn join_public_space(
         ));
     }
 
-    let member = db::members::add_member(&state.db, &space.id, &auth.user_id, state.db_is_postgres).await?;
+    let member =
+        db::members::add_member(&state.db, &space.id, &auth.user_id, state.db_is_postgres).await?;
 
     // Broadcast member.join to the space
     let user = db::users::get_user(&state.db, &auth.user_id).await?;

@@ -146,8 +146,7 @@ pub async fn save_avatar_image(
     data: &str,
     max_size: usize,
 ) -> Result<(String, String, usize, bool), AppError> {
-    let (bytes, content_type, is_animated) =
-        validate_image_data_uri_with_limit(data, max_size)?;
+    let (bytes, content_type, is_animated) = validate_image_data_uri_with_limit(data, max_size)?;
     let ext = mime_to_ext(&content_type);
     let size = bytes.len();
 
@@ -277,7 +276,9 @@ pub async fn delete_file(storage_path: &Path, relative_path: &str) -> Result<(),
     let file_path = storage_path.join(rel);
 
     // Canonicalize both paths to prevent directory traversal
-    let canonical_storage = storage_path.canonicalize().unwrap_or_else(|_| storage_path.to_path_buf());
+    let canonical_storage = storage_path
+        .canonicalize()
+        .unwrap_or_else(|_| storage_path.to_path_buf());
     if let Ok(canonical_file) = file_path.canonicalize() {
         if !canonical_file.starts_with(&canonical_storage) {
             return Err(AppError::BadRequest("invalid file path".to_string()));

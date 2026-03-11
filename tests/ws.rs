@@ -29,9 +29,7 @@ async fn spawn_test_server() -> (TestServer, String) {
 async fn connect_and_identify(
     ws_url: &str,
     token: &str,
-) -> tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-> {
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let (mut ws, _) = connect_async(format!("{ws_url}/ws")).await.unwrap();
 
     // Consume HELLO
@@ -290,7 +288,10 @@ async fn test_ws_voice_state_update_leave() {
 
     // Consume voice.server_update (and any broadcast)
     let (found, _) = recv_event_type(&mut ws, "voice.server_update", 3).await;
-    assert!(found.is_some(), "should receive voice.server_update after join");
+    assert!(
+        found.is_some(),
+        "should receive voice.server_update after join"
+    );
 
     // Leave: send VOICE_STATE_UPDATE with channel_id = null
     let leave = serde_json::json!({
@@ -319,7 +320,9 @@ async fn test_ws_voice_join_denied_without_connect_permission() {
     let (server, ws_url) = spawn_test_server().await;
     let alice = server.create_user_with_token("alice").await;
     let space_id = server.create_space(&alice.user.id, "VoiceSpace").await;
-    let vc_id = server.create_voice_channel(&space_id, "restricted-voice").await;
+    let vc_id = server
+        .create_voice_channel(&space_id, "restricted-voice")
+        .await;
 
     // Create bob as a space member
     let bob = server.create_user_with_token("bob").await;
@@ -403,7 +406,10 @@ async fn test_ws_voice_state_update_invalid_space_ignored() {
 
     // Verify no voice state was set
     let vs = accordserver::voice::state::get_user_voice_state(&server.state, &alice.user.id);
-    assert!(vs.is_none(), "voice state should not be set for invalid space");
+    assert!(
+        vs.is_none(),
+        "voice state should not be set for invalid space"
+    );
 
     ws.close(None).await.unwrap();
 }
@@ -483,7 +489,10 @@ async fn test_ws_voice_cleanup_on_disconnect() {
 
     // Voice state should be cleaned up
     let vs = accordserver::voice::state::get_user_voice_state(&server.state, &alice.user.id);
-    assert!(vs.is_none(), "voice state should be cleaned up on disconnect");
+    assert!(
+        vs.is_none(),
+        "voice state should be cleaned up on disconnect"
+    );
 }
 
 #[tokio::test]
@@ -496,9 +505,7 @@ async fn test_ws_heartbeat_ack() {
 
     // Send HEARTBEAT (opcode 1)
     let hb = serde_json::json!({ "op": 1 });
-    ws.send(Message::Text(hb.to_string().into()))
-        .await
-        .unwrap();
+    ws.send(Message::Text(hb.to_string().into())).await.unwrap();
 
     // Should receive HEARTBEAT_ACK (opcode 4)
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())

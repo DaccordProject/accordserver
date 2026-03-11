@@ -63,9 +63,14 @@ pub async fn update_current_user(
             if let Some(ref old_avatar) = old_user.avatar {
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
-            let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "avatars", &auth.user_id, avatar, max_avatar_size)
-                    .await?;
+            let (url, _, _, _) = storage::save_avatar_image(
+                &state.storage_path,
+                "avatars",
+                &auth.user_id,
+                avatar,
+                max_avatar_size,
+            )
+            .await?;
             input.avatar = Some(url);
         } else if avatar.is_empty() {
             // Empty string means remove avatar
@@ -85,9 +90,14 @@ pub async fn update_current_user(
             if let Some(ref old_banner) = old_user.banner {
                 let _ = storage::delete_file(&state.storage_path, old_banner).await;
             }
-            let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "banners", &auth.user_id, banner, max_avatar_size)
-                    .await?;
+            let (url, _, _, _) = storage::save_avatar_image(
+                &state.storage_path,
+                "banners",
+                &auth.user_id,
+                banner,
+                max_avatar_size,
+            )
+            .await?;
             input.banner = Some(url);
         } else if banner.is_empty() {
             let old_user = db::users::get_user(&state.db, &auth.user_id).await?;
@@ -99,7 +109,8 @@ pub async fn update_current_user(
         }
     }
 
-    let user = db::users::update_user(&state.db, &auth.user_id, &input, state.db_is_postgres).await?;
+    let user =
+        db::users::update_user(&state.db, &auth.user_id, &input, state.db_is_postgres).await?;
     Ok(Json(serde_json::json!({ "data": user })))
 }
 
@@ -191,14 +202,18 @@ pub async fn create_dm_channel(
         }
     }
 
-    let channel =
-        db::dm_participants::create_dm_channel(&state.db, &auth.user_id, &recipient_ids, state.db_is_postgres).await?;
+    let channel = db::dm_participants::create_dm_channel(
+        &state.db,
+        &auth.user_id,
+        &recipient_ids,
+        state.db_is_postgres,
+    )
+    .await?;
 
     let json = super::spaces::channel_row_to_json_pub(&state.db, &channel).await;
 
     // Broadcast channel.create to all participants
-    let participant_ids =
-        db::dm_participants::list_participant_ids(&state.db, &channel.id).await?;
+    let participant_ids = db::dm_participants::list_participant_ids(&state.db, &channel.id).await?;
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
             "op": 0,

@@ -29,7 +29,10 @@ fn print_banner(config: &Config) {
         None => "disabled".to_string(),
     };
     let master = match &config.master_server {
-        Some(ms) => format!("{} → {} (listing controlled by public_listing setting)", ms.server_name, ms.url),
+        Some(ms) => format!(
+            "{} → {} (listing controlled by public_listing setting)",
+            ms.server_name, ms.url
+        ),
         None => "disabled (set MASTER_SERVER_PUBLIC_URL to enable)".to_string(),
     };
     let mcp = if config.mcp_api_key.is_some() {
@@ -59,7 +62,8 @@ async fn run_main_server(config: Config) {
     // Ensure the database directory exists before opening the pool.
     // The default DATABASE_URL uses a relative `data/` subfolder to keep
     // the database separate from the application binary.
-    if let Some(path) = config.database_url
+    if let Some(path) = config
+        .database_url
         .strip_prefix("sqlite:")
         .and_then(|s| s.split('?').next())
     {
@@ -96,7 +100,9 @@ async fn run_main_server(config: Config) {
                     eprintln!("    {e}");
                     eprintln!();
                     eprintln!("  Voice will not work until LiveKit is reachable.");
-                    eprintln!("  Check LIVEKIT_INTERNAL_URL and ensure the LiveKit server is running.");
+                    eprintln!(
+                        "  Check LIVEKIT_INTERNAL_URL and ensure the LiveKit server is running."
+                    );
                     eprintln!();
                 }
             }

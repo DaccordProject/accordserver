@@ -9,7 +9,7 @@ pub async fn get_mute(
     channel_id: &str,
 ) -> Result<Option<ChannelMute>, AppError> {
     let row = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT user_id, channel_id, created_at FROM channel_mutes WHERE user_id = ? AND channel_id = ?",
+        &super::q("SELECT user_id, channel_id, created_at FROM channel_mutes WHERE user_id = ? AND channel_id = ?"),
     )
     .bind(user_id)
     .bind(channel_id)
@@ -34,7 +34,8 @@ pub async fn create_mute(
     } else {
         "INSERT OR IGNORE INTO channel_mutes (user_id, channel_id) VALUES (?, ?)"
     };
-    sqlx::query(sql)
+    let sql = super::q(sql);
+    sqlx::query(&sql)
         .bind(user_id)
         .bind(channel_id)
         .execute(pool)
@@ -45,16 +46,14 @@ pub async fn create_mute(
         .ok_or_else(|| AppError::NotFound("mute not found".into()))
 }
 
-pub async fn delete_mute(
-    pool: &AnyPool,
-    user_id: &str,
-    channel_id: &str,
-) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM channel_mutes WHERE user_id = ? AND channel_id = ?")
-        .bind(user_id)
-        .bind(channel_id)
-        .execute(pool)
-        .await?;
+pub async fn delete_mute(pool: &AnyPool, user_id: &str, channel_id: &str) -> Result<(), AppError> {
+    sqlx::query(&super::q(
+        "DELETE FROM channel_mutes WHERE user_id = ? AND channel_id = ?",
+    ))
+    .bind(user_id)
+    .bind(channel_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -63,7 +62,7 @@ pub async fn list_mutes_for_user(
     user_id: &str,
 ) -> Result<Vec<ChannelMute>, AppError> {
     let rows = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT user_id, channel_id, created_at FROM channel_mutes WHERE user_id = ? ORDER BY created_at",
+        &super::q("SELECT user_id, channel_id, created_at FROM channel_mutes WHERE user_id = ? ORDER BY created_at"),
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -86,9 +85,9 @@ pub async fn list_effective_muted_channel_ids(
     user_id: &str,
 ) -> Result<Vec<String>, AppError> {
     // Get directly muted channel IDs
-    let direct: Vec<(String,)> = sqlx::query_as(
+    let direct: Vec<(String,)> = sqlx::query_as(&super::q(
         "SELECT channel_id FROM channel_mutes WHERE user_id = ?",
-    )
+    ))
     .bind(user_id)
     .fetch_all(pool)
     .await?;
@@ -98,11 +97,11 @@ pub async fn list_effective_muted_channel_ids(
 
     // Find channels whose parent category is muted (but which don't have
     // their own explicit mute entry — those are already included).
-    let inherited: Vec<(String,)> = sqlx::query_as(
+    let inherited: Vec<(String,)> = sqlx::query_as(&super::q(
         "SELECT c.id FROM channels c \
          INNER JOIN channel_mutes cm ON cm.channel_id = c.parent_id AND cm.user_id = ? \
          WHERE c.parent_id IS NOT NULL",
-    )
+    ))
     .bind(user_id)
     .fetch_all(pool)
     .await?;

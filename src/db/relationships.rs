@@ -59,9 +59,9 @@ pub async fn list_relationships(
             Option<String>,
             Option<String>,
         ),
-    >(&format!(
+    >(&super::q(&format!(
         "{SELECT_RELS} WHERE r.user_id = ? ORDER BY r.created_at DESC"
-    ))
+    )))
     .bind(user_id)
     .fetch_all(pool)
     .await?;
@@ -85,9 +85,9 @@ pub async fn get_relationship(
             Option<String>,
             Option<String>,
         ),
-    >(&format!(
+    >(&super::q(&format!(
         "{SELECT_RELS} WHERE r.user_id = ? AND r.target_user_id = ?"
-    ))
+    )))
     .bind(user_id)
     .bind(target_id)
     .fetch_optional(pool)
@@ -103,12 +103,12 @@ pub async fn upsert_relationship(
     target_id: &str,
     rel_type: i64,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO relationships (user_id, target_user_id, type)
          VALUES (?, ?, ?)
          ON CONFLICT (user_id, target_user_id)
          DO UPDATE SET type = excluded.type, created_at = created_at",
-    )
+    ))
     .bind(user_id)
     .bind(target_id)
     .bind(rel_type)
@@ -123,12 +123,13 @@ pub async fn delete_relationship(
     user_id: &str,
     target_id: &str,
 ) -> Result<bool, AppError> {
-    let result =
-        sqlx::query("DELETE FROM relationships WHERE user_id = ? AND target_user_id = ?")
-            .bind(user_id)
-            .bind(target_id)
-            .execute(pool)
-            .await?;
+    let result = sqlx::query(&super::q(
+        "DELETE FROM relationships WHERE user_id = ? AND target_user_id = ?",
+    ))
+    .bind(user_id)
+    .bind(target_id)
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -138,11 +139,11 @@ pub async fn delete_both_directions(
     user_a: &str,
     user_b: &str,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query(&super::q(
         "DELETE FROM relationships
          WHERE (user_id = ? AND target_user_id = ?)
             OR (user_id = ? AND target_user_id = ?)",
-    )
+    ))
     .bind(user_a)
     .bind(user_b)
     .bind(user_b)
@@ -154,9 +155,9 @@ pub async fn delete_both_directions(
 
 /// Return all friend user IDs for a user (type = 1).
 pub async fn get_friend_ids(pool: &AnyPool, user_id: &str) -> Result<Vec<String>, AppError> {
-    let rows = sqlx::query_as::<_, (String,)>(
+    let rows = sqlx::query_as::<_, (String,)>(&super::q(
         "SELECT target_user_id FROM relationships WHERE user_id = ? AND type = 1",
-    )
+    ))
     .bind(user_id)
     .fetch_all(pool)
     .await?;
@@ -169,9 +170,9 @@ pub async fn is_blocked_by(
     blocker_id: &str,
     blocked_id: &str,
 ) -> Result<bool, AppError> {
-    let row = sqlx::query_as::<_, (i64,)>(
+    let row = sqlx::query_as::<_, (i64,)>(&super::q(
         "SELECT COUNT(*) FROM relationships WHERE user_id = ? AND target_user_id = ? AND type = 2",
-    )
+    ))
     .bind(blocker_id)
     .bind(blocked_id)
     .fetch_one(pool)

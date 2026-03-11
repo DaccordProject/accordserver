@@ -63,8 +63,8 @@ impl Config {
             .or_else(|_| std::env::var("LIVEKIT_URL"))
             .ok()
             .map(|internal_url| {
-                let external_url = std::env::var("LIVEKIT_EXTERNAL_URL")
-                    .unwrap_or_else(|_| internal_url.clone());
+                let external_url =
+                    std::env::var("LIVEKIT_EXTERNAL_URL").unwrap_or_else(|_| internal_url.clone());
                 let api_key = std::env::var("LIVEKIT_API_KEY")
                     .expect("LIVEKIT_API_KEY is required when LIVEKIT_URL is set");
                 let api_secret = std::env::var("LIVEKIT_API_SECRET")
@@ -81,8 +81,9 @@ impl Config {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("./data/cdn"));
 
-        let master_server = std::env::var("MASTER_SERVER_PUBLIC_URL").ok().map(|public_url| {
-            MasterServerConfig {
+        let master_server = std::env::var("MASTER_SERVER_PUBLIC_URL")
+            .ok()
+            .map(|public_url| MasterServerConfig {
                 url: std::env::var("MASTER_SERVER_URL")
                     .unwrap_or_else(|_| "https://master.daccord.gg".to_string()),
                 server_id: resolve_master_server_id(&storage_path),
@@ -93,8 +94,7 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(60),
-            }
-        });
+            });
 
         let totp_key = std::env::var("TOTP_ENCRYPTION_KEY").ok().map(|key| {
             use sha2::{Digest, Sha256};

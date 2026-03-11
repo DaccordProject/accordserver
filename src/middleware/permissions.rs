@@ -207,7 +207,9 @@ pub async fn require_membership(
 ) -> Result<(), AppError> {
     let perms = resolve_member_permissions(pool, space_id, user_id).await?;
     if !has_permission(&perms, "view_channel") {
-        return Err(AppError::Forbidden("missing permission: view_channel".into()));
+        return Err(AppError::Forbidden(
+            "missing permission: view_channel".into(),
+        ));
     }
     Ok(())
 }
@@ -245,7 +247,10 @@ pub async fn resolve_channel_permissions(
 
     // Step 1: Apply @everyone role overwrite
     if let Some(ref eid) = everyone_role_id {
-        if let Some(ow) = overwrites.iter().find(|o| o.overwrite_type == "role" && o.id == *eid) {
+        if let Some(ow) = overwrites
+            .iter()
+            .find(|o| o.overwrite_type == "role" && o.id == *eid)
+        {
             for d in &ow.deny {
                 perms.retain(|p| p != d);
             }

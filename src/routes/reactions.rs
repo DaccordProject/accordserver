@@ -17,7 +17,7 @@ pub async fn add_reaction(
     } else {
         "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)"
     };
-    sqlx::query(sql)
+    sqlx::query(&crate::db::q(sql))
         .bind(&message_id)
         .bind(&auth.user_id)
         .bind(&emoji)
@@ -34,12 +34,14 @@ pub async fn remove_own_reaction(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_membership(&state.db, &channel_id, &auth.user_id).await?;
-    sqlx::query("DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?")
-        .bind(&message_id)
-        .bind(&auth.user_id)
-        .bind(&emoji)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(&crate::db::q(
+        "DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?",
+    ))
+    .bind(&message_id)
+    .bind(&auth.user_id)
+    .bind(&emoji)
+    .execute(&state.db)
+    .await?;
 
     Ok(Json(serde_json::json!({ "data": null })))
 }
@@ -50,12 +52,14 @@ pub async fn remove_user_reaction(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
-    sqlx::query("DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?")
-        .bind(&message_id)
-        .bind(&user_id)
-        .bind(&emoji)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(&crate::db::q(
+        "DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?",
+    ))
+    .bind(&message_id)
+    .bind(&user_id)
+    .bind(&emoji)
+    .execute(&state.db)
+    .await?;
 
     Ok(Json(serde_json::json!({ "data": null })))
 }
@@ -66,9 +70,9 @@ pub async fn list_reactions(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_membership(&state.db, &channel_id, &auth.user_id).await?;
-    let users = sqlx::query_as::<_, (String,)>(
+    let users = sqlx::query_as::<_, (String,)>(&crate::db::q(
         "SELECT user_id FROM reactions WHERE message_id = ? AND emoji_name = ?",
-    )
+    ))
     .bind(&message_id)
     .bind(&emoji)
     .fetch_all(&state.db)
@@ -84,7 +88,7 @@ pub async fn remove_all_reactions(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
-    sqlx::query("DELETE FROM reactions WHERE message_id = ?")
+    sqlx::query(&crate::db::q("DELETE FROM reactions WHERE message_id = ?"))
         .bind(&message_id)
         .execute(&state.db)
         .await?;
@@ -98,11 +102,13 @@ pub async fn remove_all_reactions_emoji(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
-    sqlx::query("DELETE FROM reactions WHERE message_id = ? AND emoji_name = ?")
-        .bind(&message_id)
-        .bind(&emoji)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(&crate::db::q(
+        "DELETE FROM reactions WHERE message_id = ? AND emoji_name = ?",
+    ))
+    .bind(&message_id)
+    .bind(&emoji)
+    .execute(&state.db)
+    .await?;
 
     Ok(Json(serde_json::json!({ "data": null })))
 }

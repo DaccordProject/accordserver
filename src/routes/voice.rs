@@ -77,7 +77,9 @@ pub async fn join_voice(
         false,
     );
 
-    let lk = state.livekit_client.as_ref()
+    let lk = state
+        .livekit_client
+        .as_ref()
         .ok_or_else(|| AppError::BadRequest("voice_not_configured".to_string()))?;
 
     // Clean up old LiveKit room if the user moved channels
@@ -148,7 +150,11 @@ pub async fn leave_voice(
 }
 
 pub async fn voice_info(state: State<AppState>) -> Json<serde_json::Value> {
-    let backend = if state.livekit_client.is_some() { "livekit" } else { "none" };
+    let backend = if state.livekit_client.is_some() {
+        "livekit"
+    } else {
+        "none"
+    };
     Json(serde_json::json!({ "backend": backend }))
 }
 

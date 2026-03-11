@@ -70,7 +70,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/auth/2fa/enable", post(auth::enable_2fa))
         .route("/auth/2fa/verify", post(auth::verify_2fa))
         .route("/auth/2fa/disable", post(auth::disable_2fa))
-        .route("/auth/2fa/backup-codes", post(auth::regenerate_backup_codes))
+        .route(
+            "/auth/2fa/backup-codes",
+            post(auth::regenerate_backup_codes),
+        )
         // Gateway (public, no auth needed)
         .route("/gateway", get(gateway::get_gateway))
         // Users
@@ -83,7 +86,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/users/@me/channels",
             get(users::get_current_user_channels).post(users::create_dm_channel),
         )
-        .route("/users/@me/read-states", get(read_states::get_unread_channels))
+        .route(
+            "/users/@me/read-states",
+            get(read_states::get_unread_channels),
+        )
         .route("/users/@me/mutes", get(mutes::list_mutes))
         .route(
             "/users/@me/relationships",
@@ -174,10 +180,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             put(channels::add_recipient).delete(channels::remove_recipient),
         )
         // Read states
-        .route(
-            "/channels/{channel_id}/ack",
-            post(read_states::ack_channel),
-        )
+        .route("/channels/{channel_id}/ack", post(read_states::ack_channel))
         // Channel mutes
         .route(
             "/channels/{channel_id}/mute",

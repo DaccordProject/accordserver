@@ -173,10 +173,7 @@ async fn handle_tools_call(state: &AppState, req: &JsonRpcRequest) -> JsonRpcRes
         }
     };
 
-    let tool_name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
     let arguments = params
         .get("arguments")

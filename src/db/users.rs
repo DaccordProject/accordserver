@@ -27,7 +27,7 @@ fn row_to_user(row: sqlx::any::AnyRow) -> User {
 const SELECT_USERS: &str = "SELECT id, username, display_name, avatar, banner, accent_color, bio, bot, system, is_admin, totp_enabled, disabled, flags, public_flags, created_at FROM users";
 
 pub async fn get_user(pool: &AnyPool, user_id: &str) -> Result<User, AppError> {
-    let row = sqlx::query(&format!("{SELECT_USERS} WHERE id = ?"))
+    let row = sqlx::query(&super::q(&format!("{SELECT_USERS} WHERE id = ?")))
         .bind(user_id)
         .fetch_optional(pool)
         .await?
@@ -40,12 +40,14 @@ pub async fn create_user(pool: &AnyPool, input: &CreateUser) -> Result<User, App
     let id = snowflake::generate();
     let display_name = input.display_name.as_deref().unwrap_or(&input.username);
 
-    sqlx::query("INSERT INTO users (id, username, display_name) VALUES (?, ?, ?)")
-        .bind(&id)
-        .bind(&input.username)
-        .bind(display_name)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "INSERT INTO users (id, username, display_name) VALUES (?, ?, ?)",
+    ))
+    .bind(&id)
+    .bind(&input.username)
+    .bind(display_name)
+    .execute(pool)
+    .await?;
 
     get_user(pool, &id).await
 }
@@ -95,9 +97,9 @@ pub async fn update_user(
 
     if let Some(color) = input.accent_color {
         if sets.is_empty() {
-            let sql = format!(
-                "UPDATE users SET accent_color = ?, updated_at = {now_fn} WHERE id = ?"
-            );
+            let sql =
+                format!("UPDATE users SET accent_color = ?, updated_at = {now_fn} WHERE id = ?");
+            let sql = super::q(&sql);
             sqlx::query(&sql)
                 .bind(color)
                 .bind(user_id)
@@ -108,6 +110,7 @@ pub async fn update_user(
             sets.push(&updated_at_set);
             let set_clause = sets.join(", ");
             let query = format!("UPDATE users SET {set_clause}, accent_color = ? WHERE id = ?");
+            let query = super::q(&query);
             let mut q = sqlx::query(&query);
             for v in &values {
                 q = q.bind(v);
@@ -120,6 +123,7 @@ pub async fn update_user(
         sets.push(&updated_at_set);
         let set_clause = sets.join(", ");
         let query = format!("UPDATE users SET {set_clause} WHERE id = ?");
+        let query = super::q(&query);
         let mut q = sqlx::query(&query);
         for v in &values {
             q = q.bind(v);
@@ -135,14 +139,14 @@ pub async fn get_user_dm_channels(
     pool: &AnyPool,
     user_id: &str,
 ) -> Result<Vec<crate::models::channel::ChannelRow>, AppError> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&super::q(
         "SELECT id, type, space_id, name, description, topic, position, parent_id, \
          nsfw, rate_limit, bitrate, user_limit, owner_id, last_message_id, \
          archived, auto_archive_after, created_at \
          FROM channels WHERE id IN \
          (SELECT channel_id FROM dm_participants WHERE user_id = ?) \
          ORDER BY last_message_id DESC",
-    )
+    ))
     .bind(user_id)
     .fetch_all(pool)
     .await?;
@@ -172,10 +176,11 @@ pub async fn get_user_dm_channels(
 }
 
 pub async fn get_user_spaces(pool: &AnyPool, user_id: &str) -> Result<Vec<String>, AppError> {
-    let rows = sqlx::query_as::<_, (String,)>("SELECT space_id FROM members WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_all(pool)
-        .await?;
+    let rows =
+        sqlx::query_as::<_, (String,)>(&super::q("SELECT space_id FROM members WHERE user_id = ?"))
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
 }

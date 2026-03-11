@@ -12,12 +12,13 @@ pub async fn is_participant(
     channel_id: &str,
     user_id: &str,
 ) -> Result<bool, AppError> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM dm_participants WHERE channel_id = ? AND user_id = ?")
-            .bind(channel_id)
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
+    let count: i64 = sqlx::query_scalar(&super::q(
+        "SELECT COUNT(*) FROM dm_participants WHERE channel_id = ? AND user_id = ?",
+    ))
+    .bind(channel_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
     Ok(count > 0)
 }
 
@@ -26,11 +27,12 @@ pub async fn list_participant_ids(
     pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<String>, AppError> {
-    let rows =
-        sqlx::query_as::<_, (String,)>("SELECT user_id FROM dm_participants WHERE channel_id = ?")
-            .bind(channel_id)
-            .fetch_all(pool)
-            .await?;
+    let rows = sqlx::query_as::<_, (String,)>(&super::q(
+        "SELECT user_id FROM dm_participants WHERE channel_id = ?",
+    ))
+    .bind(channel_id)
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
@@ -61,7 +63,8 @@ pub async fn add_participant(
     } else {
         "INSERT OR IGNORE INTO dm_participants (channel_id, user_id) VALUES (?, ?)"
     };
-    sqlx::query(sql)
+    let sql = super::q(sql);
+    sqlx::query(&sql)
         .bind(channel_id)
         .bind(user_id)
         .execute(pool)
@@ -75,11 +78,13 @@ pub async fn remove_participant(
     channel_id: &str,
     user_id: &str,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM dm_participants WHERE channel_id = ? AND user_id = ?")
-        .bind(channel_id)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "DELETE FROM dm_participants WHERE channel_id = ? AND user_id = ?",
+    ))
+    .bind(channel_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -90,7 +95,7 @@ pub async fn find_existing_dm(
     user_b: &str,
 ) -> Result<Option<ChannelRow>, AppError> {
     // Find channels where both users are participants and the channel type is "dm"
-    let row = sqlx::query(
+    let row = sqlx::query(&super::q(
         "SELECT c.id, c.type, c.space_id, c.name, c.description, c.topic, c.position, \
          c.parent_id, c.nsfw, c.rate_limit, c.bitrate, c.user_limit, c.owner_id, \
          c.last_message_id, c.archived, c.auto_archive_after, c.created_at \
@@ -99,7 +104,7 @@ pub async fn find_existing_dm(
          INNER JOIN dm_participants p2 ON c.id = p2.channel_id AND p2.user_id = ? \
          WHERE c.type = 'dm' \
          LIMIT 1",
-    )
+    ))
     .bind(user_a)
     .bind(user_b)
     .fetch_optional(pool)
@@ -160,10 +165,10 @@ pub async fn create_dm_channel(
     };
 
     let id = snowflake::generate();
-    sqlx::query(
+    sqlx::query(&super::q(
         "INSERT INTO channels (id, name, type, owner_id, position, nsfw, rate_limit, archived) \
          VALUES (?, '', ?, ?, 0, 0, 0, 0)",
-    )
+    ))
     .bind(&id)
     .bind(channel_type)
     .bind(creator_id)
@@ -180,14 +185,12 @@ pub async fn create_dm_channel(
 }
 
 /// Count the number of participants in a DM channel.
-pub async fn count_participants(
-    pool: &AnyPool,
-    channel_id: &str,
-) -> Result<i64, AppError> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM dm_participants WHERE channel_id = ?")
-            .bind(channel_id)
-            .fetch_one(pool)
-            .await?;
+pub async fn count_participants(pool: &AnyPool, channel_id: &str) -> Result<i64, AppError> {
+    let count: i64 = sqlx::query_scalar(&super::q(
+        "SELECT COUNT(*) FROM dm_participants WHERE channel_id = ?",
+    ))
+    .bind(channel_id)
+    .fetch_one(pool)
+    .await?;
     Ok(count)
 }

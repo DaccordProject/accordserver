@@ -48,10 +48,10 @@ pub async fn update_channel(
     } else if existing.channel_type == "dm" {
         return Err(AppError::BadRequest("cannot rename a 1:1 DM".into()));
     } else {
-        require_channel_permission(&state.db, &channel_id, &auth, "manage_channels")
-            .await?;
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_channels").await?;
     }
-    let channel = db::channels::update_channel(&state.db, &channel_id, &input, state.db_is_postgres).await?;
+    let channel =
+        db::channels::update_channel(&state.db, &channel_id, &input, state.db_is_postgres).await?;
     let json = super::spaces::channel_row_to_json_pub(&state.db, &channel).await;
 
     // Broadcast channel.update
@@ -109,8 +109,7 @@ pub async fn delete_channel(
             && existing.owner_id.as_deref() == Some(&auth.user_id)
         {
             // Owner left — transfer ownership to first remaining participant
-            let ids =
-                db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
+            let ids = db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
             if let Some(new_owner) = ids.first() {
                 let update = UpdateChannel {
                     name: None,
@@ -124,11 +123,13 @@ pub async fn delete_channel(
                     archived: None,
                 };
                 // We need to update owner_id directly since UpdateChannel doesn't have it
-                sqlx::query("UPDATE channels SET owner_id = ? WHERE id = ?")
-                    .bind(new_owner)
-                    .bind(&channel_id)
-                    .execute(&state.db)
-                    .await?;
+                sqlx::query(&crate::db::q(
+                    "UPDATE channels SET owner_id = ? WHERE id = ?",
+                ))
+                .bind(new_owner)
+                .bind(&channel_id)
+                .execute(&state.db)
+                .await?;
                 let _ = update; // unused, just for clarity
             }
         }
@@ -137,10 +138,8 @@ pub async fn delete_channel(
         let participant_ids =
             db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
         if !participant_ids.is_empty() {
-            let updated_channel =
-                db::channels::get_channel_row(&state.db, &channel_id).await?;
-            let json =
-                super::spaces::channel_row_to_json_pub(&state.db, &updated_channel).await;
+            let updated_channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+            let json = super::spaces::channel_row_to_json_pub(&state.db, &updated_channel).await;
             if let Some(ref dispatcher) = *state.gateway_tx.read().await {
                 let event = serde_json::json!({
                     "op": 0,
@@ -218,7 +217,8 @@ pub async fn upsert_overwrite(
     if input.overwrite_type == "role" {
         let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
         if let Some(ref space_id) = channel.space_id {
-            let role = db::roles::get_role_row(&state.db, &overwrite_id).await
+            let role = db::roles::get_role_row(&state.db, &overwrite_id)
+                .await
                 .map_err(|_| AppError::NotFound("role not found".into()))?;
             if role.space_id != *space_id {
                 return Err(AppError::NotFound("role not found in this space".into()));
@@ -276,14 +276,14 @@ pub async fn add_recipient(
         ));
     }
 
-    db::dm_participants::add_participant(&state.db, &channel_id, &user_id, state.db_is_postgres).await?;
+    db::dm_participants::add_participant(&state.db, &channel_id, &user_id, state.db_is_postgres)
+        .await?;
 
     let updated = db::channels::get_channel_row(&state.db, &channel_id).await?;
     let json = super::spaces::channel_row_to_json_pub(&state.db, &updated).await;
 
     // Broadcast channel.update to all participants (including the new one)
-    let participant_ids =
-        db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
+    let participant_ids = db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
             "op": 0,
@@ -315,9 +315,7 @@ pub async fn remove_recipient(
     require_dm_access(&state.db, &channel_id, &auth.user_id).await?;
 
     // Can remove self, or owner can remove others
-    if user_id != auth.user_id
-        && channel.owner_id.as_deref() != Some(&auth.user_id)
-    {
+    if user_id != auth.user_id && channel.owner_id.as_deref() != Some(&auth.user_id) {
         return Err(AppError::Forbidden(
             "only the group owner can remove members".into(),
         ));
@@ -354,11 +352,13 @@ pub async fn remove_recipient(
     if channel.owner_id.as_deref() == Some(&user_id) {
         let ids = db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
         if let Some(new_owner) = ids.first() {
-            sqlx::query("UPDATE channels SET owner_id = ? WHERE id = ?")
-                .bind(new_owner)
-                .bind(&channel_id)
-                .execute(&state.db)
-                .await?;
+            sqlx::query(&crate::db::q(
+                "UPDATE channels SET owner_id = ? WHERE id = ?",
+            ))
+            .bind(new_owner)
+            .bind(&channel_id)
+            .execute(&state.db)
+            .await?;
         }
     }
 
@@ -366,8 +366,7 @@ pub async fn remove_recipient(
     let json = super::spaces::channel_row_to_json_pub(&state.db, &updated).await;
 
     // Broadcast channel.update to remaining participants
-    let participant_ids =
-        db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
+    let participant_ids = db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
             "op": 0,

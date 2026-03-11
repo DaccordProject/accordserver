@@ -36,7 +36,7 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
     // 1. Find or create the bearer user, then rotate its token
     let user = find_or_create_user(pool, "test_user", "Test User").await?;
 
-    sqlx::query("DELETE FROM user_tokens WHERE user_id = ?")
+    sqlx::query(&crate::db::q("DELETE FROM user_tokens WHERE user_id = ?"))
         .bind(&user.id)
         .execute(pool)
         .await?;
@@ -44,9 +44,9 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
     let user_token = generate_token();
     let user_token_hash = create_token_hash(&user_token);
 
-    sqlx::query(
+    sqlx::query(&crate::db::q(
         "INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, '2099-12-31T23:59:59')",
-    )
+    ))
     .bind(&user_token_hash)
     .bind(&user.id)
     .execute(pool)
@@ -63,7 +63,10 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
 
     // 4. Ensure #testing channel exists
     let channels = db::channels::list_channels_in_space(pool, &space.id).await?;
-    if !channels.iter().any(|ch| ch.name.as_deref() == Some("testing")) {
+    if !channels
+        .iter()
+        .any(|ch| ch.name.as_deref() == Some("testing"))
+    {
         db::channels::create_channel(
             pool,
             &space.id,
@@ -84,9 +87,9 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
 
     // 5. Ensure both the user and the bot are members of the space
     for uid in [&user.id, &bot_user_id] {
-        let is_member: i64 = sqlx::query_scalar(
+        let is_member: i64 = sqlx::query_scalar(&crate::db::q(
             "SELECT COUNT(*) FROM members WHERE user_id = ? AND space_id = ?",
-        )
+        ))
         .bind(uid)
         .bind(&space.id)
         .fetch_one(pool)
@@ -147,7 +150,7 @@ async fn find_or_create_user(
     display_name: &str,
 ) -> Result<User, AppError> {
     let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+        sqlx::query_scalar(&crate::db::q("SELECT id FROM users WHERE username = ?"))
             .bind(username)
             .fetch_optional(pool)
             .await?;
@@ -180,9 +183,9 @@ async fn find_or_create_application(
     description: &str,
 ) -> Result<(crate::models::application::Application, String, String), AppError> {
     // Check if an application already exists for this owner
-    let existing: Option<(String, String)> = sqlx::query_as(
+    let existing: Option<(String, String)> = sqlx::query_as(&crate::db::q(
         "SELECT id, bot_user_id FROM applications WHERE owner_id = ?",
-    )
+    ))
     .bind(owner_id)
     .fetch_optional(pool)
     .await?;
@@ -198,14 +201,14 @@ async fn find_or_create_application(
     // violation on users.username.
     let bot_username = format!("{name} Bot");
     let existing_bot_id: Option<String> =
-        sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+        sqlx::query_scalar(&crate::db::q("SELECT id FROM users WHERE username = ?"))
             .bind(&bot_username)
             .fetch_optional(pool)
             .await?;
 
     let bot_user_id = match existing_bot_id {
         Some(id) => {
-            sqlx::query("UPDATE users SET bot = TRUE WHERE id = ?")
+            sqlx::query(&crate::db::q("UPDATE users SET bot = TRUE WHERE id = ?"))
                 .bind(&id)
                 .execute(pool)
                 .await?;
@@ -220,7 +223,7 @@ async fn find_or_create_application(
                 },
             )
             .await?;
-            sqlx::query("UPDATE users SET bot = TRUE WHERE id = ?")
+            sqlx::query(&crate::db::q("UPDATE users SET bot = TRUE WHERE id = ?"))
                 .bind(&bot_user.id)
                 .execute(pool)
                 .await?;
@@ -229,16 +232,18 @@ async fn find_or_create_application(
     };
 
     // Clean up any orphaned application rows pointing to this bot user
-    sqlx::query("DELETE FROM applications WHERE bot_user_id = ?")
-        .bind(&bot_user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&crate::db::q(
+        "DELETE FROM applications WHERE bot_user_id = ?",
+    ))
+    .bind(&bot_user_id)
+    .execute(pool)
+    .await?;
 
     // Create the application
     let app_id = snowflake::generate();
-    sqlx::query(
+    sqlx::query(&crate::db::q(
         "INSERT INTO applications (id, name, description, owner_id, bot_user_id) VALUES (?, ?, ?, ?, ?)",
-    )
+    ))
     .bind(&app_id)
     .bind(name)
     .bind(description)
@@ -250,12 +255,14 @@ async fn find_or_create_application(
     let token = generate_token();
     let token_hash = create_token_hash(&token);
 
-    sqlx::query("INSERT INTO bot_tokens (token_hash, application_id, user_id) VALUES (?, ?, ?)")
-        .bind(&token_hash)
-        .bind(&app_id)
-        .bind(&bot_user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&crate::db::q(
+        "INSERT INTO bot_tokens (token_hash, application_id, user_id) VALUES (?, ?, ?)",
+    ))
+    .bind(&token_hash)
+    .bind(&app_id)
+    .bind(&bot_user_id)
+    .execute(pool)
+    .await?;
 
     let app = db::auth::get_application(pool, &app_id).await?;
     Ok((app, bot_user_id, token))
@@ -267,7 +274,7 @@ async fn find_or_create_space(
     name: &str,
 ) -> Result<SpaceRow, AppError> {
     let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM spaces WHERE owner_id = ?")
+        sqlx::query_scalar(&crate::db::q("SELECT id FROM spaces WHERE owner_id = ?"))
             .bind(owner_id)
             .fetch_optional(pool)
             .await?;

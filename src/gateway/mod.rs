@@ -15,8 +15,7 @@ use crate::db;
 use crate::middleware::auth as auth_resolve;
 use crate::state::AppState;
 use events::{
-    GatewayBroadcast, GatewayMessage, IdentifyData, PresenceUpdateData,
-    VoiceStateUpdateData,
+    GatewayBroadcast, GatewayMessage, IdentifyData, PresenceUpdateData, VoiceStateUpdateData,
 };
 use heartbeat::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
 use session::GatewaySession;
@@ -696,25 +695,25 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
     // Token format: "Bot xxx" or "Bearer xxx"
     let (user_id, is_bot) = if let Some(tok) = token.strip_prefix("Bot ") {
         let token_hash = auth_resolve::create_token_hash(tok);
-        let row =
-            sqlx::query_as::<_, (String,)>("SELECT user_id FROM bot_tokens WHERE token_hash = ?")
-                .bind(&token_hash)
-                .fetch_optional(&state.db)
-                .await
-                .ok()??;
+        let row = sqlx::query_as::<_, (String,)>(&crate::db::q(
+            "SELECT user_id FROM bot_tokens WHERE token_hash = ?",
+        ))
+        .bind(&token_hash)
+        .fetch_optional(&state.db)
+        .await
+        .ok()??;
         (row.0, true)
     } else if let Some(tok) = token.strip_prefix("Bearer ") {
         let token_hash = auth_resolve::create_token_hash(tok);
         let now_fn = crate::db::now_sql(state.db_is_postgres);
-        let sql = format!(
+        let sql = crate::db::q(&format!(
             "SELECT user_id FROM user_tokens WHERE token_hash = ? AND expires_at > {now_fn}",
-        );
-        let row =
-            sqlx::query_as::<_, (String,)>(&sql)
-                .bind(&token_hash)
-                .fetch_optional(&state.db)
-                .await
-                .ok()??;
+        ));
+        let row = sqlx::query_as::<_, (String,)>(&sql)
+            .bind(&token_hash)
+            .fetch_optional(&state.db)
+            .await
+            .ok()??;
         (row.0, false)
     } else {
         return None;
@@ -727,5 +726,9 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
         return None;
     }
 
-    Some(ResolvedAuth { user_id, is_bot, is_admin: user.is_admin })
+    Some(ResolvedAuth {
+        user_id,
+        is_bot,
+        is_admin: user.is_admin,
+    })
 }

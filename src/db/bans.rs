@@ -13,7 +13,7 @@ pub struct BanRow {
 
 pub async fn get_ban(pool: &AnyPool, space_id: &str, user_id: &str) -> Result<BanRow, AppError> {
     let row = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, String)>(
-        "SELECT user_id, space_id, reason, banned_by, created_at FROM bans WHERE space_id = ? AND user_id = ?"
+        &super::q("SELECT user_id, space_id, reason, banned_by, created_at FROM bans WHERE space_id = ? AND user_id = ?")
     )
     .bind(space_id)
     .bind(user_id)
@@ -32,7 +32,7 @@ pub async fn get_ban(pool: &AnyPool, space_id: &str, user_id: &str) -> Result<Ba
 
 pub async fn list_bans(pool: &AnyPool, space_id: &str) -> Result<Vec<BanRow>, AppError> {
     let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, String)>(
-        "SELECT user_id, space_id, reason, banned_by, created_at FROM bans WHERE space_id = ? ORDER BY created_at DESC"
+        &super::q("SELECT user_id, space_id, reason, banned_by, created_at FROM bans WHERE space_id = ? ORDER BY created_at DESC")
     )
     .bind(space_id)
     .fetch_all(pool)
@@ -59,18 +59,20 @@ pub async fn create_ban(
     is_postgres: bool,
 ) -> Result<BanRow, AppError> {
     // Remove member first
-    sqlx::query("DELETE FROM members WHERE space_id = ? AND user_id = ?")
-        .bind(space_id)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "DELETE FROM members WHERE space_id = ? AND user_id = ?",
+    ))
+    .bind(space_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
 
     let sql = if is_postgres {
         "INSERT INTO bans (user_id, space_id, reason, banned_by) VALUES (?, ?, ?, ?) ON CONFLICT (user_id, space_id) DO UPDATE SET reason = EXCLUDED.reason, banned_by = EXCLUDED.banned_by"
     } else {
         "INSERT OR REPLACE INTO bans (user_id, space_id, reason, banned_by) VALUES (?, ?, ?, ?)"
     };
-    sqlx::query(sql)
+    sqlx::query(&super::q(sql))
         .bind(user_id)
         .bind(space_id)
         .bind(reason)
@@ -82,10 +84,12 @@ pub async fn create_ban(
 }
 
 pub async fn delete_ban(pool: &AnyPool, space_id: &str, user_id: &str) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM bans WHERE space_id = ? AND user_id = ?")
-        .bind(space_id)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "DELETE FROM bans WHERE space_id = ? AND user_id = ?",
+    ))
+    .bind(space_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }

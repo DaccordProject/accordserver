@@ -19,42 +19,50 @@ fn row_to_emoji(row: sqlx::any::AnyRow, role_ids: Vec<String>) -> Emoji {
 }
 
 /// Verify an emoji belongs to the given space. Returns an error if it doesn't.
-pub async fn require_emoji_in_space(pool: &AnyPool, emoji_id: &str, space_id: &str) -> Result<(), AppError> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT space_id FROM emojis WHERE id = ?")
-        .bind(emoji_id)
-        .fetch_optional(pool)
-        .await?;
+pub async fn require_emoji_in_space(
+    pool: &AnyPool,
+    emoji_id: &str,
+    space_id: &str,
+) -> Result<(), AppError> {
+    let row: Option<(String,)> =
+        sqlx::query_as(&super::q("SELECT space_id FROM emojis WHERE id = ?"))
+            .bind(emoji_id)
+            .fetch_optional(pool)
+            .await?;
     match row {
         Some((sid,)) if sid == space_id => Ok(()),
-        Some(_) => Err(AppError::NotFound("emoji not found in this space".to_string())),
+        Some(_) => Err(AppError::NotFound(
+            "emoji not found in this space".to_string(),
+        )),
         None => Err(AppError::NotFound("unknown_emoji".to_string())),
     }
 }
 
 pub async fn get_emoji(pool: &AnyPool, emoji_id: &str) -> Result<Emoji, AppError> {
     let row = sqlx::query(
-        "SELECT id, name, animated, managed, available, require_colons, creator_id, image_path FROM emojis WHERE id = ?"
+        &super::q("SELECT id, name, animated, managed, available, require_colons, creator_id, image_path FROM emojis WHERE id = ?")
     )
     .bind(emoji_id)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("unknown_emoji".to_string()))?;
 
-    let role_ids =
-        sqlx::query_as::<_, (String,)>("SELECT role_id FROM emoji_roles WHERE emoji_id = ?")
-            .bind(emoji_id)
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .map(|r| r.0)
-            .collect();
+    let role_ids = sqlx::query_as::<_, (String,)>(&super::q(
+        "SELECT role_id FROM emoji_roles WHERE emoji_id = ?",
+    ))
+    .bind(emoji_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| r.0)
+    .collect();
 
     Ok(row_to_emoji(row, role_ids))
 }
 
 pub async fn list_emojis(pool: &AnyPool, space_id: &str) -> Result<Vec<Emoji>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, name, animated, managed, available, require_colons, creator_id, image_path FROM emojis WHERE space_id = ?"
+        &super::q("SELECT id, name, animated, managed, available, require_colons, creator_id, image_path FROM emojis WHERE space_id = ?")
     )
     .bind(space_id)
     .fetch_all(pool)
@@ -63,14 +71,15 @@ pub async fn list_emojis(pool: &AnyPool, space_id: &str) -> Result<Vec<Emoji>, A
     let mut emojis = Vec::new();
     for row in rows {
         let emoji_id: String = row.get("id");
-        let role_ids =
-            sqlx::query_as::<_, (String,)>("SELECT role_id FROM emoji_roles WHERE emoji_id = ?")
-                .bind(&emoji_id)
-                .fetch_all(pool)
-                .await?
-                .into_iter()
-                .map(|r| r.0)
-                .collect();
+        let role_ids = sqlx::query_as::<_, (String,)>(&super::q(
+            "SELECT role_id FROM emoji_roles WHERE emoji_id = ?",
+        ))
+        .bind(&emoji_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|r| r.0)
+        .collect();
 
         emojis.push(row_to_emoji(row, role_ids));
     }
@@ -91,7 +100,7 @@ pub async fn create_emoji(
     let id = snowflake::generate();
 
     sqlx::query(
-        "INSERT INTO emojis (id, space_id, name, creator_id, animated, image_path, image_content_type, image_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        &super::q("INSERT INTO emojis (id, space_id, name, creator_id, animated, image_path, image_content_type, image_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     )
     .bind(&id)
     .bind(space_id)
@@ -122,7 +131,7 @@ pub async fn update_emoji(
     let now_fn = crate::db::now_sql(is_postgres);
     if let Some(ref name) = input.name {
         let sql = format!("UPDATE emojis SET name = ?, updated_at = {now_fn} WHERE id = ?");
-        sqlx::query(&sql)
+        sqlx::query(&super::q(&sql))
             .bind(name)
             .bind(emoji_id)
             .execute(pool)
@@ -134,13 +143,13 @@ pub async fn update_emoji(
 /// Delete an emoji. Returns the image_path for file cleanup.
 pub async fn delete_emoji(pool: &AnyPool, emoji_id: &str) -> Result<Option<String>, AppError> {
     let image_path: Option<String> =
-        sqlx::query_scalar("SELECT image_path FROM emojis WHERE id = ?")
+        sqlx::query_scalar(&super::q("SELECT image_path FROM emojis WHERE id = ?"))
             .bind(emoji_id)
             .fetch_optional(pool)
             .await?
             .flatten();
 
-    sqlx::query("DELETE FROM emojis WHERE id = ?")
+    sqlx::query(&super::q("DELETE FROM emojis WHERE id = ?"))
         .bind(emoji_id)
         .execute(pool)
         .await?;

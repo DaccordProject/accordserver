@@ -210,11 +210,7 @@ fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
 }
 
 /// Execute a tool by name. Returns Ok(text) on success, Err(text) on failure.
-pub async fn call_tool(
-    state: &AppState,
-    name: &str,
-    args: Value,
-) -> Result<String, String> {
+pub async fn call_tool(state: &AppState, name: &str, args: Value) -> Result<String, String> {
     match name {
         "list_spaces" => tool_list_spaces(state).await,
         "get_space" => tool_get_space(state, &args).await,
@@ -359,14 +355,12 @@ async fn tool_search_messages(state: &AppState, args: &Value) -> Result<String, 
     // If channel_id is provided, restrict to that channel
     let channel_ids: Vec<String> = match opt_str(args, "channel_id") {
         Some(cid) => vec![cid.to_string()],
-        None => {
-            db::channels::list_channels_in_space(&state.db, space_id)
-                .await
-                .map_err(map_err)?
-                .into_iter()
-                .map(|c| c.id)
-                .collect()
-        }
+        None => db::channels::list_channels_in_space(&state.db, space_id)
+            .await
+            .map_err(map_err)?
+            .into_iter()
+            .map(|c| c.id)
+            .collect(),
     };
 
     let params = db::messages::SearchMessagesParams {
@@ -517,9 +511,16 @@ async fn tool_ban_user(state: &AppState, args: &Value) -> Result<String, String>
 
     // Remove membership first, then ban
     let _ = db::members::remove_member(&state.db, space_id, user_id).await;
-    let ban = db::bans::create_ban(&state.db, space_id, user_id, reason, "mcp", state.db_is_postgres)
-        .await
-        .map_err(map_err)?;
+    let ban = db::bans::create_ban(
+        &state.db,
+        space_id,
+        user_id,
+        reason,
+        "mcp",
+        state.db_is_postgres,
+    )
+    .await
+    .map_err(map_err)?;
 
     Ok(serde_json::json!({
         "user_id": ban.user_id,

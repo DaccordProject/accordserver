@@ -7,9 +7,9 @@ pub async fn list_overwrites(
     pool: &AnyPool,
     channel_id: &str,
 ) -> Result<Vec<PermissionOverwrite>, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, String, String)>(
+    let rows = sqlx::query_as::<_, (String, String, String, String)>(&super::q(
         "SELECT id, type, allow, deny FROM permission_overwrites WHERE channel_id = ?",
-    )
+    ))
     .bind(channel_id)
     .fetch_all(pool)
     .await?;
@@ -34,8 +34,8 @@ pub async fn upsert_overwrite(
     let deny_json = serde_json::to_string(&overwrite.deny).unwrap();
 
     sqlx::query(
-        "INSERT INTO permission_overwrites (id, channel_id, type, allow, deny) VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT (id, channel_id) DO UPDATE SET type = excluded.type, allow = excluded.allow, deny = excluded.deny",
+        &super::q("INSERT INTO permission_overwrites (id, channel_id, type, allow, deny) VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT (id, channel_id) DO UPDATE SET type = excluded.type, allow = excluded.allow, deny = excluded.deny"),
     )
     .bind(&overwrite.id)
     .bind(channel_id)
@@ -53,10 +53,12 @@ pub async fn delete_overwrite(
     channel_id: &str,
     overwrite_id: &str,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM permission_overwrites WHERE id = ? AND channel_id = ?")
-        .bind(overwrite_id)
-        .bind(channel_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(&super::q(
+        "DELETE FROM permission_overwrites WHERE id = ? AND channel_id = ?",
+    ))
+    .bind(overwrite_id)
+    .bind(channel_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }

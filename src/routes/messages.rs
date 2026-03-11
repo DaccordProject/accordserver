@@ -45,8 +45,14 @@ pub async fn list_messages(
         require_channel_membership(&state.db, &channel_id, uid).await?;
     }
     let limit = params.limit.unwrap_or(50).min(100);
-    let mut rows =
-        db::messages::list_messages(&state.db, &channel_id, params.after.as_deref(), limit, params.thread_id.as_deref()).await?;
+    let mut rows = db::messages::list_messages(
+        &state.db,
+        &channel_id,
+        params.after.as_deref(),
+        limit,
+        params.thread_id.as_deref(),
+    )
+    .await?;
 
     let has_more = rows.len() as i64 > limit;
     if has_more {
@@ -108,7 +114,9 @@ pub async fn create_message(
 
     // Input validation
     if input.content.len() > 4000 {
-        return Err(AppError::BadRequest("message content must be at most 4000 characters".into()));
+        return Err(AppError::BadRequest(
+            "message content must be at most 4000 characters".into(),
+        ));
     }
     if let Some(ref embeds) = input.embeds {
         if embeds.len() > 10 {
@@ -162,7 +170,9 @@ pub async fn create_message(
                 content: None,
                 embeds: Some(embeds),
             };
-            if let Ok(updated_msg) = db::messages::update_message(&db, &msg_id, &update, is_postgres).await {
+            if let Ok(updated_msg) =
+                db::messages::update_message(&db, &msg_id, &update, is_postgres).await
+            {
                 let attachments = db::attachments::get_attachments_for_message(&db, &msg_id)
                     .await
                     .unwrap_or_default();
@@ -227,10 +237,7 @@ pub async fn create_message_multipart(
                     "maximum {max_attachments} attachments per message"
                 )));
             }
-            let filename = field
-                .file_name()
-                .unwrap_or("attachment")
-                .to_string();
+            let filename = field.file_name().unwrap_or("attachment").to_string();
             let content_type = field
                 .content_type()
                 .unwrap_or("application/octet-stream")
@@ -325,14 +332,13 @@ pub async fn update_message(
     }
     // Author can always edit their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
-        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages")
-            .await?;
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     }
-    let msg = db::messages::update_message(&state.db, &message_id, &input, state.db_is_postgres).await?;
+    let msg =
+        db::messages::update_message(&state.db, &message_id, &input, state.db_is_postgres).await?;
 
     // Load existing attachments for the response
-    let attachments =
-        db::attachments::get_attachments_for_message(&state.db, &message_id).await?;
+    let attachments = db::attachments::get_attachments_for_message(&state.db, &message_id).await?;
     let json = message_row_to_json_with_attachments(&msg, &attachments, None);
 
     // Broadcast to gateway
@@ -365,13 +371,11 @@ pub async fn delete_message(
     }
     // Author can always delete their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
-        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages")
-            .await?;
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     }
 
     // Delete attachment files from disk before deleting the message
-    let attachments =
-        db::attachments::get_attachments_for_message(&state.db, &message_id).await?;
+    let attachments = db::attachments::get_attachments_for_message(&state.db, &message_id).await?;
     for att in &attachments {
         let _ = storage::delete_file(&state.storage_path, &att.url).await;
     }
@@ -520,7 +524,10 @@ pub async fn search_messages(
             let perms =
                 resolve_channel_permissions(&state.db, &ch.id, &space_id, &user.user_id).await;
             if let Ok(perms) = perms {
-                if perms.iter().any(|p| p == "administrator" || p == "view_channel") {
+                if perms
+                    .iter()
+                    .any(|p| p == "administrator" || p == "view_channel")
+                {
                     ids.push(ch.id.clone());
                 }
             }
@@ -730,10 +737,8 @@ fn detect_image_dimensions(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
             let marker = bytes[i + 1];
             if marker == 0xC0 || marker == 0xC2 {
                 if i + 9 < bytes.len() {
-                    let height =
-                        u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as i64;
-                    let width =
-                        u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as i64;
+                    let height = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as i64;
+                    let width = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as i64;
                     return (Some(width), Some(height));
                 }
                 break;

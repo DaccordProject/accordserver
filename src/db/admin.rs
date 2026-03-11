@@ -38,6 +38,7 @@ pub async fn list_all_spaces(
          GROUP BY s.id ORDER BY s.id LIMIT ?"
     );
 
+    let sql = super::q(&sql);
     let mut query = sqlx::query(&sql);
     if let Some(a) = after {
         query = query.bind(a);
@@ -93,7 +94,7 @@ pub async fn admin_update_space(
         } else {
             "INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)"
         };
-        sqlx::query(member_sql)
+        sqlx::query(&super::q(member_sql))
             .bind(owner_id)
             .bind(space_id)
             .execute(pool)
@@ -106,9 +107,8 @@ pub async fn admin_update_space(
 
     if let Some(public) = input.public {
         if sets.is_empty() {
-            let sql = format!(
-                "UPDATE spaces SET public = ?, updated_at = {now_fn} WHERE id = ?"
-            );
+            let sql = format!("UPDATE spaces SET public = ?, updated_at = {now_fn} WHERE id = ?");
+            let sql = super::q(&sql);
             sqlx::query(&sql)
                 .bind(public)
                 .bind(space_id)
@@ -123,6 +123,7 @@ pub async fn admin_update_space(
     sets.push(&updated_at_set);
     let set_clause = sets.join(", ");
     let sql = format!("UPDATE spaces SET {set_clause} WHERE id = ?");
+    let sql = super::q(&sql);
     let mut query = sqlx::query(&sql);
     for v in &str_values {
         query = query.bind(v);
@@ -171,6 +172,7 @@ pub async fn list_all_users(
          ORDER BY u.id LIMIT ?"
     );
 
+    let sql = super::q(&sql);
     let mut query = sqlx::query(&sql);
     if let Some(a) = after {
         query = query.bind(a);
@@ -243,6 +245,7 @@ pub async fn admin_update_user(
     sets.push(&updated_at_set);
     let set_clause = sets.join(", ");
     let sql = format!("UPDATE users SET {set_clause} WHERE id = ?");
+    let sql = super::q(&sql);
     let mut query = sqlx::query(&sql);
     for v in &str_values {
         query = query.bind(v);
@@ -266,7 +269,7 @@ pub async fn count_admins(pool: &AnyPool) -> Result<i64, AppError> {
 pub async fn delete_user(pool: &AnyPool, user_id: &str) -> Result<(), AppError> {
     // Check the user doesn't own any spaces
     let owned: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM spaces WHERE owner_id = ?")
+        sqlx::query_scalar(&super::q("SELECT COUNT(*) FROM spaces WHERE owner_id = ?"))
             .bind(user_id)
             .fetch_one(pool)
             .await?;
@@ -277,59 +280,67 @@ pub async fn delete_user(pool: &AnyPool, user_id: &str) -> Result<(), AppError> 
     }
 
     // Manual cascade deletion
-    sqlx::query("DELETE FROM user_tokens WHERE user_id = ?")
+    sqlx::query(&super::q("DELETE FROM user_tokens WHERE user_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM bot_tokens WHERE user_id = ?")
+    sqlx::query(&super::q("DELETE FROM bot_tokens WHERE user_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM applications WHERE owner_id = ?")
+    sqlx::query(&super::q("DELETE FROM applications WHERE owner_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM reactions WHERE user_id = ?")
+    sqlx::query(&super::q("DELETE FROM reactions WHERE user_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM dm_participants WHERE user_id = ?")
+    sqlx::query(&super::q("DELETE FROM dm_participants WHERE user_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM member_roles WHERE user_id = ?")
+    sqlx::query(&super::q("DELETE FROM member_roles WHERE user_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM members WHERE user_id = ?")
+    sqlx::query(&super::q("DELETE FROM members WHERE user_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM bans WHERE user_id = ?")
+    sqlx::query(&super::q("DELETE FROM bans WHERE user_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("UPDATE bans SET banned_by = NULL WHERE banned_by = ?")
+    sqlx::query(&super::q(
+        "UPDATE bans SET banned_by = NULL WHERE banned_by = ?",
+    ))
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(&super::q(
+        "UPDATE invites SET inviter_id = NULL WHERE inviter_id = ?",
+    ))
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(&super::q(
+        "UPDATE emojis SET creator_id = NULL WHERE creator_id = ?",
+    ))
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(&super::q(
+        "UPDATE channels SET owner_id = NULL WHERE owner_id = ?",
+    ))
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(&super::q("DELETE FROM messages WHERE author_id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;
-    sqlx::query("UPDATE invites SET inviter_id = NULL WHERE inviter_id = ?")
-        .bind(user_id)
-        .execute(pool)
-        .await?;
-    sqlx::query("UPDATE emojis SET creator_id = NULL WHERE creator_id = ?")
-        .bind(user_id)
-        .execute(pool)
-        .await?;
-    sqlx::query("UPDATE channels SET owner_id = NULL WHERE owner_id = ?")
-        .bind(user_id)
-        .execute(pool)
-        .await?;
-    sqlx::query("DELETE FROM messages WHERE author_id = ?")
-        .bind(user_id)
-        .execute(pool)
-        .await?;
-    sqlx::query("DELETE FROM users WHERE id = ?")
+    sqlx::query(&super::q("DELETE FROM users WHERE id = ?"))
         .bind(user_id)
         .execute(pool)
         .await?;

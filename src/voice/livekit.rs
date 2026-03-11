@@ -69,10 +69,7 @@ impl LiveKitClient {
         .await
         {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(format!(
-                "LiveKit API error at {}: {}",
-                self.internal_url, e
-            )),
+            Ok(Err(e)) => Err(format!("LiveKit API error at {}: {}", self.internal_url, e)),
             Err(_) => Err(format!(
                 "LiveKit unreachable at {} (timed out after 5s)",
                 self.internal_url
@@ -97,8 +94,17 @@ impl LiveKitClient {
 
     pub async fn remove_participant(&self, channel_id: &str, user_id: &str) {
         let room_name = Self::room_name(channel_id);
-        if let Err(e) = self.room_client.remove_participant(&room_name, user_id).await {
-            tracing::warn!("Failed to remove participant {} from {}: {}", user_id, room_name, e);
+        if let Err(e) = self
+            .room_client
+            .remove_participant(&room_name, user_id)
+            .await
+        {
+            tracing::warn!(
+                "Failed to remove participant {} from {}: {}",
+                user_id,
+                room_name,
+                e
+            );
         }
     }
 

@@ -41,8 +41,14 @@ pub async fn create_sound(
 
     // Save audio file
     let id = crate::snowflake::generate();
-    let (audio_path, content_type, size) =
-        storage::save_base64_audio(&state.storage_path, &space_id, &id, &input.audio, max_sound_size).await?;
+    let (audio_path, content_type, size) = storage::save_base64_audio(
+        &state.storage_path,
+        &space_id,
+        &id,
+        &input.audio,
+        max_sound_size,
+    )
+    .await?;
 
     let sound = db::soundboard::create_sound(
         &state.db,
@@ -83,7 +89,8 @@ pub async fn update_sound(
     Json(input): Json<UpdateSound>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_soundboard").await?;
-    let sound = db::soundboard::update_sound(&state.db, &sound_id, &input, state.db_is_postgres).await?;
+    let sound =
+        db::soundboard::update_sound(&state.db, &sound_id, &input, state.db_is_postgres).await?;
 
     // Broadcast to gateway
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {

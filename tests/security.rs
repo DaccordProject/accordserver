@@ -681,7 +681,7 @@ async fn test_expired_token() {
     let expired_token = accordserver::middleware::auth::generate_token();
     let token_hash = accordserver::middleware::auth::create_token_hash(&expired_token);
     sqlx::query(
-        "INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, '2020-01-01T00:00:00')",
+        &accordserver::db::q("INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, '2020-01-01T00:00:00')"),
     )
     .bind(&token_hash)
     .bind(&user.user.id)
@@ -963,9 +963,7 @@ async fn test_update_member_role_respects_hierarchy() {
     let mod_role = server
         .create_role(&space_id, "mod", &["manage_roles", "manage_nicknames"])
         .await;
-    server
-        .assign_role(&space_id, &bob.user.id, &mod_role)
-        .await;
+    server.assign_role(&space_id, &bob.user.id, &mod_role).await;
 
     // Alice (owner, position MAX) is above Bob — Bob cannot change Alice's roles
     let req = authenticated_json_request(
@@ -999,9 +997,7 @@ async fn test_create_role_cannot_grant_permissions_actor_lacks() {
             &["manage_roles", "view_channel", "send_messages"],
         )
         .await;
-    server
-        .assign_role(&space_id, &bob.user.id, &mod_role)
-        .await;
+    server.assign_role(&space_id, &bob.user.id, &mod_role).await;
 
     // Bob tries to create a role with administrator → 403
     let req = authenticated_json_request(
@@ -1049,9 +1045,7 @@ async fn test_update_role_cannot_grant_permissions_actor_lacks() {
     let mod_role = server
         .create_role(&space_id, "mod", &["manage_roles", "view_channel"])
         .await;
-    server
-        .assign_role(&space_id, &bob.user.id, &mod_role)
-        .await;
+    server.assign_role(&space_id, &bob.user.id, &mod_role).await;
 
     // Create a low-privilege role Bob can manage
     let low_role = server
@@ -1105,10 +1099,9 @@ async fn test_reorder_roles_cannot_affect_other_space() {
         .await;
 
     // Get the role's original position
-    let role_before =
-        accordserver::db::roles::get_role_row(server.pool(), &role_b)
-            .await
-            .unwrap();
+    let role_before = accordserver::db::roles::get_role_row(server.pool(), &role_b)
+        .await
+        .unwrap();
 
     // Alice tries to reorder Space B's role from Space A's endpoint
     let req = authenticated_json_request(
@@ -1121,10 +1114,9 @@ async fn test_reorder_roles_cannot_affect_other_space() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Verify the role in Space B was NOT changed
-    let role_after =
-        accordserver::db::roles::get_role_row(server.pool(), &role_b)
-            .await
-            .unwrap();
+    let role_after = accordserver::db::roles::get_role_row(server.pool(), &role_b)
+        .await
+        .unwrap();
     assert_eq!(role_before.position, role_after.position);
 }
 
@@ -1139,10 +1131,9 @@ async fn test_reorder_channels_cannot_affect_other_space() {
     let channel_b = server.create_channel(&space_b, "secret").await;
 
     // Get the channel's original position
-    let ch_before =
-        accordserver::db::channels::get_channel_row(server.pool(), &channel_b)
-            .await
-            .unwrap();
+    let ch_before = accordserver::db::channels::get_channel_row(server.pool(), &channel_b)
+        .await
+        .unwrap();
 
     // Alice tries to reorder Space B's channel from Space A's endpoint
     let req = authenticated_json_request(
@@ -1155,10 +1146,9 @@ async fn test_reorder_channels_cannot_affect_other_space() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Verify the channel in Space B was NOT changed
-    let ch_after =
-        accordserver::db::channels::get_channel_row(server.pool(), &channel_b)
-            .await
-            .unwrap();
+    let ch_after = accordserver::db::channels::get_channel_row(server.pool(), &channel_b)
+        .await
+        .unwrap();
     assert_eq!(ch_before.position, ch_after.position);
 }
 
@@ -1176,10 +1166,9 @@ async fn test_update_role_ignores_position_field() {
         .create_role(&space_id, "test-role", &["view_channel"])
         .await;
 
-    let role_before =
-        accordserver::db::roles::get_role_row(server.pool(), &role_id)
-            .await
-            .unwrap();
+    let role_before = accordserver::db::roles::get_role_row(server.pool(), &role_id)
+        .await
+        .unwrap();
 
     // Try to set position via update_role
     let req = authenticated_json_request(
@@ -1192,10 +1181,9 @@ async fn test_update_role_ignores_position_field() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Position should remain unchanged
-    let role_after =
-        accordserver::db::roles::get_role_row(server.pool(), &role_id)
-            .await
-            .unwrap();
+    let role_after = accordserver::db::roles::get_role_row(server.pool(), &role_id)
+        .await
+        .unwrap();
     assert_eq!(role_before.position, role_after.position);
 }
 
@@ -1296,9 +1284,7 @@ async fn test_manager_can_list_space_invites() {
     let mgr_role = server
         .create_role(&space_id, "channel-mgr", &["manage_channels"])
         .await;
-    server
-        .assign_role(&space_id, &bob.user.id, &mgr_role)
-        .await;
+    server.assign_role(&space_id, &bob.user.id, &mgr_role).await;
 
     let req = authenticated_request(
         Method::GET,
@@ -1316,11 +1302,11 @@ async fn test_manager_can_list_space_invites() {
 /// A tiny 1x1 PNG as base64 data URI for testing.
 fn test_png_data_uri() -> String {
     let png_bytes: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
-        0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
-        0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC,
-        0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC, 0x33, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
     let b64 = simple_base64_encode(png_bytes);
     format!("data:image/png;base64,{b64}")
@@ -1543,7 +1529,11 @@ async fn test_owner_can_update_channel() {
         &json!({ "name": "renamed-channel", "topic": "new topic" }),
     );
     let response = server.router().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "space owner should be able to update channel");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "space owner should be able to update channel"
+    );
 }
 
 #[tokio::test]
@@ -1563,7 +1553,11 @@ async fn test_instance_admin_can_update_channel() {
         &json!({ "name": "admin-renamed", "topic": "admin topic" }),
     );
     let response = server.router().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "instance admin should be able to update channel");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "instance admin should be able to update channel"
+    );
 }
 
 // =========================================================================
@@ -1907,9 +1901,7 @@ async fn test_kick_equal_position_forbidden() {
     server
         .assign_role(&space_id, &alice.user.id, &mod_role)
         .await;
-    server
-        .assign_role(&space_id, &bob.user.id, &mod_role)
-        .await;
+    server.assign_role(&space_id, &bob.user.id, &mod_role).await;
 
     // Alice tries to kick Bob (same position) → 403
     let req = authenticated_request(
@@ -2098,7 +2090,9 @@ async fn test_banned_user_cannot_rejoin_public_space() {
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;
     let bob = server.create_user_with_token("bob").await;
-    let space_id = server.create_public_space(&alice.user.id, "PublicBan").await;
+    let space_id = server
+        .create_public_space(&alice.user.id, "PublicBan")
+        .await;
     server.add_member(&space_id, &bob.user.id).await;
 
     // Ban Bob
@@ -2193,9 +2187,7 @@ async fn test_group_dm_exceed_participant_limit() {
     // Create 10 other users (alice + 10 = 11, exceeds 10 max)
     let mut recipient_ids = Vec::new();
     for i in 0..10 {
-        let user = server
-            .create_user_with_token(&format!("user{i}"))
-            .await;
+        let user = server.create_user_with_token(&format!("user{i}")).await;
         recipient_ids.push(serde_json::Value::String(user.user.id));
     }
 
@@ -2421,9 +2413,7 @@ async fn test_non_owner_cannot_delete_space() {
     let role_id = server
         .create_role(&space_id, "manager", &["manage_space", "view_channel"])
         .await;
-    server
-        .assign_role(&space_id, &bob.user.id, &role_id)
-        .await;
+    server.assign_role(&space_id, &bob.user.id, &role_id).await;
 
     // Bob (manage_space but not owner) tries to delete → 403
     let req = authenticated_request(
@@ -2685,7 +2675,11 @@ async fn test_login_successful_clears_failure_counter() {
         &json!({ "username": "recovery", "password": "correctpassword1" }),
     );
     let response = app.oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "correct password must succeed");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "correct password must succeed"
+    );
 
     // After clearing, another bad attempt should be allowed (not rate-limited)
     let app = server.router();
@@ -2695,7 +2689,11 @@ async fn test_login_successful_clears_failure_counter() {
         &json!({ "username": "recovery", "password": "wrongpassword" }),
     );
     let response = app.oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "fresh failure should be 401");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "fresh failure should be 401"
+    );
 }
 
 #[tokio::test]
@@ -2980,10 +2978,22 @@ async fn test_get_user_self_returns_full_profile() {
     let data = &body["data"];
 
     // Full profile includes sensitive fields
-    assert!(data.get("is_admin").is_some(), "self-lookup should include is_admin");
-    assert!(data.get("mfa_enabled").is_some(), "self-lookup should include mfa_enabled");
-    assert!(data.get("disabled").is_some(), "self-lookup should include disabled");
-    assert!(data.get("flags").is_some(), "self-lookup should include flags");
+    assert!(
+        data.get("is_admin").is_some(),
+        "self-lookup should include is_admin"
+    );
+    assert!(
+        data.get("mfa_enabled").is_some(),
+        "self-lookup should include mfa_enabled"
+    );
+    assert!(
+        data.get("disabled").is_some(),
+        "self-lookup should include disabled"
+    );
+    assert!(
+        data.get("flags").is_some(),
+        "self-lookup should include flags"
+    );
 }
 
 #[tokio::test]
@@ -3004,10 +3014,22 @@ async fn test_get_user_other_strips_sensitive_fields() {
     let data = &body["data"];
 
     // Public profile must NOT include sensitive fields
-    assert!(data.get("is_admin").is_none(), "third-party lookup must not expose is_admin");
-    assert!(data.get("mfa_enabled").is_none(), "third-party lookup must not expose mfa_enabled");
-    assert!(data.get("disabled").is_none(), "third-party lookup must not expose disabled");
-    assert!(data.get("flags").is_none(), "third-party lookup must not expose flags");
+    assert!(
+        data.get("is_admin").is_none(),
+        "third-party lookup must not expose is_admin"
+    );
+    assert!(
+        data.get("mfa_enabled").is_none(),
+        "third-party lookup must not expose mfa_enabled"
+    );
+    assert!(
+        data.get("disabled").is_none(),
+        "third-party lookup must not expose disabled"
+    );
+    assert!(
+        data.get("flags").is_none(),
+        "third-party lookup must not expose flags"
+    );
 
     // Public fields should still be present
     assert!(data.get("id").is_some());
@@ -3057,7 +3079,11 @@ async fn test_concurrent_mfa_tickets_are_invalidated() {
     let reg_body = json!({ "username": "alice_mfa", "password": "correct-horse-battery" });
     let resp = server
         .router()
-        .oneshot(json_request(Method::POST, "/api/v1/auth/register", &reg_body))
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/auth/register",
+            &reg_body,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3066,18 +3092,24 @@ async fn test_concurrent_mfa_tickets_are_invalidated() {
 
     // Enable TOTP in the DB with a dummy secret (content irrelevant — we only
     // need the login flow to issue MFA tickets, not to complete TOTP verification).
-    sqlx::query("UPDATE users SET totp_enabled = 1, totp_secret = 'DUMMYBASE32SECRET' WHERE id = ?")
-        .bind(&user_id)
-        .execute(server.pool())
-        .await
-        .expect("failed to enable TOTP");
+    sqlx::query(&accordserver::db::q(
+        "UPDATE users SET totp_enabled = 1, totp_secret = 'DUMMYBASE32SECRET' WHERE id = ?",
+    ))
+    .bind(&user_id)
+    .execute(server.pool())
+    .await
+    .expect("failed to enable TOTP");
 
     let login_body = json!({ "username": "alice_mfa", "password": "correct-horse-battery" });
 
     // First login → ticket1
     let resp = server
         .router()
-        .oneshot(json_request(Method::POST, "/api/v1/auth/login", &login_body))
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/auth/login",
+            &login_body,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3088,7 +3120,11 @@ async fn test_concurrent_mfa_tickets_are_invalidated() {
     // Second login → ticket2. This must invalidate ticket1.
     let resp = server
         .router()
-        .oneshot(json_request(Method::POST, "/api/v1/auth/login", &login_body))
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/auth/login",
+            &login_body,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3102,13 +3138,20 @@ async fn test_concurrent_mfa_tickets_are_invalidated() {
         .iter()
         .filter(|e| e.value().user_id == user_id)
         .count();
-    assert_eq!(ticket_count, 1, "old MFA ticket must be invalidated on re-login");
+    assert_eq!(
+        ticket_count, 1,
+        "old MFA ticket must be invalidated on re-login"
+    );
 
     // ticket1 must now be rejected by the MFA endpoint.
     let mfa_body = json!({ "ticket": ticket1, "code": "000000" });
     let resp = server
         .router()
-        .oneshot(json_request(Method::POST, "/api/v1/auth/login/mfa", &mfa_body))
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/auth/login/mfa",
+            &mfa_body,
+        ))
         .await
         .unwrap();
     assert_eq!(

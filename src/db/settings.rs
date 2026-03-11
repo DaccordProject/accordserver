@@ -77,7 +77,11 @@ pub async fn update_settings(
     let updated_at_set = format!("updated_at = {now_fn}");
     sets.push(&updated_at_set);
 
-    let sql = format!("UPDATE server_settings SET {} WHERE id = 1", sets.join(", "));
+    let sql = format!(
+        "UPDATE server_settings SET {} WHERE id = 1",
+        sets.join(", ")
+    );
+    let sql = super::q(&sql);
 
     let mut query = sqlx::query(&sql);
     if let Some(v) = input.max_emoji_size {

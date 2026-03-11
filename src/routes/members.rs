@@ -135,9 +135,14 @@ pub async fn update_member(
             if let Some(ref old_avatar) = old_member.avatar {
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
-            let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "avatars", &entity_id, avatar, max_avatar_size)
-                    .await?;
+            let (url, _, _, _) = storage::save_avatar_image(
+                &state.storage_path,
+                "avatars",
+                &entity_id,
+                avatar,
+                max_avatar_size,
+            )
+            .await?;
             input.avatar = Some(url);
         } else if avatar.is_empty() {
             let old_member = db::members::get_member_row(&state.db, &space_id, &user_id).await?;
@@ -220,9 +225,14 @@ pub async fn update_own_member(
             if let Some(ref old_avatar) = old_member.avatar {
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
-            let (url, _, _, _) =
-                storage::save_avatar_image(&state.storage_path, "avatars", &entity_id, avatar, max_avatar_size)
-                    .await?;
+            let (url, _, _, _) = storage::save_avatar_image(
+                &state.storage_path,
+                "avatars",
+                &entity_id,
+                avatar,
+                max_avatar_size,
+            )
+            .await?;
             input.avatar = Some(url);
         } else if avatar.is_empty() {
             let old_member =
@@ -275,7 +285,14 @@ pub async fn add_role(
         return Err(AppError::NotFound("role not found in this space".into()));
     }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
-    db::members::add_role_to_member(&state.db, &space_id, &user_id, &role_id, state.db_is_postgres).await?;
+    db::members::add_role_to_member(
+        &state.db,
+        &space_id,
+        &user_id,
+        &role_id,
+        state.db_is_postgres,
+    )
+    .await?;
 
     // Broadcast member.update to the space
     let row = db::members::get_member_row(&state.db, &space_id, &user_id).await?;

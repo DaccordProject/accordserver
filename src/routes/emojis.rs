@@ -41,9 +41,14 @@ pub async fn create_emoji(
     let max_emoji_size = state.settings.load().max_emoji_size as usize;
 
     // Save the image file
-    let (image_path, content_type, size, animated) =
-        storage::save_base64_image(&state.storage_path, &space_id, &input.name, &input.image, max_emoji_size)
-            .await?;
+    let (image_path, content_type, size, animated) = storage::save_base64_image(
+        &state.storage_path,
+        &space_id,
+        &input.name,
+        &input.image,
+        max_emoji_size,
+    )
+    .await?;
 
     let emoji = db::emojis::create_emoji(
         &state.db,
@@ -62,16 +67,23 @@ pub async fn create_emoji(
         // The file was saved with input.name, but we want it named by ID
         // Re-save with the correct ID-based path
         let _ = storage::delete_file(&state.storage_path, &image_path).await;
-        let (real_path, _, _, _) =
-            storage::save_base64_image(&state.storage_path, &space_id, emoji_id, &input.image, max_emoji_size)
-                .await?;
+        let (real_path, _, _, _) = storage::save_base64_image(
+            &state.storage_path,
+            &space_id,
+            emoji_id,
+            &input.image,
+            max_emoji_size,
+        )
+        .await?;
 
         // Update the DB with the correct path
-        sqlx::query("UPDATE emojis SET image_path = ? WHERE id = ?")
-            .bind(&real_path)
-            .bind(emoji_id)
-            .execute(&state.db)
-            .await?;
+        sqlx::query(&crate::db::q(
+            "UPDATE emojis SET image_path = ? WHERE id = ?",
+        ))
+        .bind(&real_path)
+        .bind(emoji_id)
+        .execute(&state.db)
+        .await?;
 
         // Re-fetch to get the updated path
         let emoji = db::emojis::get_emoji(&state.db, emoji_id).await?;
@@ -126,7 +138,8 @@ pub async fn update_emoji(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_emojis").await?;
     db::emojis::require_emoji_in_space(&state.db, &emoji_id, &space_id).await?;
-    let emoji = db::emojis::update_emoji(&state.db, &emoji_id, &input, state.db_is_postgres).await?;
+    let emoji =
+        db::emojis::update_emoji(&state.db, &emoji_id, &input, state.db_is_postgres).await?;
 
     // Broadcast to gateway
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {

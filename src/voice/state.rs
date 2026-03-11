@@ -2,6 +2,7 @@ use crate::models::voice::VoiceState;
 use crate::state::AppState;
 
 /// Join a voice channel. Returns the new VoiceState and the previous channel_id if the user moved.
+#[allow(clippy::too_many_arguments)]
 pub fn join_voice_channel(
     state: &AppState,
     user_id: &str,

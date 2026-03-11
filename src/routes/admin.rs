@@ -150,7 +150,8 @@ pub async fn update_user(
         }
     }
 
-    let user = db::admin::admin_update_user(&state.db, &user_id, &input, state.db_is_postgres).await?;
+    let user =
+        db::admin::admin_update_user(&state.db, &user_id, &input, state.db_is_postgres).await?;
     Ok(Json(serde_json::json!({ "data": user })))
 }
 
@@ -228,9 +229,9 @@ pub async fn reset_user_password(
         .to_string();
 
     // Update password and set force_password_reset flag
-    sqlx::query(
+    sqlx::query(&crate::db::q(
         "UPDATE users SET password_hash = ?, force_password_reset = TRUE WHERE id = ?",
-    )
+    ))
     .bind(&password_hash)
     .bind(&user_id)
     .execute(&state.db)
@@ -238,21 +239,23 @@ pub async fn reset_user_password(
     .map_err(AppError::from)?;
 
     // Revoke all existing sessions so the user must log in with the new password
-    sqlx::query("DELETE FROM user_tokens WHERE user_id = ?")
+    sqlx::query(&crate::db::q("DELETE FROM user_tokens WHERE user_id = ?"))
         .bind(&user_id)
         .execute(&state.db)
         .await
         .map_err(AppError::from)?;
 
     // Disable 2FA so the reset password can actually be used to log in
-    sqlx::query("UPDATE users SET totp_secret = NULL, totp_enabled = FALSE WHERE id = ?")
-        .bind(&user_id)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::from)?;
+    sqlx::query(&crate::db::q(
+        "UPDATE users SET totp_secret = NULL, totp_enabled = FALSE WHERE id = ?",
+    ))
+    .bind(&user_id)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::from)?;
 
     // Clean up backup codes
-    sqlx::query("DELETE FROM backup_codes WHERE user_id = ?")
+    sqlx::query(&crate::db::q("DELETE FROM backup_codes WHERE user_id = ?"))
         .bind(&user_id)
         .execute(&state.db)
         .await

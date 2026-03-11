@@ -64,7 +64,9 @@ pub async fn create_role(
     // Input validation
     let name = input.name.trim();
     if name.is_empty() || name.len() > 100 {
-        return Err(AppError::BadRequest("role name must be between 1 and 100 characters".into()));
+        return Err(AppError::BadRequest(
+            "role name must be between 1 and 100 characters".into(),
+        ));
     }
     if let Some(ref perms) = input.permissions {
         validate_role_permissions(&state.db, &space_id, &auth, perms).await?;
@@ -105,7 +107,9 @@ pub async fn delete_role(
         return Err(AppError::NotFound("role not found in this space".into()));
     }
     if target_role.position == 0 {
-        return Err(AppError::Forbidden("cannot delete the @everyone role".into()));
+        return Err(AppError::Forbidden(
+            "cannot delete the @everyone role".into(),
+        ));
     }
     require_role_hierarchy(&state.db, &space_id, &auth.user_id, target_role.position).await?;
     db::roles::delete_role(&state.db, &role_id).await?;

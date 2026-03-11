@@ -23,8 +23,8 @@ use accordserver::snowflake;
 /// Hash a password with the same Argon2id params used by the auth routes.
 fn hash_password(password: &str) -> Result<String, Box<dyn Error>> {
     let salt = SaltString::generate(&mut OsRng);
-    let params = argon2::Params::new(19456, 3, 1, None)
-        .map_err(|e| format!("argon2 params: {e}"))?;
+    let params =
+        argon2::Params::new(19456, 3, 1, None).map_err(|e| format!("argon2 params: {e}"))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let hash = argon2
         .hash_password(password.as_bytes(), &salt)
@@ -52,12 +52,14 @@ async fn create_bearer_token(
         .format("%Y-%m-%dT%H:%M:%S+00:00")
         .to_string();
 
-    sqlx::query("INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)")
-        .bind(&token_hash)
-        .bind(user_id)
-        .bind(&expires_at)
-        .execute(pool)
-        .await?;
+    sqlx::query(&accordserver::db::q(
+        "INSERT INTO user_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+    ))
+    .bind(&token_hash)
+    .bind(user_id)
+    .bind(&expires_at)
+    .execute(pool)
+    .await?;
 
     Ok(token)
 }
@@ -93,11 +95,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let seed_users = [
-        SeedUser { username: "alice", display_name: "Alice", is_admin: true },
-        SeedUser { username: "bob", display_name: "Bob", is_admin: false },
-        SeedUser { username: "charlie", display_name: "Charlie", is_admin: false },
-        SeedUser { username: "diana", display_name: "Diana", is_admin: false },
-        SeedUser { username: "eve", display_name: "Eve", is_admin: false },
+        SeedUser {
+            username: "alice",
+            display_name: "Alice",
+            is_admin: true,
+        },
+        SeedUser {
+            username: "bob",
+            display_name: "Bob",
+            is_admin: false,
+        },
+        SeedUser {
+            username: "charlie",
+            display_name: "Charlie",
+            is_admin: false,
+        },
+        SeedUser {
+            username: "diana",
+            display_name: "Diana",
+            is_admin: false,
+        },
+        SeedUser {
+            username: "eve",
+            display_name: "Eve",
+            is_admin: false,
+        },
     ];
 
     let password_hash = hash_password("password")?;
@@ -106,7 +128,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for su in &seed_users {
         let id = snowflake::generate();
         sqlx::query(
-            "INSERT INTO users (id, username, display_name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)"
+            &accordserver::db::q("INSERT INTO users (id, username, display_name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)")
         )
         .bind(&id)
         .bind(su.username)
@@ -153,9 +175,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // create_space already created: @everyone (pos 0), Moderator (pos 1), Admin (pos 2)
     // Fetch existing roles to get their IDs
     let roles = db::roles::list_roles(&pool, space_id).await?;
-    let moderator_role_id = roles.iter().find(|r| r.name == "Moderator").map(|r| r.id.clone())
+    let moderator_role_id = roles
+        .iter()
+        .find(|r| r.name == "Moderator")
+        .map(|r| r.id.clone())
         .expect("Moderator role should exist");
-    let _admin_role_id = roles.iter().find(|r| r.name == "Admin").map(|r| r.id.clone())
+    let _admin_role_id = roles
+        .iter()
+        .find(|r| r.name == "Admin")
+        .map(|r| r.id.clone())
         .expect("Admin role should exist");
 
     // Create Developer role (green, hoisted)
@@ -200,14 +228,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Role assignments: bob=Moderator, charlie=Developer, diana=Artist+Developer
     db::members::add_role_to_member(&pool, space_id, bob, &moderator_role_id, is_postgres).await?;
-    db::members::add_role_to_member(&pool, space_id, charlie, &developer_role.id, is_postgres).await?;
+    db::members::add_role_to_member(&pool, space_id, charlie, &developer_role.id, is_postgres)
+        .await?;
     db::members::add_role_to_member(&pool, space_id, diana, &artist_role.id, is_postgres).await?;
-    db::members::add_role_to_member(&pool, space_id, diana, &developer_role.id, is_postgres).await?;
+    db::members::add_role_to_member(&pool, space_id, diana, &developer_role.id, is_postgres)
+        .await?;
 
     // ── Delete auto-created #general channel ───────────────────────
     // create_space makes a default #general — we'll recreate it under a category
     let channels = db::channels::list_channels_in_space(&pool, space_id).await?;
-    if let Some(auto_general) = channels.iter().find(|c| c.name.as_deref() == Some("general")) {
+    if let Some(auto_general) = channels
+        .iter()
+        .find(|c| c.name.as_deref() == Some("general"))
+    {
         db::channels::delete_channel(&pool, &auto_general.id).await?;
     }
 
@@ -511,21 +544,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
         None, None,
     ).await?;
 
-    msg(&pool, &ch_welcome.id, bob, space_id,
+    msg(
+        &pool,
+        &ch_welcome.id,
+        bob,
+        space_id,
         "Hey everyone! Excited to be part of this community.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_welcome.id, charlie, space_id,
+    msg(
+        &pool,
+        &ch_welcome.id,
+        charlie,
+        space_id,
         "This is awesome. Can't wait to start building things!",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_welcome.id, diana, space_id,
+    msg(
+        &pool,
+        &ch_welcome.id,
+        diana,
+        space_id,
         "Hello! I'm Diana, I do art and some programming. Nice to meet you all!",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_welcome.id, eve, space_id,
+    msg(
+        &pool,
+        &ch_welcome.id,
+        eve,
+        space_id,
         "Hi! Just joined. Looking forward to learning more about Accord.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
     // ── Messages: #rules ───────────────────────────────────────────
     let rules_msg = msg(
@@ -550,74 +611,179 @@ async fn main() -> Result<(), Box<dyn Error>> {
         None, None).await?;
 
     // ── Messages: #general ─────────────────────────────────────────
-    msg(&pool, &ch_general.id, bob, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        bob,
+        space_id,
         "Good morning everyone! How's everyone doing today?",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    let gen_alice = msg(&pool, &ch_general.id, alice, space_id,
+    let gen_alice = msg(
+        &pool,
+        &ch_general.id,
+        alice,
+        space_id,
         "Morning Bob! Pretty good, just pushed some new features.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_general.id, charlie, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        charlie,
+        space_id,
         "Nice! What kind of features?",
-        Some(&gen_alice), None).await?;
+        Some(&gen_alice),
+        None,
+    )
+    .await?;
 
     msg(&pool, &ch_general.id, alice, space_id,
         "Thread replies and some performance improvements to the gateway. Should make conversations much easier to follow.",
         None, None).await?;
 
-    msg(&pool, &ch_general.id, diana, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        diana,
+        space_id,
         "That sounds great! I've been wanting threads for a while.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_general.id, eve, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        eve,
+        space_id,
         "Has anyone tried the voice channels yet? They work really well!",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_general.id, bob, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        bob,
+        space_id,
         "Yeah the voice quality is surprisingly good. LiveKit was a solid choice.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_general.id, charlie, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        charlie,
+        space_id,
         "Agreed. I tested it with a few friends yesterday and it was smooth.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
     msg(&pool, &ch_general.id, diana, space_id,
         "Anyone up for some gaming tonight? I was thinking we could try out the Gaming voice channel.",
         None, None).await?;
 
-    msg(&pool, &ch_general.id, eve, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        eve,
+        space_id,
         "I'm in! What game were you thinking?",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_general.id, diana, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        diana,
+        space_id,
         "Maybe some Minecraft or Terraria? Something chill.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_general.id, bob, space_id,
+    msg(
+        &pool,
+        &ch_general.id,
+        bob,
+        space_id,
         "Count me in for Terraria!",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
     // ── Messages: #off-topic ───────────────────────────────────────
-    msg(&pool, &ch_offtopic.id, eve, space_id,
+    msg(
+        &pool,
+        &ch_offtopic.id,
+        eve,
+        space_id,
         "What's everyone's favorite programming language?",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_offtopic.id, charlie, space_id,
+    msg(
+        &pool,
+        &ch_offtopic.id,
+        charlie,
+        space_id,
         "Rust, obviously! Though I have a soft spot for Python too.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_offtopic.id, bob, space_id,
+    msg(
+        &pool,
+        &ch_offtopic.id,
+        bob,
+        space_id,
         "TypeScript for me. Can't beat that developer experience.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_offtopic.id, diana, space_id,
+    msg(
+        &pool,
+        &ch_offtopic.id,
+        diana,
+        space_id,
         "GDScript for game dev, but I've been learning Rust lately.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_offtopic.id, alice, space_id,
+    msg(
+        &pool,
+        &ch_offtopic.id,
+        alice,
+        space_id,
         "Rust is what powers Accord, so I might be biased ;)",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
     // ── Messages: #introductions ───────────────────────────────────
     msg(&pool, &ch_intros.id, alice, space_id,
@@ -647,25 +813,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
         None, None,
     ).await?;
 
-    msg(&pool, &ch_programming.id, alice, space_id,
+    msg(
+        &pool,
+        &ch_programming.id,
+        alice,
+        space_id,
         "Tokio is the de facto standard at this point. The ecosystem support is unmatched.",
-        Some(&prog_thread_start), Some(&prog_thread_start)).await?;
+        Some(&prog_thread_start),
+        Some(&prog_thread_start),
+    )
+    .await?;
 
-    msg(&pool, &ch_programming.id, charlie, space_id,
+    msg(
+        &pool,
+        &ch_programming.id,
+        charlie,
+        space_id,
         "That's what I figured. The documentation is also way better.",
-        None, Some(&prog_thread_start)).await?;
+        None,
+        Some(&prog_thread_start),
+    )
+    .await?;
 
-    msg(&pool, &ch_programming.id, eve, space_id,
+    msg(
+        &pool,
+        &ch_programming.id,
+        eve,
+        space_id,
         "I've been reading the tokio internals — the work-stealing scheduler is really clever.",
-        None, Some(&prog_thread_start)).await?;
+        None,
+        Some(&prog_thread_start),
+    )
+    .await?;
 
-    msg(&pool, &ch_programming.id, diana, space_id,
+    msg(
+        &pool,
+        &ch_programming.id,
+        diana,
+        space_id,
         "Has anyone used SQLx with tokio? How's the experience?",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_programming.id, alice, space_id,
+    msg(
+        &pool,
+        &ch_programming.id,
+        alice,
+        space_id,
         "It's great! We use it in Accord. Compile-time query checking is a game changer.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
     msg(&pool, &ch_programming.id, bob, space_id,
         "Just discovered `cargo clippy` suggestions can be auto-applied with `cargo clippy --fix`. Mind blown.",
@@ -673,22 +874,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Messages: #help ────────────────────────────────────────────
     let help_q = msg(
-        &pool, &ch_help.id, eve, space_id,
+        &pool,
+        &ch_help.id,
+        eve,
+        space_id,
         "How do I connect to the Accord WebSocket gateway? I'm building a custom client.",
-        None, None,
-    ).await?;
+        None,
+        None,
+    )
+    .await?;
 
     msg(&pool, &ch_help.id, alice, space_id,
         "Connect to `GET /ws`, then you'll receive a HELLO event with a heartbeat interval. Send an IDENTIFY with your token and intents, and you'll get a READY event back!",
         Some(&help_q), None).await?;
 
-    msg(&pool, &ch_help.id, eve, space_id,
+    msg(
+        &pool,
+        &ch_help.id,
+        eve,
+        space_id,
         "Thanks Alice! That worked perfectly.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
-    msg(&pool, &ch_help.id, charlie, space_id,
+    msg(
+        &pool,
+        &ch_help.id,
+        charlie,
+        space_id,
         "Pro tip: make sure to send heartbeats on time or the server will disconnect you.",
-        None, None).await?;
+        None,
+        None,
+    )
+    .await?;
 
     let total_messages = 45;
     println!("  created ~{total_messages} messages across channels");
@@ -717,7 +937,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?)"
     };
     for (message_id, user_id, emoji) in reactions {
-        sqlx::query(reaction_sql)
+        let reaction_sql = accordserver::db::q(reaction_sql);
+        sqlx::query(&reaction_sql)
             .bind(message_id)
             .bind(user_id)
             .bind(emoji)
