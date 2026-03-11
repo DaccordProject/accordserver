@@ -29,7 +29,7 @@ cargo run
 cargo test
 ```
 
-The server creates an `accord.db` SQLite database in the working directory and runs migrations automatically on startup.
+The server creates a SQLite database by default and runs migrations automatically on startup. Set `DATABASE_URL` to a `postgres://` connection string to use PostgreSQL instead (see [Database](#database)).
 
 ## Configuration
 
@@ -37,13 +37,62 @@ All configuration is done via environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `3000` | Server listen port |
-| `DATABASE_URL` | `sqlite:accord.db?mode=rwc` | SQLite connection string |
+| `PORT` | `39099` | Server listen port |
+| `DATABASE_URL` | `sqlite:data/accord.db?mode=rwc` | Database connection string (SQLite or PostgreSQL) |
 | `RUST_LOG` | `accordserver=debug,tower_http=debug` | Tracing log filter |
 | `LIVEKIT_INTERNAL_URL` | | LiveKit server URL for server communication (e.g. `http://livekit:7880`) |
 | `LIVEKIT_EXTERNAL_URL` | | LiveKit server URL for client connections (e.g. `wss://livekit.example.com`) |
 | `LIVEKIT_API_KEY` | | LiveKit API key |
 | `LIVEKIT_API_SECRET` | | LiveKit API secret |
+
+## Database
+
+Accord supports both **SQLite** and **PostgreSQL** as database backends. The backend is chosen automatically based on the `DATABASE_URL` format.
+
+### SQLite (default)
+
+No setup required. The server creates the database file automatically on startup.
+
+```bash
+# Default — creates data/accord.db in the working directory
+DATABASE_URL=sqlite:data/accord.db?mode=rwc
+
+# Docker — persisted via volume mount
+DATABASE_URL=sqlite:/app/data/accord.db?mode=rwc
+```
+
+### PostgreSQL
+
+Set `DATABASE_URL` to a PostgreSQL connection string:
+
+```bash
+DATABASE_URL=postgres://accord:yourpassword@localhost/accord
+```
+
+On first startup the server will automatically:
+1. Connect to the `postgres` maintenance database
+2. Create the application database if it doesn't exist
+3. Grant schema privileges if needed (handles PG 15+ restrictions)
+4. Run all migrations
+
+**Requirements:**
+- The PostgreSQL **role** (user) must already exist — the server cannot create roles
+- The role must have the `CREATEDB` privilege, **or** the database must already exist
+- If the database was created externally, the role should be the database owner for migrations to work
+
+**Password special characters:** If your password contains special characters, URL-encode them in `DATABASE_URL`:
+
+| Character | Encoded |
+|---|---|
+| `!` | `%21` |
+| `@` | `%40` |
+| `#` | `%23` |
+| `$` | `%24` |
+| `%` | `%25` |
+| `&` | `%26` |
+| `/` | `%2F` |
+
+Example: password `hunter2!` becomes `postgres://accord:hunter2%21@localhost/accord`
 
 ## Docker
 
@@ -53,7 +102,7 @@ The server image is published to GHCR:
 ghcr.io/daccordproject/accordserver
 ```
 
-### Docker Compose
+### Docker Compose (SQLite)
 
 ```yaml
 services:
@@ -64,7 +113,6 @@ services:
     volumes:
       - accord-data:/app/data
     environment:
-      PORT: 39099
       DATABASE_URL: sqlite:/app/data/accord.db?mode=rwc
       RUST_LOG: accordserver=debug,tower_http=debug
       LIVEKIT_INTERNAL_URL: http://livekit:7880
@@ -85,6 +133,82 @@ services:
 volumes:
   accord-data:
 ```
+
+### Docker Compose (PostgreSQL)
+
+A ready-to-use compose file is provided at `docker-compose.postgres.yml`:
+
+```bash
+docker compose -f docker-compose.postgres.yml up -d
+```
+
+Or configure it manually:
+
+```yaml
+services:
+  accordserver:
+    image: ghcr.io/daccordproject/accordserver:latest
+    ports:
+      - "39099:39099"
+    volumes:
+      - accord-data:/app/data
+    environment:
+      DATABASE_URL: "postgres://accord:yourpassword@postgres/accord"
+      RUST_LOG: accordserver=debug,tower_http=debug
+      LIVEKIT_INTERNAL_URL: http://livekit:7880
+      LIVEKIT_EXTERNAL_URL: ws://localhost:7880
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+
+  postgres:
+    image: postgres:17
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      # These only take effect on FIRST initialization (empty data directory).
+      # If you change them later, you must wipe the volume or alter the role manually.
+      POSTGRES_USER: accord
+      POSTGRES_PASSWORD: "yourpassword"
+      POSTGRES_DB: accord
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U accord -d accord"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --dev --keys '{"devkey": "secret"}'
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+
+volumes:
+  accord-data:
+  postgres-data:
+```
+
+**Important notes:**
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` only take effect when PostgreSQL initializes a **fresh data directory**. If the volume already has data, changing these values does nothing. To reset: stop the stack, delete the postgres volume, and start again.
+- Always **quote** `POSTGRES_PASSWORD` in YAML if it contains special characters (especially `!`, which is a YAML tag indicator).
+- The password in `POSTGRES_PASSWORD` and `DATABASE_URL` must match. Remember to URL-encode special characters in `DATABASE_URL`.
+- The `healthcheck` and `depends_on: condition: service_healthy` ensure the server waits for PostgreSQL to be ready before connecting.
+
+### Troubleshooting PostgreSQL
+
+| Error | Cause | Fix |
+|---|---|---|
+| `role "X" does not exist` | The PostgreSQL role was never created | The volume has stale data from a previous init. Delete the postgres volume and restart, or create the role manually: `docker compose exec postgres psql -U postgres -c "CREATE ROLE accord WITH LOGIN PASSWORD 'pass';"` |
+| `database "X" does not exist` | The database wasn't created | The server creates it automatically on startup. If it fails, check that the role has `CREATEDB` privilege, or create it manually: `docker compose exec postgres psql -U accord -c "CREATE DATABASE accord;"` |
+| `permission denied for schema public` | PG 15+ restricts schema access | The server handles this automatically. If it still fails, grant manually: `docker compose exec postgres psql -U postgres -d accord -c "GRANT ALL ON SCHEMA public TO accord;"` |
+| `password authentication failed` | Password mismatch between `DATABASE_URL` and Postgres | Ensure passwords match. Check for unquoted `!` in YAML and missing URL-encoding in `DATABASE_URL`. |
+| Changes to `POSTGRES_USER`/`POSTGRES_DB` have no effect | Volume has existing data | PostgreSQL only reads these on first init. Delete the volume: `docker compose down -v` then `docker compose up -d` |
 
 ## Architecture
 

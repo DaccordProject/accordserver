@@ -1,0 +1,97 @@
+# Docker Compose with PostgreSQL backend
+#
+# Usage:
+#   docker compose -f docker-compose.postgres.yml up -d
+#
+# The server will automatically create the database and run migrations on
+# first startup. The PostgreSQL data is persisted in the postgres_data volume.
+#
+# IMPORTANT: Change POSTGRES_PASSWORD and update DATABASE_URL to match.
+# If your password contains special characters, URL-encode them in DATABASE_URL
+# (e.g. ! = %21, @ = %40, # = %23).
+
+services:
+  accordserver:
+    image: ghcr.io/daccordproject/accordserver:latest
+    networks:
+      - app-network
+    volumes:
+      - accordserver_data:/app/data
+    environment:
+      DATABASE_URL: "postgres://accord:changeme@postgres/accord"
+      ACCORD_STORAGE_PATH: /app/data/cdn
+      RUST_LOG: accordserver=debug,tower_http=debug
+      LIVEKIT_INTERNAL_URL: http://livekit:7880
+      LIVEKIT_EXTERNAL_URL: wss://livekit.example.com
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      ACCORD_VOICE_BACKEND: livekit
+      MASTER_SERVER_PUBLIC_URL: https://chat.example.com
+      MASTER_SERVER_NAME: Accord Server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    labels:
+      caddy: chat.example.com
+      caddy.reverse_proxy: "{{upstreams 39099}}"
+
+  postgres:
+    image: postgres:17
+    networks:
+      - app-network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: accord
+      POSTGRES_PASSWORD: "changeme"
+      POSTGRES_DB: accord
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U accord -d accord"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: livekit
+    networks:
+      - app-network
+    command:
+      - "--dev"
+      - "--keys"
+      - "devkey: secret"
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    labels:
+      caddy: livekit.example.com
+      caddy.reverse_proxy: "{{upstreams 7880}}"
+
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:ci-alpine
+    container_name: caddy
+    ports:
+      - "443:443"
+      - "80:80"
+    environment:
+      - CADDY_INGRESS_NETWORKS=app-network
+    networks:
+      - app-network
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - caddy_data:/data
+    restart: unless-stopped
+
+networks:
+  app-network:
+    name: app-network
+    driver: bridge
+    external: true
+
+volumes:
+  caddy_data:
+  accordserver_data:
+  postgres_data:
