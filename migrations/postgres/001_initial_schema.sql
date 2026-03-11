@@ -308,7 +308,7 @@ CREATE TABLE IF NOT EXISTS soundboard_sounds (
     audio_path TEXT,
     audio_content_type TEXT,
     audio_size INTEGER,
-    volume REAL NOT NULL DEFAULT 1.0,
+    volume DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     creator_id TEXT REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
