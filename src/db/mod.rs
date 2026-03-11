@@ -233,6 +233,28 @@ pub async fn create_pool(database_url: &str) -> Result<AnyPool, sqlx::Error> {
         }
     }
 
+    // Diagnostic: verify the parsed connection options before creating the pool.
+    if is_pg {
+        use sqlx::postgres::PgConnectOptions;
+        match PgConnectOptions::from_str(database_url) {
+            Ok(pg_opts) => {
+                tracing::info!(
+                    "AnyPool will connect as user=`{}` host=`{}` port={} db=`{}`",
+                    pg_opts.get_username(),
+                    pg_opts.get_host(),
+                    pg_opts.get_port(),
+                    pg_opts.get_database().unwrap_or("<default>"),
+                );
+                // Verify we can open a raw PgConnection with these exact options.
+                match sqlx::postgres::PgConnection::connect_with(&pg_opts).await {
+                    Ok(_) => tracing::info!("diagnostic: raw PgConnection succeeded"),
+                    Err(e) => tracing::error!("diagnostic: raw PgConnection failed: {e}"),
+                }
+            }
+            Err(e) => tracing::error!("diagnostic: PgConnectOptions parse failed: {e}"),
+        }
+    }
+
     let connect_opts = AnyConnectOptions::from_str(database_url)?;
 
     // In-memory SQLite creates a separate database per connection, so restrict
