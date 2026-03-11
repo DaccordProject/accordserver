@@ -86,6 +86,7 @@ pub async fn update_role(
     let mut sets: Vec<String> = Vec::new();
     let mut str_values: Vec<String> = Vec::new();
     let mut int_vals: Vec<(String, i64)> = Vec::new();
+    let mut bool_vals: Vec<(String, bool)> = Vec::new();
 
     if let Some(ref name) = input.name {
         sets.push("name = ?".to_string());
@@ -105,16 +106,19 @@ pub async fn update_role(
         int_vals.push(("color".to_string(), color));
     }
     if let Some(hoist) = input.hoist {
-        int_vals.push(("hoist".to_string(), hoist as i64));
+        bool_vals.push(("hoist".to_string(), hoist));
     }
     if let Some(position) = input.position {
         int_vals.push(("position".to_string(), position));
     }
     if let Some(mentionable) = input.mentionable {
-        int_vals.push(("mentionable".to_string(), mentionable as i64));
+        bool_vals.push(("mentionable".to_string(), mentionable));
     }
 
     for (col, _) in &int_vals {
+        sets.push(format!("{col} = ?"));
+    }
+    for (col, _) in &bool_vals {
         sets.push(format!("{col} = ?"));
     }
 
@@ -131,6 +135,9 @@ pub async fn update_role(
         q = q.bind(v);
     }
     for (_, val) in &int_vals {
+        q = q.bind(val);
+    }
+    for (_, val) in &bool_vals {
         q = q.bind(val);
     }
     q = q.bind(role_id);

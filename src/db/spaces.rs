@@ -93,10 +93,11 @@ pub async fn create_space(
     let mod_perms =
         serde_json::to_string(&crate::middleware::permissions::MODERATOR_PERMISSIONS).unwrap();
     sqlx::query(&super::q(
-        "INSERT INTO roles (id, space_id, name, color, hoist, position, permissions) VALUES (?, ?, 'Moderator', 3447003, 1, 1, ?)"
+        "INSERT INTO roles (id, space_id, name, color, hoist, position, permissions) VALUES (?, ?, 'Moderator', 3447003, ?, 1, ?)"
     ))
     .bind(&mod_role_id)
     .bind(&id)
+    .bind(true)
     .bind(&mod_perms)
     .execute(pool)
     .await?;
@@ -106,10 +107,11 @@ pub async fn create_space(
     let admin_perms =
         serde_json::to_string(&crate::middleware::permissions::ADMIN_PERMISSIONS).unwrap();
     sqlx::query(&super::q(
-        "INSERT INTO roles (id, space_id, name, color, hoist, position, permissions) VALUES (?, ?, 'Admin', 15158332, 1, 2, ?)"
+        "INSERT INTO roles (id, space_id, name, color, hoist, position, permissions) VALUES (?, ?, 'Admin', 15158332, ?, 2, ?)"
     ))
     .bind(&admin_role_id)
     .bind(&id)
+    .bind(true)
     .bind(&admin_perms)
     .execute(pool)
     .await?;
@@ -213,6 +215,7 @@ pub async fn update_space(
 
     // Collect integer fields that need separate binding
     let mut int_binds: Vec<i64> = Vec::new();
+    let mut bool_binds: Vec<bool> = Vec::new();
 
     if let Some(timeout) = input.afk_timeout {
         sets.push("afk_timeout = ?".to_string());
@@ -220,7 +223,7 @@ pub async fn update_space(
     }
     if let Some(public) = input.public {
         sets.push("public = ?".to_string());
-        int_binds.push(if public { 1 } else { 0 });
+        bool_binds.push(public);
     }
 
     if sets.is_empty() {
@@ -236,6 +239,9 @@ pub async fn update_space(
         q = q.bind(v);
     }
     for val in &int_binds {
+        q = q.bind(val);
+    }
+    for val in &bool_binds {
         q = q.bind(val);
     }
     q = q.bind(space_id);
