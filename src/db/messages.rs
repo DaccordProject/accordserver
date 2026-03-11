@@ -279,12 +279,10 @@ pub async fn search_messages(
         bind_strings.push(after.to_string());
     }
     if let Some(pinned) = params.pinned {
-        sql.push_str(" AND pinned = ?");
-        bind_strings.push(if pinned {
-            "1".to_string()
-        } else {
-            "0".to_string()
-        });
+        // Use inline literal to avoid binding a string to a BOOLEAN column
+        // (PostgreSQL rejects string "1"/"0" for BOOLEAN in prepared statements).
+        let lit = if pinned { "TRUE" } else { "FALSE" };
+        sql.push_str(&format!(" AND pinned = {lit}"));
     }
     if let Some(cursor) = params.cursor {
         sql.push_str(" AND id < ?");

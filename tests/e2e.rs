@@ -1919,7 +1919,7 @@ async fn test_force_password_reset_in_login_response() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Set force_password_reset flag
-    sqlx::query("UPDATE users SET force_password_reset = 1 WHERE username = 'alice'")
+    sqlx::query("UPDATE users SET force_password_reset = TRUE WHERE username = 'alice'")
         .execute(server.pool())
         .await
         .unwrap();
@@ -2022,7 +2022,7 @@ async fn test_change_password_clears_force_reset_flag() {
     let auth = format!("Bearer {token}");
 
     // Set force_password_reset flag
-    sqlx::query("UPDATE users SET force_password_reset = 1 WHERE username = 'alice'")
+    sqlx::query("UPDATE users SET force_password_reset = TRUE WHERE username = 'alice'")
         .execute(server.pool())
         .await
         .unwrap();
@@ -2110,7 +2110,7 @@ async fn test_disabled_user_cannot_login() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Disable the user
-    sqlx::query("UPDATE users SET disabled = 1 WHERE username = 'alice'")
+    sqlx::query("UPDATE users SET disabled = TRUE WHERE username = 'alice'")
         .execute(server.pool())
         .await
         .unwrap();

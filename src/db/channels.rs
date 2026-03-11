@@ -90,6 +90,7 @@ pub async fn update_channel(
     let mut sets = Vec::new();
     let mut str_values: Vec<Option<String>> = Vec::new();
     let mut int_values: Vec<(String, i64)> = Vec::new();
+    let mut bool_values: Vec<(String, bool)> = Vec::new();
 
     if let Some(ref name) = input.name {
         sets.push("name = ?".to_string());
@@ -108,7 +109,7 @@ pub async fn update_channel(
         int_values.push(("position".to_string(), position));
     }
     if let Some(nsfw) = input.nsfw {
-        int_values.push(("nsfw".to_string(), nsfw as i64));
+        bool_values.push(("nsfw".to_string(), nsfw));
     }
     if let Some(rate_limit) = input.rate_limit {
         int_values.push(("rate_limit".to_string(), rate_limit));
@@ -120,10 +121,13 @@ pub async fn update_channel(
         int_values.push(("user_limit".to_string(), user_limit));
     }
     if let Some(archived) = input.archived {
-        int_values.push(("archived".to_string(), archived as i64));
+        bool_values.push(("archived".to_string(), archived));
     }
 
     for (col, _) in &int_values {
+        sets.push(format!("{col} = ?"));
+    }
+    for (col, _) in &bool_values {
         sets.push(format!("{col} = ?"));
     }
 
@@ -140,6 +144,9 @@ pub async fn update_channel(
         q = q.bind(v);
     }
     for (_, val) in &int_values {
+        q = q.bind(val);
+    }
+    for (_, val) in &bool_values {
         q = q.bind(val);
     }
     q = q.bind(channel_id);

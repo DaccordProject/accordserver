@@ -96,6 +96,11 @@ impl TestServer {
                     .await
                     .unwrap_or_else(|e| panic!("failed to truncate {}: {}", table, e));
             }
+            // Re-insert the singleton settings row after truncation
+            sqlx::query("INSERT INTO server_settings (id) VALUES (1) ON CONFLICT DO NOTHING")
+                .execute(&pool)
+                .await
+                .expect("failed to re-insert server_settings row");
         }
 
         let (dispatcher, gateway_tx) = Dispatcher::new();
@@ -271,7 +276,7 @@ impl TestServer {
             user_id,
             Some("test ban"),
             banned_by,
-            false,
+            self.state.db_is_postgres,
         )
         .await
         .expect("failed to ban test user");
@@ -323,7 +328,7 @@ impl TestServer {
 
     /// Add a user as a member of a space.
     pub async fn add_member(&self, space_id: &str, user_id: &str) {
-        db::members::add_member(self.pool(), space_id, user_id, false)
+        db::members::add_member(self.pool(), space_id, user_id, self.state.db_is_postgres)
             .await
             .expect("failed to add test member");
     }
@@ -345,9 +350,15 @@ impl TestServer {
 
     /// Assign a role to a member via the DB.
     pub async fn assign_role(&self, space_id: &str, user_id: &str, role_id: &str) {
-        db::members::add_role_to_member(self.pool(), space_id, user_id, role_id, false)
-            .await
-            .expect("failed to assign test role");
+        db::members::add_role_to_member(
+            self.pool(),
+            space_id,
+            user_id,
+            role_id,
+            self.state.db_is_postgres,
+        )
+        .await
+        .expect("failed to assign test role");
     }
 
     /// Create an admin user with a token. Sets `is_admin = true` on the user.

@@ -1,33 +1,23 @@
-use sqlx::AnyPool;
+use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::soundboard::{CreateSound, SoundboardSound, UpdateSound};
 use crate::snowflake;
 
-type SoundRow = (
-    String,
-    String,
-    Option<String>,
-    f64,
-    Option<String>,
-    String,
-    String,
-);
-
-fn row_to_sound(row: SoundRow) -> SoundboardSound {
+fn row_to_sound(row: sqlx::any::AnyRow) -> SoundboardSound {
     SoundboardSound {
-        id: row.0,
-        name: row.1,
-        audio_url: row.2,
-        volume: row.3,
-        creator_id: row.4,
-        created_at: row.5,
-        updated_at: row.6,
+        id: row.get("id"),
+        name: row.get("name"),
+        audio_url: row.get("audio_path"),
+        volume: crate::db::get_f64(&row, "volume"),
+        creator_id: row.get("creator_id"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     }
 }
 
 pub async fn get_sound(pool: &AnyPool, sound_id: &str) -> Result<SoundboardSound, AppError> {
-    let row = sqlx::query_as::<_, SoundRow>(
+    let row = sqlx::query(
         &super::q("SELECT id, name, audio_path, volume, creator_id, created_at, updated_at FROM soundboard_sounds WHERE id = ?")
     )
     .bind(sound_id)
@@ -39,7 +29,7 @@ pub async fn get_sound(pool: &AnyPool, sound_id: &str) -> Result<SoundboardSound
 }
 
 pub async fn list_sounds(pool: &AnyPool, space_id: &str) -> Result<Vec<SoundboardSound>, AppError> {
-    let rows = sqlx::query_as::<_, SoundRow>(
+    let rows = sqlx::query(
         &super::q("SELECT id, name, audio_path, volume, creator_id, created_at, updated_at FROM soundboard_sounds WHERE space_id = ? ORDER BY created_at ASC")
     )
     .bind(space_id)

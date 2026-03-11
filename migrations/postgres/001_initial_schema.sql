@@ -1,6 +1,11 @@
 -- Postgres initial schema — equivalent of SQLite migrations 001–016.
--- Uses Postgres-native types: BOOLEAN, BIGSERIAL, TIMESTAMPTZ, NOW().
--- Text IDs (snowflakes) remain TEXT. JSON columns remain TEXT (JSON arrays).
+-- Uses Postgres-native types: BOOLEAN, BIGSERIAL. Timestamps stored as TEXT
+-- (matching SQLite behaviour) so sqlx::any can decode them as String without
+-- a chrono feature. IDs (snowflakes) and JSON columns remain TEXT.
+
+-- Helper expression used in DEFAULT clauses:
+-- to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')
+-- This matches the format produced by SQLite's datetime('now').
 
 -- Users
 CREATE TABLE IF NOT EXISTS users (
@@ -21,8 +26,8 @@ CREATE TABLE IF NOT EXISTS users (
     force_password_reset BOOLEAN NOT NULL DEFAULT FALSE,
     totp_secret TEXT,
     totp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 -- Spaces (guilds)
@@ -49,8 +54,8 @@ CREATE TABLE IF NOT EXISTS spaces (
     max_members INTEGER NOT NULL DEFAULT 500000,
     public BOOLEAN NOT NULL DEFAULT FALSE,
     slug TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_slug ON spaces(slug);
@@ -73,8 +78,8 @@ CREATE TABLE IF NOT EXISTS channels (
     last_message_id TEXT,
     archived BOOLEAN NOT NULL DEFAULT FALSE,
     auto_archive_after INTEGER,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_channels_space_id ON channels(space_id);
@@ -92,8 +97,8 @@ CREATE TABLE IF NOT EXISTS roles (
     permissions TEXT NOT NULL DEFAULT '[]',
     managed BOOLEAN NOT NULL DEFAULT FALSE,
     mentionable BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_roles_space_id ON roles(space_id);
@@ -104,12 +109,12 @@ CREATE TABLE IF NOT EXISTS members (
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
     nickname TEXT,
     avatar TEXT,
-    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    premium_since TIMESTAMPTZ,
+    joined_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    premium_since TEXT,
     deaf BOOLEAN NOT NULL DEFAULT FALSE,
     mute BOOLEAN NOT NULL DEFAULT FALSE,
     pending BOOLEAN NOT NULL DEFAULT FALSE,
-    timed_out_until TIMESTAMPTZ,
+    timed_out_until TEXT,
     PRIMARY KEY (user_id, space_id)
 );
 
@@ -142,10 +147,10 @@ CREATE TABLE IF NOT EXISTS messages (
     reply_to TEXT REFERENCES messages(id) ON DELETE SET NULL,
     flags INTEGER NOT NULL DEFAULT 0,
     webhook_id TEXT,
-    edited_at TIMESTAMPTZ,
+    edited_at TEXT,
     thread_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id);
@@ -175,7 +180,7 @@ CREATE TABLE IF NOT EXISTS reactions (
     user_id TEXT NOT NULL REFERENCES users(id),
     emoji_id TEXT,
     emoji_name TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     PRIMARY KEY (message_id, user_id, emoji_name)
 );
 
@@ -187,7 +192,7 @@ CREATE TABLE IF NOT EXISTS bans (
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
     reason TEXT,
     banned_by TEXT REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     PRIMARY KEY (user_id, space_id)
 );
 
@@ -201,8 +206,8 @@ CREATE TABLE IF NOT EXISTS invites (
     uses INTEGER NOT NULL DEFAULT 0,
     max_age INTEGER,
     temporary BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMPTZ
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    expires_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_invites_space_id ON invites(space_id);
@@ -221,8 +226,8 @@ CREATE TABLE IF NOT EXISTS emojis (
     image_path TEXT,
     image_content_type TEXT,
     image_size INTEGER,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_emojis_space_id ON emojis(space_id);
@@ -244,8 +249,8 @@ CREATE TABLE IF NOT EXISTS applications (
     owner_id TEXT NOT NULL REFERENCES users(id),
     flags INTEGER NOT NULL DEFAULT 0,
     bot_user_id TEXT REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 -- Bot tokens
@@ -253,7 +258,7 @@ CREATE TABLE IF NOT EXISTS bot_tokens (
     token_hash TEXT PRIMARY KEY NOT NULL,
     application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_bot_tokens_user_id ON bot_tokens(user_id);
@@ -264,8 +269,8 @@ CREATE TABLE IF NOT EXISTS user_tokens (
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     refresh_token_hash TEXT,
     scopes TEXT NOT NULL DEFAULT '[]',
-    expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_tokens_user_id ON user_tokens(user_id);
@@ -281,7 +286,7 @@ CREATE TABLE IF NOT EXISTS dm_participants (
 CREATE TABLE IF NOT EXISTS pinned_messages (
     channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
     message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    pinned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    pinned_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     PRIMARY KEY (channel_id, message_id)
 );
 
@@ -303,10 +308,10 @@ CREATE TABLE IF NOT EXISTS soundboard_sounds (
     audio_path TEXT,
     audio_content_type TEXT,
     audio_size INTEGER,
-    volume REAL NOT NULL DEFAULT 1.0,
+    volume DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     creator_id TEXT REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 -- Server settings (singleton row, id=1)
@@ -323,7 +328,7 @@ CREATE TABLE IF NOT EXISTS server_settings (
     max_members_per_space INTEGER NOT NULL DEFAULT 0,
     motd TEXT,
     public_listing BOOLEAN NOT NULL DEFAULT FALSE,
-    updated_at TIMESTAMPTZ
+    updated_at TEXT
 );
 
 INSERT INTO server_settings (id) VALUES (1) ON CONFLICT DO NOTHING;
@@ -334,7 +339,7 @@ CREATE TABLE IF NOT EXISTS backup_codes (
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     code_hash TEXT NOT NULL,
     used BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_backup_codes_user ON backup_codes(user_id);
@@ -343,7 +348,7 @@ CREATE INDEX IF NOT EXISTS idx_backup_codes_user ON backup_codes(user_id);
 CREATE TABLE IF NOT EXISTS channel_mutes (
     user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     PRIMARY KEY (user_id, channel_id)
 );
 
@@ -362,8 +367,8 @@ CREATE TABLE IF NOT EXISTS reports (
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'actioned', 'dismissed')),
     actioned_by TEXT REFERENCES users(id),
     action_taken TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    resolved_at TIMESTAMPTZ
+    created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+    resolved_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_reports_space_status ON reports(space_id, status);
@@ -375,7 +380,7 @@ CREATE TABLE IF NOT EXISTS read_states (
     channel_id   TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
     last_read_message_id TEXT,
     mention_count INTEGER NOT NULL DEFAULT 0,
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at   TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     PRIMARY KEY (user_id, channel_id)
 );
 
@@ -384,7 +389,7 @@ CREATE TABLE IF NOT EXISTS relationships (
     user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     target_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     type           INTEGER NOT NULL CHECK(type IN (1, 2, 3, 4)),
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at     TEXT NOT NULL DEFAULT (to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     PRIMARY KEY (user_id, target_user_id)
 );
 

@@ -3093,7 +3093,7 @@ async fn test_concurrent_mfa_tickets_are_invalidated() {
     // Enable TOTP in the DB with a dummy secret (content irrelevant — we only
     // need the login flow to issue MFA tickets, not to complete TOTP verification).
     sqlx::query(&accordserver::db::q(
-        "UPDATE users SET totp_enabled = 1, totp_secret = 'DUMMYBASE32SECRET' WHERE id = ?",
+        "UPDATE users SET totp_enabled = TRUE, totp_secret = 'DUMMYBASE32SECRET' WHERE id = ?",
     ))
     .bind(&user_id)
     .execute(server.pool())

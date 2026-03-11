@@ -73,10 +73,24 @@ pub fn get_bool(row: &sqlx::any::AnyRow, col: &str) -> bool {
         .unwrap_or_else(|_| row.get::<i64, _>(col) != 0)
 }
 
+/// Read a float column from an `AnyRow`.
+///
+/// PostgreSQL `REAL` is `float4` which decodes as `f32`, while SQLite `REAL`
+/// is always 64-bit.  This helper tries `f64` first (works for `DOUBLE
+/// PRECISION` / SQLite) and falls back to `f32` → `f64` (works for PG `REAL`).
+pub fn get_f64(row: &sqlx::any::AnyRow, col: &str) -> f64 {
+    use sqlx::Row;
+    row.try_get::<f64, _>(col)
+        .unwrap_or_else(|_| row.get::<f32, _>(col) as f64)
+}
+
 /// Returns the SQL expression for the current timestamp for the given backend.
+///
+/// Both SQLite and PostgreSQL return timestamps as TEXT in `'YYYY-MM-DD HH24:MI:SS'`
+/// format so that `row.get::<String, _>()` works identically across backends.
 pub fn now_sql(is_postgres: bool) -> &'static str {
     if is_postgres {
-        "NOW()"
+        "to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
     } else {
         "datetime('now')"
     }
