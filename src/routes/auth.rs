@@ -487,16 +487,19 @@ pub async fn register(
             .await
             .map_err(AppError::from)?;
     if let Some((space_id,)) = default_space {
-        let insert_member_sql = if state.db_is_postgres {
-            "INSERT INTO members (user_id, space_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
-        } else {
-            "INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)"
-        };
-        let _ = sqlx::query(&crate::db::q(insert_member_sql))
-            .bind(&id)
-            .bind(&space_id)
-            .execute(&state.db)
-            .await;
+        match db::members::add_member(&state.db, &space_id, &id, state.db_is_postgres).await {
+            Ok(_) => {
+                tracing::info!("auto-joined user {} to default space {}", id, space_id);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "failed to auto-join user {} to default space {}: {:?}",
+                    id,
+                    space_id,
+                    e
+                );
+            }
+        }
 
         // Broadcast member.join to the space
         if let Ok(member) = db::members::get_member_row(&state.db, &space_id, &id).await {
