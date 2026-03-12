@@ -226,22 +226,50 @@ pub async fn create_pool(database_url: &str) -> Result<AnyPool, sqlx::Error> {
     // Diagnostic: verify the parsed connection options before creating the pool.
     if is_pg {
         use sqlx::postgres::PgConnectOptions;
+
+        // Path A: direct PgConnectOptions::from_str (what ensure_pg_database_exists uses)
         match PgConnectOptions::from_str(database_url) {
             Ok(pg_opts) => {
                 tracing::info!(
-                    "AnyPool will connect as user=`{}` host=`{}` port={} db=`{}`",
+                    "diag path-A (direct): user=`{}` host=`{}` port={} db=`{}`",
                     pg_opts.get_username(),
                     pg_opts.get_host(),
                     pg_opts.get_port(),
                     pg_opts.get_database().unwrap_or("<default>"),
                 );
-                // Verify we can open a raw PgConnection with these exact options.
                 match sqlx::postgres::PgConnection::connect_with(&pg_opts).await {
-                    Ok(_) => tracing::info!("diagnostic: raw PgConnection succeeded"),
-                    Err(e) => tracing::error!("diagnostic: raw PgConnection failed: {e}"),
+                    Ok(_) => tracing::info!("diag path-A: PgConnection succeeded"),
+                    Err(e) => tracing::error!("diag path-A: PgConnection failed: {e}"),
                 }
             }
-            Err(e) => tracing::error!("diagnostic: PgConnectOptions parse failed: {e}"),
+            Err(e) => tracing::error!("diag path-A: parse failed: {e}"),
+        }
+
+        // Path B: AnyConnectOptions → PgConnectOptions (what AnyPool actually uses)
+        match AnyConnectOptions::from_str(database_url) {
+            Ok(ref any_opts) => {
+                tracing::info!(
+                    "diag path-B: AnyConnectOptions.database_url = `{}`",
+                    any_opts.database_url.as_str()
+                );
+                match PgConnectOptions::try_from(any_opts) {
+                    Ok(pg_opts_b) => {
+                        tracing::info!(
+                            "diag path-B (via Any): user=`{}` host=`{}` port={} db=`{}`",
+                            pg_opts_b.get_username(),
+                            pg_opts_b.get_host(),
+                            pg_opts_b.get_port(),
+                            pg_opts_b.get_database().unwrap_or("<default>"),
+                        );
+                        match sqlx::postgres::PgConnection::connect_with(&pg_opts_b).await {
+                            Ok(_) => tracing::info!("diag path-B: PgConnection succeeded"),
+                            Err(e) => tracing::error!("diag path-B: PgConnection failed: {e}"),
+                        }
+                    }
+                    Err(e) => tracing::error!("diag path-B: TryFrom conversion failed: {e}"),
+                }
+            }
+            Err(e) => tracing::error!("diag path-B: AnyConnectOptions parse failed: {e}"),
         }
     }
 
