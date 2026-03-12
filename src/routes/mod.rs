@@ -16,6 +16,7 @@ mod read_states;
 mod relationships;
 mod reports;
 mod roles;
+mod seo;
 mod settings;
 mod soundboard;
 pub mod spaces;
@@ -40,11 +41,20 @@ pub fn router(state: AppState) -> Router {
     let api = api_routes(&state);
     let cdn_service = ServeDir::new(&state.storage_path);
 
+    let seo = Router::new()
+        .route("/{space_slug}", get(seo::space_snapshot))
+        .route("/{space_slug}/{channel_name}", get(seo::channel_snapshot))
+        .route(
+            "/{space_slug}/{channel_name}/{post_id}",
+            get(seo::post_snapshot),
+        );
+
     let base = Router::new()
         .route("/health", get(health::health))
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/mcp", post(crate::mcp::handle_mcp))
         .nest_service("/cdn", cdn_service)
+        .nest("/s", seo)
         .nest("/api/v1", api);
 
     // The /test/seed route is only compiled in when the "test-seed" feature
