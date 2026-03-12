@@ -193,11 +193,13 @@ async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error
     // case (e.g. Docker with POSTGRES_DB), it already exists and we can
     // skip the maintenance-database connection entirely.
     //
-    // Retry up to 5 times with 1-second delays to handle the window between
+    // Retry up to 15 times with 2-second delays to handle the window between
     // PostgreSQL accepting TCP connections (pg_isready passes) and finishing
-    // init-script execution (POSTGRES_USER role creation).
+    // init-script execution (POSTGRES_USER role creation). Docker Compose
+    // environments can take 10+ seconds for the init scripts to complete.
+    const MAX_ATTEMPTS: u32 = 15;
     let target_opts = PgConnectOptions::from_str(canonical_url.as_str())?;
-    for attempt in 1..=5u32 {
+    for attempt in 1..=MAX_ATTEMPTS {
         match sqlx::postgres::PgConnection::connect_with(&target_opts).await {
             Ok(mut target_conn) => {
                 tracing::info!("target database `{db_name}` is reachable");
@@ -224,14 +226,14 @@ async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error
                 }
 
                 // Transient error (role not yet created, etc.) — retry.
-                if attempt < 5 {
+                if attempt < MAX_ATTEMPTS {
                     tracing::info!(
-                        "postgres not ready (attempt {attempt}/5): {e} — retrying in 1s"
+                        "postgres not ready (attempt {attempt}/{MAX_ATTEMPTS}): {e} — retrying in 2s"
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 } else {
                     tracing::warn!(
-                        "could not connect to target database `{db_name}` after 5 attempts: {e}"
+                        "could not connect to target database `{db_name}` after {MAX_ATTEMPTS} attempts: {e}"
                     );
                     break;
                 }
