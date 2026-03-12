@@ -1202,6 +1202,68 @@ async fn test_register_and_login() {
 }
 
 #[tokio::test]
+async fn test_first_registered_user_becomes_admin() {
+    let server = TestServer::new().await;
+
+    // Seed a system user + default space (mirrors real server startup)
+    accordserver::db::invites::ensure_default_invite(server.pool())
+        .await
+        .unwrap();
+
+    // Register the first real user
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "first_user",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let first_token = body["data"]["token"].as_str().unwrap().to_string();
+    assert_eq!(
+        body["data"]["user"]["is_admin"], true,
+        "first registered user should be admin"
+    );
+
+    // Verify via /users/@me
+    let app = server.router();
+    let req = authenticated_request(
+        Method::GET,
+        "/api/v1/users/@me",
+        &format!("Bearer {first_token}"),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(
+        body["data"]["is_admin"], true,
+        "first user should still be admin on @me lookup"
+    );
+
+    // Register a second user — should NOT be admin
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "second_user",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(
+        body["data"]["user"]["is_admin"], false,
+        "second registered user should NOT be admin"
+    );
+}
+
+#[tokio::test]
 async fn test_register_duplicate_username() {
     let server = TestServer::new().await;
 

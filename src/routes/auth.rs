@@ -462,13 +462,9 @@ pub async fn register(
     let id = snowflake::generate();
     let display_name = input.display_name.as_deref().unwrap_or(username);
 
-    // First registered (non-bot, non-system) user becomes admin
-    let user_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE bot = false AND system = false")
-            .fetch_one(&state.db)
-            .await
-            .map_err(AppError::from)?;
-    let is_admin = user_count == 0;
+    // First registered user becomes admin when no admins exist yet
+    let admin_count = db::admin::count_admins(&state.db).await.map_err(AppError::from)?;
+    let is_admin = admin_count == 0;
 
     sqlx::query(
         &crate::db::q("INSERT INTO users (id, username, display_name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)"),
