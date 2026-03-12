@@ -11,7 +11,11 @@ use crate::state::AppState;
 /// `Option<String>` that `GatewayBroadcast` expects.  DM channels return an
 /// empty string from `require_channel_permission`, which maps to `None`.
 fn space_id_opt(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 pub async fn add_reaction(
@@ -19,7 +23,8 @@ pub async fn add_reaction(
     Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let space_id = require_channel_permission(&state.db, &channel_id, &auth, "add_reactions").await?;
+    let space_id =
+        require_channel_permission(&state.db, &channel_id, &auth, "add_reactions").await?;
     let sql = if state.db_is_postgres {
         "INSERT INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
     } else {
@@ -97,7 +102,8 @@ pub async fn remove_user_reaction(
     Path((channel_id, message_id, emoji, user_id)): Path<(String, String, String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let space_id = require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
+    let space_id =
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     sqlx::query(&crate::db::q(
         "DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?",
     ))
@@ -152,7 +158,8 @@ pub async fn remove_all_reactions(
     Path((channel_id, message_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let space_id = require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
+    let space_id =
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     sqlx::query(&crate::db::q("DELETE FROM reactions WHERE message_id = ?"))
         .bind(&message_id)
         .execute(&state.db)
@@ -183,7 +190,8 @@ pub async fn remove_all_reactions_emoji(
     Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let space_id = require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
+    let space_id =
+        require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
     sqlx::query(&crate::db::q(
         "DELETE FROM reactions WHERE message_id = ? AND emoji_name = ?",
     ))

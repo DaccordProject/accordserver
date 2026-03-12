@@ -114,8 +114,16 @@ pub async fn channel_snapshot(
         }
     }
 
-    let canonical = format!("/s/{}/{}", escape_html(&space_slug), escape_html(&channel_name));
-    let fragment_url = format!("#{}/{}", escape_html(&space_slug), escape_html(&channel_name));
+    let canonical = format!(
+        "/s/{}/{}",
+        escape_html(&space_slug),
+        escape_html(&channel_name)
+    );
+    let fragment_url = format!(
+        "#{}/{}",
+        escape_html(&space_slug),
+        escape_html(&channel_name)
+    );
     let title = format!(
         "{} — {}",
         escape_html(channel.name.as_deref().unwrap_or("channel")),
@@ -130,11 +138,7 @@ pub async fn channel_snapshot(
     let icon_meta = space
         .icon
         .as_ref()
-        .map(|icon| {
-            format!(
-                r#"    <meta property="og:image" content="/cdn/icons/{icon}">"#,
-            )
-        })
+        .map(|icon| format!(r#"    <meta property="og:image" content="/cdn/icons/{icon}">"#,))
         .unwrap_or_default();
 
     // Render messages as semantic HTML.
@@ -241,9 +245,7 @@ pub async fn post_snapshot(
         return Err(AppError::NotFound("message_not_in_channel".to_string()));
     }
 
-    let post_author = db::users::get_user(&state.db, &post.author_id)
-        .await
-        .ok();
+    let post_author = db::users::get_user(&state.db, &post.author_id).await.ok();
     let post_author_name = post_author
         .as_ref()
         .and_then(|u| u.display_name.clone())
@@ -256,14 +258,9 @@ pub async fn post_snapshot(
         // Skip (page-1)*REPLIES_PER_PAGE replies by fetching them and using
         // the last ID as the cursor.
         let skip_count = (page - 1) * REPLIES_PER_PAGE;
-        let skipped = db::messages::list_messages(
-            &state.db,
-            &channel.id,
-            None,
-            skip_count,
-            Some(&post_id),
-        )
-        .await?;
+        let skipped =
+            db::messages::list_messages(&state.db, &channel.id, None, skip_count, Some(&post_id))
+                .await?;
         skipped.last().map(|m| m.id.clone())
     } else {
         None
@@ -310,12 +307,7 @@ pub async fn post_snapshot(
     );
 
     // Use first line of post content as title, rest as description.
-    let post_title = post
-        .content
-        .lines()
-        .next()
-        .unwrap_or("Post")
-        .to_string();
+    let post_title = post.content.lines().next().unwrap_or("Post").to_string();
     let title = format!(
         "{} — {} Forum",
         escape_html(&truncate(&post_title, 70)),
@@ -326,20 +318,14 @@ pub async fn post_snapshot(
     let icon_meta = space
         .icon
         .as_ref()
-        .map(|icon| {
-            format!(
-                r#"    <meta property="og:image" content="/cdn/icons/{icon}">"#,
-            )
-        })
+        .map(|icon| format!(r#"    <meta property="og:image" content="/cdn/icons/{icon}">"#,))
         .unwrap_or_default();
 
     // Pagination link tags.
     let mut pagination_links = String::new();
     if page > 1 {
         if page == 2 {
-            pagination_links.push_str(&format!(
-                r#"    <link rel="prev" href="{canonical}">"#
-            ));
+            pagination_links.push_str(&format!(r#"    <link rel="prev" href="{canonical}">"#));
         } else {
             pagination_links.push_str(&format!(
                 r#"    <link rel="prev" href="{canonical}?page={}">"#,
@@ -386,7 +372,9 @@ pub async fn post_snapshot(
             } else {
                 format!("{canonical}?page={}", page - 1)
             };
-            pagination_nav.push_str(&format!(r#" <a rel="prev" href="{prev_href}">&laquo; Previous</a>"#));
+            pagination_nav.push_str(&format!(
+                r#" <a rel="prev" href="{prev_href}">&laquo; Previous</a>"#
+            ));
         }
         pagination_nav.push_str(&format!(" Page {page} of {total_pages}"));
         if has_next {
@@ -494,11 +482,7 @@ pub async fn space_snapshot(
     let icon_meta = space
         .icon
         .as_ref()
-        .map(|icon| {
-            format!(
-                r#"    <meta property="og:image" content="/cdn/icons/{icon}">"#,
-            )
-        })
+        .map(|icon| format!(r#"    <meta property="og:image" content="/cdn/icons/{icon}">"#,))
         .unwrap_or_default();
 
     let canonical = format!("/s/{}", escape_html(&space_slug));
