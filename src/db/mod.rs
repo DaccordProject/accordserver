@@ -107,6 +107,57 @@ fn is_safe_pg_identifier(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Check schema privileges and database ownership on an open connection.
+async fn ensure_schema_privileges(
+    conn: &mut sqlx::postgres::PgConnection,
+    user_name: &str,
+    db_name: &str,
+) {
+    use sqlx::Row;
+
+    // Check if we have CREATE privilege on the public schema.
+    let has_create: Result<bool, _> =
+        sqlx::query_scalar("SELECT has_schema_privilege(current_user, 'public', 'CREATE')")
+            .fetch_one(&mut *conn)
+            .await;
+
+    match has_create {
+        Ok(false) => {
+            tracing::info!("granting CREATE on schema public to `{user_name}`");
+            let grant_sql = if is_safe_pg_identifier(user_name) {
+                format!("GRANT ALL ON SCHEMA public TO \"{user_name}\"")
+            } else {
+                "GRANT ALL ON SCHEMA public TO PUBLIC".to_string()
+            };
+            if let Err(e) = sqlx::query(&grant_sql).execute(&mut *conn).await {
+                tracing::warn!(
+                    "could not grant schema privileges (you may need to run as the database owner or superuser): {e}"
+                );
+            }
+        }
+        Err(e) => tracing::warn!("could not check schema privileges: {e}"),
+        _ => {}
+    }
+
+    // Verify the current user owns the database (informational).
+    let owner_row = sqlx::query(
+        "SELECT pg_catalog.pg_get_userbyid(d.datdba) AS owner \
+         FROM pg_catalog.pg_database d WHERE d.datname = current_database()",
+    )
+    .fetch_optional(&mut *conn)
+    .await;
+
+    if let Ok(Some(row)) = owner_row {
+        let owner: String = row.get("owner");
+        if owner != user_name {
+            tracing::warn!(
+                "database `{db_name}` is owned by `{owner}`, not `{user_name}` — \
+                 migrations may fail if schema privileges are insufficient"
+            );
+        }
+    }
+}
+
 /// Connect to the `postgres` maintenance database and ensure the target
 /// database exists, is owned by the connecting user, and that the `public`
 /// schema grants sufficient privileges for migrations and table creation.
@@ -117,21 +168,53 @@ fn is_safe_pg_identifier(name: &str) -> bool {
 /// that revokes `CREATE` on the `public` schema from non-owner roles.
 async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error> {
     use sqlx::postgres::PgConnectOptions;
-    use sqlx::Row;
+    use sqlx::ConnectOptions;
 
+    // Normalize the URL through PgConnectOptions → to_url_lossy() to ensure
+    // credentials are unambiguously embedded (same workaround as AnyPool).
     let opts = PgConnectOptions::from_str(database_url)?;
+    let canonical_url = opts.to_url_lossy();
+    let opts = PgConnectOptions::from_str(canonical_url.as_str())?;
+
     let db_name = opts.get_database().unwrap_or("accord").to_owned();
     let user_name = opts.get_username().to_owned();
 
-    tracing::info!("checking if postgres database `{db_name}` exists");
+    tracing::info!(
+        "checking if postgres database `{db_name}` exists (user=`{user_name}`, host=`{}`)",
+        opts.get_host(),
+    );
 
     if !is_safe_pg_identifier(&db_name) {
         tracing::error!("refusing to auto-create database with unsafe name: {db_name}");
         return Ok(());
     }
 
-    // Connect to the default `postgres` maintenance database.
-    let maint_opts = opts.clone().database("postgres");
+    // Try connecting to the target database directly first. In the common
+    // case (e.g. Docker with POSTGRES_DB), it already exists and we can
+    // skip the maintenance-database connection entirely.
+    let target_opts = PgConnectOptions::from_str(canonical_url.as_str())?;
+    match sqlx::postgres::PgConnection::connect_with(&target_opts).await {
+        Ok(mut target_conn) => {
+            tracing::info!("target database `{db_name}` is reachable");
+            // Database exists — just check schema privileges below.
+            ensure_schema_privileges(&mut target_conn, &user_name, &db_name).await;
+            return Ok(());
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("does not exist") && msg.contains("database") {
+                tracing::info!("target database `{db_name}` does not exist, will create it");
+            } else {
+                // Some other error (auth, network, etc.) — try the
+                // maintenance path anyway, it will surface a clearer error.
+                tracing::warn!("could not connect to target database `{db_name}`: {e}");
+            }
+        }
+    }
+
+    // Connect to the default `postgres` maintenance database to create the
+    // target database.
+    let maint_opts = PgConnectOptions::from_str(canonical_url.as_str())?.database("postgres");
     let mut conn = sqlx::postgres::PgConnection::connect_with(&maint_opts).await?;
 
     let exists: bool =
@@ -158,52 +241,10 @@ async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error
 
     drop(conn);
 
-    // Connect to the target database and ensure the public schema is usable.
-    // On PostgreSQL 15+, CREATE on the public schema is revoked from PUBLIC,
-    // so non-superuser roles may not be able to run migrations without this.
-    let target_opts = opts.database(&db_name);
+    // Connect to the (now existing) target database for schema privilege check.
+    let target_opts = PgConnectOptions::from_str(canonical_url.as_str())?;
     let mut target_conn = sqlx::postgres::PgConnection::connect_with(&target_opts).await?;
-
-    // Check if we have CREATE privilege on the public schema.
-    let has_create: bool =
-        sqlx::query_scalar("SELECT has_schema_privilege(current_user, 'public', 'CREATE')")
-            .fetch_one(&mut target_conn)
-            .await?;
-
-    if !has_create {
-        tracing::info!("granting CREATE on schema public to `{user_name}`");
-        // This requires the connecting user to be the database owner or a
-        // superuser.  If it fails, we log the error but let the caller
-        // surface the real migration failure with a better message.
-        let grant_sql = if is_safe_pg_identifier(&user_name) {
-            format!("GRANT ALL ON SCHEMA public TO \"{user_name}\"")
-        } else {
-            "GRANT ALL ON SCHEMA public TO PUBLIC".to_string()
-        };
-        if let Err(e) = sqlx::query(&grant_sql).execute(&mut target_conn).await {
-            tracing::warn!(
-                "could not grant schema privileges (you may need to run as the database owner or superuser): {e}"
-            );
-        }
-    }
-
-    // Verify the current user owns the database (informational).
-    let owner_row = sqlx::query(
-        "SELECT pg_catalog.pg_get_userbyid(d.datdba) AS owner \
-         FROM pg_catalog.pg_database d WHERE d.datname = current_database()",
-    )
-    .fetch_optional(&mut target_conn)
-    .await?;
-
-    if let Some(row) = owner_row {
-        let owner: String = row.get("owner");
-        if owner != user_name {
-            tracing::warn!(
-                "database `{db_name}` is owned by `{owner}`, not `{user_name}` — \
-                 migrations may fail if schema privileges are insufficient"
-            );
-        }
-    }
+    ensure_schema_privileges(&mut target_conn, &user_name, &db_name).await;
 
     Ok(())
 }
