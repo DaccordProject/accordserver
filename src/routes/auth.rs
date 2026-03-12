@@ -463,7 +463,7 @@ pub async fn register(
     let display_name = input.display_name.as_deref().unwrap_or(username);
 
     // First registered user becomes admin when no admins exist yet
-    let admin_count = db::admin::count_admins(&state.db).await.map_err(AppError::from)?;
+    let admin_count = db::admin::count_admins(&state.db).await?;
     let is_admin = admin_count == 0;
 
     sqlx::query(
@@ -498,6 +498,66 @@ pub async fn register(
                     space_id,
                     e
                 );
+            }
+        }
+
+        // First registered user (server admin) becomes the owner of the default space
+        // and receives the Admin role within it
+        if is_admin {
+            // Transfer space ownership from System user to first real user
+            let now_fn = crate::db::now_sql(state.db_is_postgres);
+            if let Err(e) = sqlx::query(&crate::db::q(&format!(
+                "UPDATE spaces SET owner_id = ?, updated_at = {now_fn} WHERE id = ?"
+            )))
+            .bind(&id)
+            .bind(&space_id)
+            .execute(&state.db)
+            .await
+            {
+                tracing::error!(
+                    "failed to transfer default space ownership to user {}: {:?}",
+                    id,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "transferred default space {} ownership to first admin user {}",
+                    space_id,
+                    id
+                );
+            }
+
+            // Assign the Admin role to the first user in the default space
+            let admin_role: Option<(String,)> = sqlx::query_as(&crate::db::q(
+                "SELECT id FROM roles WHERE space_id = ? AND name = 'Admin' LIMIT 1",
+            ))
+            .bind(&space_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+
+            if let Some((admin_role_id,)) = admin_role {
+                if let Err(e) = db::members::add_role_to_member(
+                    &state.db,
+                    &space_id,
+                    &id,
+                    &admin_role_id,
+                    state.db_is_postgres,
+                )
+                .await
+                {
+                    tracing::error!(
+                        "failed to assign Admin role to user {} in default space: {:?}",
+                        id,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "assigned Admin role to first admin user {} in default space {}",
+                        id,
+                        space_id
+                    );
+                }
             }
         }
 
