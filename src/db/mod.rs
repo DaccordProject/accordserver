@@ -219,9 +219,7 @@ async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error
                 };
 
                 if is_db_missing {
-                    tracing::info!(
-                        "target database `{db_name}` does not exist, will create it"
-                    );
+                    tracing::info!("target database `{db_name}` does not exist, will create it");
                     break;
                 }
 
