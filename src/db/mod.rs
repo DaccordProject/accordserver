@@ -192,22 +192,51 @@ async fn ensure_pg_database_exists(database_url: &str) -> Result<(), sqlx::Error
     // Try connecting to the target database directly first. In the common
     // case (e.g. Docker with POSTGRES_DB), it already exists and we can
     // skip the maintenance-database connection entirely.
+    //
+    // Retry up to 5 times with 1-second delays to handle the window between
+    // PostgreSQL accepting TCP connections (pg_isready passes) and finishing
+    // init-script execution (POSTGRES_USER role creation).
     let target_opts = PgConnectOptions::from_str(canonical_url.as_str())?;
-    match sqlx::postgres::PgConnection::connect_with(&target_opts).await {
-        Ok(mut target_conn) => {
-            tracing::info!("target database `{db_name}` is reachable");
-            // Database exists — just check schema privileges below.
-            ensure_schema_privileges(&mut target_conn, &user_name, &db_name).await;
-            return Ok(());
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("does not exist") && msg.contains("database") {
-                tracing::info!("target database `{db_name}` does not exist, will create it");
-            } else {
-                // Some other error (auth, network, etc.) — try the
-                // maintenance path anyway, it will surface a clearer error.
-                tracing::warn!("could not connect to target database `{db_name}`: {e}");
+    for attempt in 1..=5u32 {
+        match sqlx::postgres::PgConnection::connect_with(&target_opts).await {
+            Ok(mut target_conn) => {
+                tracing::info!("target database `{db_name}` is reachable");
+                ensure_schema_privileges(&mut target_conn, &user_name, &db_name).await;
+                return Ok(());
+            }
+            Err(e) => {
+                // Check if the error is specifically about the database not existing
+                // (as opposed to role/auth errors). The sqlx error string includes
+                // "error returned from database:" as a prefix, so we must check for
+                // the actual PostgreSQL message, not just substrings.
+                let is_db_missing = match e.as_database_error() {
+                    Some(db_err) => {
+                        let msg = db_err.message();
+                        msg.contains("does not exist")
+                            && (msg.starts_with("database") || msg.contains("database \""))
+                    }
+                    None => false,
+                };
+
+                if is_db_missing {
+                    tracing::info!(
+                        "target database `{db_name}` does not exist, will create it"
+                    );
+                    break;
+                }
+
+                // Transient error (role not yet created, etc.) — retry.
+                if attempt < 5 {
+                    tracing::info!(
+                        "postgres not ready (attempt {attempt}/5): {e} — retrying in 1s"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else {
+                    tracing::warn!(
+                        "could not connect to target database `{db_name}` after 5 attempts: {e}"
+                    );
+                    break;
+                }
             }
         }
     }
