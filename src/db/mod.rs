@@ -223,57 +223,30 @@ pub async fn create_pool(database_url: &str) -> Result<AnyPool, sqlx::Error> {
         }
     }
 
-    // Diagnostic: verify the parsed connection options before creating the pool.
-    if is_pg {
+    // For PostgreSQL, normalize the URL through PgConnectOptions to ensure
+    // credentials are correctly embedded.  The AnyPool internally converts
+    // AnyConnectOptions → PgConnectOptions via TryFrom, which calls
+    // PgConnectOptions::parse_from_url().  That starts from
+    // new_without_pgpass() whose default username is whoami::username()
+    // (often "root" in Docker).  While the URL username should override
+    // the default, building a canonical URL from PgConnectOptions
+    // guarantees the username, password, host, port, and database are
+    // unambiguously present — eliminating any URL-parsing edge cases.
+    let connect_opts = if is_pg {
         use sqlx::postgres::PgConnectOptions;
-
-        // Path A: direct PgConnectOptions::from_str (what ensure_pg_database_exists uses)
-        match PgConnectOptions::from_str(database_url) {
-            Ok(pg_opts) => {
-                tracing::info!(
-                    "diag path-A (direct): user=`{}` host=`{}` port={} db=`{}`",
-                    pg_opts.get_username(),
-                    pg_opts.get_host(),
-                    pg_opts.get_port(),
-                    pg_opts.get_database().unwrap_or("<default>"),
-                );
-                match sqlx::postgres::PgConnection::connect_with(&pg_opts).await {
-                    Ok(_) => tracing::info!("diag path-A: PgConnection succeeded"),
-                    Err(e) => tracing::error!("diag path-A: PgConnection failed: {e}"),
-                }
-            }
-            Err(e) => tracing::error!("diag path-A: parse failed: {e}"),
-        }
-
-        // Path B: AnyConnectOptions → PgConnectOptions (what AnyPool actually uses)
-        match AnyConnectOptions::from_str(database_url) {
-            Ok(ref any_opts) => {
-                tracing::info!(
-                    "diag path-B: AnyConnectOptions.database_url = `{}`",
-                    any_opts.database_url.as_str()
-                );
-                match PgConnectOptions::try_from(any_opts) {
-                    Ok(pg_opts_b) => {
-                        tracing::info!(
-                            "diag path-B (via Any): user=`{}` host=`{}` port={} db=`{}`",
-                            pg_opts_b.get_username(),
-                            pg_opts_b.get_host(),
-                            pg_opts_b.get_port(),
-                            pg_opts_b.get_database().unwrap_or("<default>"),
-                        );
-                        match sqlx::postgres::PgConnection::connect_with(&pg_opts_b).await {
-                            Ok(_) => tracing::info!("diag path-B: PgConnection succeeded"),
-                            Err(e) => tracing::error!("diag path-B: PgConnection failed: {e}"),
-                        }
-                    }
-                    Err(e) => tracing::error!("diag path-B: TryFrom conversion failed: {e}"),
-                }
-            }
-            Err(e) => tracing::error!("diag path-B: AnyConnectOptions parse failed: {e}"),
-        }
-    }
-
-    let connect_opts = AnyConnectOptions::from_str(database_url)?;
+        let pg_opts = PgConnectOptions::from_str(database_url)?;
+        tracing::info!(
+            "postgres connection: user=`{}` host=`{}` port={} db=`{}`",
+            pg_opts.get_username(),
+            pg_opts.get_host(),
+            pg_opts.get_port(),
+            pg_opts.get_database().unwrap_or("<default>"),
+        );
+        use sqlx::ConnectOptions;
+        AnyConnectOptions::from_str(pg_opts.to_url_lossy().as_str())?
+    } else {
+        AnyConnectOptions::from_str(database_url)?
+    };
 
     // In-memory SQLite creates a separate database per connection, so restrict
     // to a single connection to keep schema and data visible across operations.
