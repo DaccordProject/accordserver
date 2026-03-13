@@ -10,6 +10,7 @@ use crate::db;
 use crate::error::AppError;
 use crate::middleware::auth::{create_token_hash, generate_token};
 use crate::models::channel::CreateChannel;
+use crate::models::plugin::PluginManifest;
 use crate::models::space::{CreateSpace, SpaceRow};
 use crate::models::user::{CreateUser, User};
 use crate::snowflake;
@@ -85,7 +86,10 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
         .await?;
     }
 
-    // 5. Ensure both the user and the bot are members of the space
+    // 5. Ensure a test plugin exists in the space
+    let plugin = find_or_create_test_plugin(pool, &space.id, &user.id).await?;
+
+    // 6. Ensure both the user and the bot are members of the space
     for uid in [&user.id, &bot_user_id] {
         let is_member: i64 = sqlx::query_scalar(&crate::db::q(
             "SELECT COUNT(*) FROM members WHERE user_id = ? AND space_id = ?",
@@ -100,7 +104,7 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
         }
     }
 
-    // 6. Build response with all channels
+    // 7. Build response with all channels
     let channels = db::channels::list_channels_in_space(pool, &space.id).await?;
     let channels_json: Vec<serde_json::Value> = channels
         .iter()
@@ -136,7 +140,15 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
             "slug": space.slug,
             "owner_id": space.owner_id
         },
-        "channels": channels_json
+        "channels": channels_json,
+        "plugin": {
+            "id": plugin.id,
+            "name": plugin.name,
+            "type": plugin.plugin_type,
+            "runtime": plugin.runtime,
+            "version": plugin.version,
+            "space_id": plugin.space_id,
+        }
     }))
 }
 
@@ -266,6 +278,51 @@ async fn find_or_create_application(
 
     let app = db::auth::get_application(pool, &app_id).await?;
     Ok((app, bot_user_id, token))
+}
+
+async fn find_or_create_test_plugin(
+    pool: &AnyPool,
+    space_id: &str,
+    creator_id: &str,
+) -> Result<crate::models::plugin::Plugin, AppError> {
+    // Check if a plugin named "Test Plugin" already exists in this space
+    let existing: Option<String> = sqlx::query_scalar(&crate::db::q(
+        "SELECT id FROM plugins WHERE space_id = ? AND name = 'Test Plugin'",
+    ))
+    .bind(space_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(id) = existing {
+        return db::plugins::get_plugin(pool, &id).await;
+    }
+
+    // Minimal ELF stub (just enough bytes so the blob is non-empty)
+    let elf_stub: &[u8] = &[0x7f, b'E', b'L', b'F'];
+
+    let manifest = PluginManifest {
+        name: "Test Plugin".to_string(),
+        description: "A scripted test plugin for integration tests".to_string(),
+        plugin_type: "activity".to_string(),
+        runtime: "scripted".to_string(),
+        version: "1.0.0".to_string(),
+        max_participants: 8,
+        max_spectators: -1,
+        lobby: true,
+        canvas_size: Some([480, 360]),
+        ..Default::default()
+    };
+
+    db::plugins::create_plugin(
+        pool,
+        space_id,
+        creator_id,
+        &manifest,
+        Some(elf_stub),
+        None,
+        None,
+    )
+    .await
 }
 
 async fn find_or_create_space(

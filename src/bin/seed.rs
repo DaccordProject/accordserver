@@ -529,6 +529,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 embeds: None,
                 reply_to: reply_to.map(|s| s.to_string()),
                 thread_id: thread_id.map(|s| s.to_string()),
+                title: None,
             },
         )
         .await?;

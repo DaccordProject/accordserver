@@ -1,6 +1,6 @@
 [package]
 name = "accordserver"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2021"
 
 [dependencies]
@@ -25,6 +25,7 @@ arc-swap = "1"
 totp-rs = { version = "5", features = ["gen_secret"] }
 data-encoding = "2"
 aes-gcm = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "accordserver"

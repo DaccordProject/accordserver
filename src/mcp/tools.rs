@@ -410,6 +410,7 @@ async fn tool_send_message(state: &AppState, args: &Value) -> Result<String, Str
         embeds: None,
         reply_to,
         thread_id: None,
+        title: None,
     };
 
     let msg = db::messages::create_message(

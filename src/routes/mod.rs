@@ -11,6 +11,7 @@ mod invites;
 mod members;
 pub mod messages;
 mod mutes;
+mod plugins;
 mod reactions;
 mod read_states;
 mod relationships;
@@ -282,6 +283,37 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(emojis::get_emoji)
                 .patch(emojis::update_emoji)
                 .delete(emojis::delete_emoji),
+        )
+        // Plugins
+        .route(
+            "/spaces/{space_id}/plugins",
+            get(plugins::list_plugins).post(plugins::install_plugin),
+        )
+        .route(
+            "/spaces/{space_id}/plugins/{plugin_id}",
+            delete(plugins::uninstall_plugin),
+        )
+        .route("/plugins/{plugin_id}/elf", get(plugins::get_plugin_elf))
+        .route(
+            "/plugins/{plugin_id}/bundle",
+            get(plugins::get_plugin_bundle),
+        )
+        .route("/plugins/{plugin_id}/icon", get(plugins::get_plugin_icon))
+        .route(
+            "/plugins/{plugin_id}/sessions",
+            post(plugins::create_session),
+        )
+        .route(
+            "/plugins/{plugin_id}/sessions/{session_id}",
+            patch(plugins::update_session_state).delete(plugins::delete_session),
+        )
+        .route(
+            "/plugins/{plugin_id}/sessions/{session_id}/roles",
+            post(plugins::assign_role),
+        )
+        .route(
+            "/plugins/{plugin_id}/sessions/{session_id}/actions",
+            post(plugins::send_action),
         )
         // Soundboard
         .route(

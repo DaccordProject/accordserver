@@ -26,10 +26,11 @@ fn row_to_message(row: sqlx::any::AnyRow) -> MessageRow {
         flags: row.get("flags"),
         webhook_id: row.get("webhook_id"),
         thread_id: row.get("thread_id"),
+        title: row.get("title"),
     }
 }
 
-const SELECT_MESSAGES: &str = "SELECT id, channel_id, space_id, author_id, content, type, created_at, edited_at, tts, pinned, mention_everyone, mentions, mention_roles, embeds, reply_to, flags, webhook_id, thread_id FROM messages";
+const SELECT_MESSAGES: &str = "SELECT id, channel_id, space_id, author_id, content, type, created_at, edited_at, tts, pinned, mention_everyone, mentions, mention_roles, embeds, reply_to, flags, webhook_id, thread_id, title FROM messages";
 
 pub async fn get_message_row(pool: &AnyPool, message_id: &str) -> Result<MessageRow, AppError> {
     let row = sqlx::query(&super::q(&format!("{SELECT_MESSAGES} WHERE id = ?")))
@@ -98,6 +99,81 @@ pub async fn list_messages(
     Ok(rows.into_iter().map(row_to_message).collect())
 }
 
+/// Lists top-level forum posts with optional sorting.
+/// Returns posts along with their last_reply_at timestamps.
+pub async fn list_forum_posts(
+    pool: &AnyPool,
+    channel_id: &str,
+    after: Option<&str>,
+    limit: i64,
+    sort: &str,
+) -> Result<Vec<MessageRow>, AppError> {
+    // Forum posts are top-level messages (thread_id IS NULL).
+    // Sort options: "latest_activity", "newest", "oldest"
+    let order_clause = match sort {
+        "latest_activity" => {
+            // Order by the most recent reply (or the post itself if no replies)
+            "ORDER BY COALESCE((SELECT MAX(m2.created_at) FROM messages m2 WHERE m2.thread_id = m.id), m.created_at) DESC"
+        }
+        "oldest" => "ORDER BY m.id ASC",
+        // "newest" or default
+        _ => "ORDER BY m.id DESC",
+    };
+
+    let rows = if let Some(after_id) = after {
+        // For cursor-based pagination with sorting, use id as cursor
+        let sql = format!(
+            "SELECT m.id, m.channel_id, m.space_id, m.author_id, m.content, m.type, m.created_at, m.edited_at, m.tts, m.pinned, m.mention_everyone, m.mentions, m.mention_roles, m.embeds, m.reply_to, m.flags, m.webhook_id, m.thread_id, m.title FROM messages m WHERE m.channel_id = ? AND m.thread_id IS NULL AND m.id > ? {order_clause} LIMIT ?"
+        );
+        sqlx::query(&super::q(&sql))
+            .bind(channel_id)
+            .bind(after_id)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await?
+    } else {
+        let sql = format!(
+            "SELECT m.id, m.channel_id, m.space_id, m.author_id, m.content, m.type, m.created_at, m.edited_at, m.tts, m.pinned, m.mention_everyone, m.mentions, m.mention_roles, m.embeds, m.reply_to, m.flags, m.webhook_id, m.thread_id, m.title FROM messages m WHERE m.channel_id = ? AND m.thread_id IS NULL {order_clause} LIMIT ?"
+        );
+        sqlx::query(&super::q(&sql))
+            .bind(channel_id)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await?
+    };
+
+    Ok(rows.into_iter().map(row_to_message).collect())
+}
+
+/// Returns last_reply_at timestamps for multiple parent message IDs.
+/// Result maps parent_message_id -> last_reply_at ISO timestamp.
+pub async fn get_last_reply_timestamps(
+    pool: &AnyPool,
+    message_ids: &[String],
+) -> Result<HashMap<String, String>, AppError> {
+    if message_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders: Vec<&str> = message_ids.iter().map(|_| "?").collect();
+    let in_clause = placeholders.join(", ");
+    let sql = format!(
+        "SELECT thread_id, MAX(created_at) as last_reply_at FROM messages WHERE thread_id IN ({in_clause}) GROUP BY thread_id"
+    );
+    let sql = super::q(&sql);
+    let mut q = sqlx::query(&sql);
+    for id in message_ids {
+        q = q.bind(id);
+    }
+    let rows = q.fetch_all(pool).await?;
+    let mut result = HashMap::new();
+    for row in &rows {
+        let tid: String = row.get("thread_id");
+        let ts: String = row.get("last_reply_at");
+        result.insert(tid, ts);
+    }
+    Ok(result)
+}
+
 pub async fn create_message(
     pool: &AnyPool,
     channel_id: &str,
@@ -109,7 +185,7 @@ pub async fn create_message(
     let embeds_json = serde_json::to_string(&input.embeds.as_deref().unwrap_or(&[])).unwrap();
 
     sqlx::query(&super::q(
-        "INSERT INTO messages (id, channel_id, space_id, author_id, content, tts, embeds, reply_to, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO messages (id, channel_id, space_id, author_id, content, tts, embeds, reply_to, thread_id, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ))
     .bind(&id)
     .bind(channel_id)
@@ -120,6 +196,7 @@ pub async fn create_message(
     .bind(&embeds_json)
     .bind(&input.reply_to)
     .bind(&input.thread_id)
+    .bind(&input.title)
     .execute(pool)
     .await?;
 
@@ -161,6 +238,17 @@ pub async fn update_message(
         let sql = super::q(&sql);
         sqlx::query(&sql)
             .bind(&embeds_json)
+            .bind(message_id)
+            .execute(pool)
+            .await?;
+    }
+    if let Some(ref title) = input.title {
+        let sql = format!(
+            "UPDATE messages SET title = ?, edited_at = {now_fn}, updated_at = {now_fn} WHERE id = ?"
+        );
+        let sql = super::q(&sql);
+        sqlx::query(&sql)
+            .bind(title)
             .bind(message_id)
             .execute(pool)
             .await?;

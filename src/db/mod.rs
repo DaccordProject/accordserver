@@ -10,6 +10,7 @@ pub mod members;
 pub mod messages;
 pub mod mutes;
 pub mod permission_overwrites;
+pub mod plugins;
 pub mod read_states;
 pub mod relationships;
 pub mod reports;

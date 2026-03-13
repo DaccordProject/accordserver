@@ -137,6 +137,7 @@ async fn test_message_search_content() {
         embeds: None,
         reply_to: None,
         thread_id: None,
+        title: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -154,6 +155,7 @@ async fn test_message_search_content() {
         embeds: None,
         reply_to: None,
         thread_id: None,
+        title: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -196,6 +198,7 @@ async fn test_message_search_author_filter() {
         embeds: None,
         reply_to: None,
         thread_id: None,
+        title: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -214,6 +217,7 @@ async fn test_message_search_author_filter() {
         embeds: None,
         reply_to: None,
         thread_id: None,
+        title: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -256,6 +260,7 @@ async fn test_message_search_pinned_filter() {
         embeds: None,
         reply_to: None,
         thread_id: None,
+        title: None,
     };
     let created = accordserver::db::messages::create_message(
         server.pool(),
@@ -273,6 +278,7 @@ async fn test_message_search_pinned_filter() {
         embeds: None,
         reply_to: None,
         thread_id: None,
+        title: None,
     };
     accordserver::db::messages::create_message(
         server.pool(),
@@ -324,6 +330,7 @@ async fn test_message_search_pagination() {
             embeds: None,
             reply_to: None,
             thread_id: None,
+            title: None,
         };
         accordserver::db::messages::create_message(
             server.pool(),

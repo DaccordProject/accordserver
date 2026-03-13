@@ -12,6 +12,7 @@ pub const ALL_INTENTS: &[&str] = &[
     "dm_reactions",
     "dm_typing",
     "scheduled_events",
+    "plugins",
     "relationships",
     // Privileged
     "members",
@@ -48,6 +49,11 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
             Some("soundboard")
         }
         "relationship.add" | "relationship.update" | "relationship.remove" => Some("relationships"),
+        "plugin.installed"
+        | "plugin.uninstalled"
+        | "plugin.event"
+        | "plugin.session_state"
+        | "plugin.role_changed" => Some("plugins"),
         "interaction.create" => None, // always delivered
         _ => None,
     }

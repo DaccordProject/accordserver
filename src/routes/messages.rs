@@ -19,6 +19,8 @@ pub struct ListMessagesQuery {
     pub after: Option<String>,
     pub limit: Option<i64>,
     pub thread_id: Option<String>,
+    pub top_level: Option<bool>,
+    pub sort: Option<String>,
 }
 
 pub async fn list_messages(
@@ -45,21 +47,33 @@ pub async fn list_messages(
         require_channel_membership(&state.db, &channel_id, uid).await?;
     }
     let limit = params.limit.unwrap_or(50).min(100);
-    let mut rows = db::messages::list_messages(
-        &state.db,
-        &channel_id,
-        params.after.as_deref(),
-        limit,
-        params.thread_id.as_deref(),
-    )
-    .await?;
+
+    let is_forum = params.top_level.unwrap_or(false);
+    let mut rows = if is_forum {
+        let sort = params.sort.as_deref().unwrap_or("latest_activity");
+        db::messages::list_forum_posts(&state.db, &channel_id, params.after.as_deref(), limit, sort)
+            .await?
+    } else {
+        db::messages::list_messages(
+            &state.db,
+            &channel_id,
+            params.after.as_deref(),
+            limit,
+            params.thread_id.as_deref(),
+        )
+        .await?
+    };
 
     let has_more = rows.len() as i64 > limit;
     if has_more {
         rows.truncate(limit as usize);
     }
 
-    let messages = messages_to_json(&state.db, &rows, current_user_id.as_deref()).await?;
+    let messages = if is_forum {
+        messages_to_forum_json(&state.db, &rows, current_user_id.as_deref()).await?
+    } else {
+        messages_to_json(&state.db, &rows, current_user_id.as_deref()).await?
+    };
     let last_id = rows.last().map(|m| m.id.clone());
 
     let mut response = serde_json::json!({ "data": messages });
@@ -118,6 +132,16 @@ pub async fn create_message(
             "message content must be at most 4000 characters".into(),
         ));
     }
+    if let Some(ref title) = input.title {
+        if title.is_empty() {
+            return Err(AppError::BadRequest("title must not be empty".into()));
+        }
+        if title.len() > 100 {
+            return Err(AppError::BadRequest(
+                "title must be at most 100 characters".into(),
+            ));
+        }
+    }
     if let Some(ref embeds) = input.embeds {
         if embeds.len() > 10 {
             return Err(AppError::BadRequest("at most 10 embeds per message".into()));
@@ -169,6 +193,7 @@ pub async fn create_message(
             let update = UpdateMessage {
                 content: None,
                 embeds: Some(embeds),
+                title: None,
             };
             if let Ok(updated_msg) =
                 db::messages::update_message(&db, &msg_id, &update, is_postgres).await
@@ -333,6 +358,13 @@ pub async fn update_message(
     // Author can always edit their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
         require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
+    }
+    if let Some(ref title) = input.title {
+        if title.len() > 100 {
+            return Err(AppError::BadRequest(
+                "title must be at most 100 characters".into(),
+            ));
+        }
     }
     let msg =
         db::messages::update_message(&state.db, &message_id, &input, state.db_is_postgres).await?;
@@ -688,7 +720,8 @@ pub fn message_row_to_json_full(
         "flags": row.flags,
         "webhook_id": row.webhook_id,
         "thread_id": row.thread_id,
-        "reply_count": reply_count.unwrap_or(0)
+        "reply_count": reply_count.unwrap_or(0),
+        "title": row.title
     })
 }
 
@@ -713,6 +746,36 @@ pub async fn messages_to_json(
                 .unwrap_or(&[]);
             let count = reply_counts.get(&row.id).copied();
             message_row_to_json_full(row, atts, reactions_map.get(&row.id), count)
+        })
+        .collect())
+}
+
+/// Converts a batch of forum post rows to JSON, enriching each with
+/// reactions, attachments, thread reply counts, and last_reply_at.
+pub async fn messages_to_forum_json(
+    pool: &sqlx::AnyPool,
+    rows: &[MessageRow],
+    current_user_id: Option<&str>,
+) -> Result<Vec<serde_json::Value>, crate::error::AppError> {
+    let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let reactions_map =
+        db::messages::get_reactions_for_messages(pool, &ids, current_user_id).await?;
+    let attachments_map = db::attachments::get_attachments_for_messages(pool, &ids).await?;
+    let reply_counts = db::messages::get_thread_reply_counts(pool, &ids).await?;
+    let last_reply_timestamps = db::messages::get_last_reply_timestamps(pool, &ids).await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let atts = attachments_map
+                .get(&row.id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let count = reply_counts.get(&row.id).copied();
+            let mut json = message_row_to_json_full(row, atts, reactions_map.get(&row.id), count);
+            if let Some(ts) = last_reply_timestamps.get(&row.id) {
+                json["last_reply_at"] = serde_json::Value::String(ts.clone());
+            }
+            json
         })
         .collect())
 }
