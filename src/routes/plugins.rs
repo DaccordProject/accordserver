@@ -39,7 +39,7 @@ pub async fn list_plugins(
 }
 
 /// Upload a `.daccord-plugin` bundle (ZIP file). The server parses the ZIP,
-/// extracts `plugin.json` as the manifest, stores BLOBs for the ELF binary
+/// extracts `plugin.json` as the manifest, stores the Lua source
 /// (scripted), the full bundle (native), and the icon if present.
 pub async fn install_plugin(
     state: State<AppState>,
@@ -77,7 +77,7 @@ pub async fn install_plugin(
     let zip_bytes = bundle_bytes
         .ok_or_else(|| AppError::BadRequest("missing bundle file in upload".to_string()))?;
 
-    // Parse the ZIP and extract plugin.json, ELF, icon
+    // Parse the ZIP and extract plugin.json and icon
     let parsed = parse_plugin_bundle(&zip_bytes)?;
 
     // Validate manifest
@@ -90,18 +90,13 @@ pub async fn install_plugin(
         ));
     }
 
-    // Store in DB with BLOBs
+    // Store in DB — full bundle ZIP is stored for both scripted and native plugins
     let plugin = db::plugins::create_plugin(
         &state.db,
         &space_id,
         &auth.user_id,
         &parsed.manifest,
-        parsed.elf_blob.as_deref(),
-        if parsed.manifest.runtime == "native" {
-            Some(&zip_bytes)
-        } else {
-            None
-        },
+        Some(&zip_bytes),
         parsed.icon_blob.as_deref(),
     )
     .await?;
@@ -150,7 +145,7 @@ pub async fn uninstall_plugin(
 
 // ── Plugin content serving ──────────────────────────────────────────────────
 
-pub async fn get_plugin_elf(
+pub async fn get_plugin_source(
     state: State<AppState>,
     Path(plugin_id): Path<String>,
     auth: AuthUser,
@@ -160,23 +155,23 @@ pub async fn get_plugin_elf(
 
     if plugin.runtime != "scripted" {
         return Err(AppError::BadRequest(
-            "ELF binary is only available for scripted plugins".to_string(),
+            "source is only available for scripted plugins".to_string(),
         ));
     }
 
-    let bytes = db::plugins::get_elf_blob(&state.db, &plugin_id).await?;
+    let bytes = db::plugins::get_bundle_blob(&state.db, &plugin_id).await?;
     if bytes.is_empty() {
         return Err(AppError::NotFound(
-            "plugin ELF binary not found".to_string(),
+            "plugin bundle not found".to_string(),
         ));
     }
 
     Ok((
         [
-            (header::CONTENT_TYPE, "application/octet-stream"),
+            (header::CONTENT_TYPE, "application/zip"),
             (
                 header::CONTENT_DISPOSITION,
-                "attachment; filename=\"plugin.elf\"",
+                "attachment; filename=\"plugin.zip\"",
             ),
         ],
         Bytes::from(bytes),
@@ -526,12 +521,12 @@ pub async fn send_action(
 
 struct ParsedBundle {
     manifest: PluginManifest,
-    elf_blob: Option<Vec<u8>>,
     icon_blob: Option<Vec<u8>>,
     has_signature: bool,
 }
 
-/// Parse a `.daccord-plugin` ZIP bundle, extracting the manifest, ELF, and icon.
+/// Parse a `.daccord-plugin` ZIP bundle, extracting the manifest and icon.
+/// The full bundle ZIP is stored as-is for both scripted and native plugins.
 fn parse_plugin_bundle(zip_bytes: &[u8]) -> Result<ParsedBundle, AppError> {
     let cursor = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor)
@@ -549,25 +544,19 @@ fn parse_plugin_bundle(zip_bytes: &[u8]) -> Result<ParsedBundle, AppError> {
             .map_err(|e| AppError::BadRequest(format!("invalid plugin.json: {e}")))?
     };
 
-    // 2. For scripted plugins: extract bin/plugin.elf
-    let elf_blob = if manifest.runtime == "scripted" {
-        match archive.by_name("bin/plugin.elf") {
-            Ok(mut file) => {
-                let mut buf = Vec::new();
-                file.read_to_end(&mut buf).map_err(|e| {
-                    AppError::BadRequest(format!("failed to read bin/plugin.elf: {e}"))
-                })?;
-                Some(buf)
-            }
-            Err(_) => {
-                return Err(AppError::BadRequest(
-                    "scripted plugins must include bin/plugin.elf".to_string(),
-                ));
-            }
+    // 2. For scripted plugins: verify the entry file exists in the bundle
+    if manifest.runtime == "scripted" {
+        let entry = if manifest.entry_point.is_empty() {
+            "src/main.lua"
+        } else {
+            &manifest.entry_point
+        };
+        if archive.by_name(entry).is_err() {
+            return Err(AppError::BadRequest(format!(
+                "scripted plugins must include the entry file: {entry}"
+            )));
         }
-    } else {
-        None
-    };
+    }
 
     // 3. Check for plugin.sig (required for native plugins)
     let has_signature = archive.by_name("plugin.sig").is_ok();
@@ -588,7 +577,6 @@ fn parse_plugin_bundle(zip_bytes: &[u8]) -> Result<ParsedBundle, AppError> {
 
     Ok(ParsedBundle {
         manifest,
-        elf_blob,
         icon_blob,
         has_signature,
     })

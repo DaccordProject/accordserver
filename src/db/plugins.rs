@@ -4,7 +4,7 @@ use crate::error::AppError;
 use crate::models::plugin::{Plugin, PluginManifest, PluginSession, PluginSessionParticipant};
 use crate::snowflake;
 
-const SELECT_PLUGINS: &str = "SELECT id, space_id, name, plugin_type, runtime, description, version, manifest_json, bundle_hash, signed, creator_id, created_at, updated_at, elf_blob IS NOT NULL AS has_elf, bundle_blob IS NOT NULL AS has_bundle, icon_blob IS NOT NULL AS has_icon FROM plugins";
+const SELECT_PLUGINS: &str = "SELECT id, space_id, name, plugin_type, runtime, description, version, manifest_json, bundle_hash, signed, creator_id, created_at, updated_at, bundle_blob IS NOT NULL AS has_bundle, icon_blob IS NOT NULL AS has_icon FROM plugins";
 
 fn row_to_plugin(row: sqlx::any::AnyRow) -> Plugin {
     let manifest_str: String = row.get("manifest_json");
@@ -30,7 +30,6 @@ fn row_to_plugin(row: sqlx::any::AnyRow) -> Plugin {
         bundle_hash: row.get("bundle_hash"),
         signed: crate::db::get_bool(&row, "signed"),
         icon_url,
-        has_elf: crate::db::get_bool(&row, "has_elf"),
         has_bundle: crate::db::get_bool(&row, "has_bundle"),
         creator_id: row.get("creator_id"),
         created_at: row.get("created_at"),
@@ -102,14 +101,13 @@ pub async fn require_plugin_in_space(
     }
 }
 
-/// Insert a plugin with its manifest, and optionally ELF/bundle/icon BLOBs.
+/// Insert a plugin with its manifest, bundle ZIP, and optional icon.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_plugin(
     pool: &AnyPool,
     space_id: &str,
     creator_id: &str,
     manifest: &PluginManifest,
-    elf_blob: Option<&[u8]>,
     bundle_blob: Option<&[u8]>,
     icon_blob: Option<&[u8]>,
 ) -> Result<Plugin, AppError> {
@@ -119,7 +117,7 @@ pub async fn create_plugin(
     let signed = manifest.signed;
 
     sqlx::query(&super::q(
-        "INSERT INTO plugins (id, space_id, name, plugin_type, runtime, description, version, manifest_json, elf_blob, bundle_blob, icon_blob, bundle_hash, signed, creator_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO plugins (id, space_id, name, plugin_type, runtime, description, version, manifest_json, bundle_blob, icon_blob, bundle_hash, signed, creator_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ))
     .bind(&id)
     .bind(space_id)
@@ -129,7 +127,6 @@ pub async fn create_plugin(
     .bind(&manifest.description)
     .bind(&manifest.version)
     .bind(&manifest_json)
-    .bind(elf_blob)
     .bind(bundle_blob)
     .bind(icon_blob)
     .bind(bundle_hash)
@@ -149,20 +146,7 @@ pub async fn delete_plugin(pool: &AnyPool, plugin_id: &str) -> Result<(), AppErr
     Ok(())
 }
 
-/// Fetch the ELF BLOB for a scripted plugin.
-pub async fn get_elf_blob(pool: &AnyPool, plugin_id: &str) -> Result<Vec<u8>, AppError> {
-    let row: Option<(Vec<u8>,)> =
-        sqlx::query_as(&super::q("SELECT elf_blob FROM plugins WHERE id = ?"))
-            .bind(plugin_id)
-            .fetch_optional(pool)
-            .await?;
-    match row {
-        Some((blob,)) => Ok(blob),
-        None => Err(AppError::NotFound("unknown_plugin".to_string())),
-    }
-}
-
-/// Fetch the bundle BLOB for a native plugin.
+/// Fetch the bundle BLOB for a plugin.
 pub async fn get_bundle_blob(pool: &AnyPool, plugin_id: &str) -> Result<Vec<u8>, AppError> {
     let row: Option<(Vec<u8>,)> =
         sqlx::query_as(&super::q("SELECT bundle_blob FROM plugins WHERE id = ?"))

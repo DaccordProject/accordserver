@@ -16,8 +16,10 @@ pub struct PluginManifest {
     pub description: String,
     #[serde(default)]
     pub version: String,
-    #[serde(default)]
+    #[serde(default, alias = "entry")]
     pub entry_point: String,
+    #[serde(default)]
+    pub format: String,
     #[serde(default)]
     pub max_participants: i64,
     #[serde(default)]
@@ -60,7 +62,6 @@ pub struct Plugin {
     pub signed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_url: Option<String>,
-    pub has_elf: bool,
     pub has_bundle: bool,
     pub creator_id: String,
     pub created_at: String,

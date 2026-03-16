@@ -293,7 +293,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/spaces/{space_id}/plugins/{plugin_id}",
             delete(plugins::uninstall_plugin),
         )
-        .route("/plugins/{plugin_id}/elf", get(plugins::get_plugin_elf))
+        .route("/plugins/{plugin_id}/source", get(plugins::get_plugin_source))
         .route(
             "/plugins/{plugin_id}/bundle",
             get(plugins::get_plugin_bundle),
