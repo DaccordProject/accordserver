@@ -161,9 +161,7 @@ pub async fn get_plugin_source(
 
     let bytes = db::plugins::get_bundle_blob(&state.db, &plugin_id).await?;
     if bytes.is_empty() {
-        return Err(AppError::NotFound(
-            "plugin bundle not found".to_string(),
-        ));
+        return Err(AppError::NotFound("plugin bundle not found".to_string()));
     }
 
     Ok((
