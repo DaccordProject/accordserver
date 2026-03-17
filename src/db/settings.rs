@@ -7,7 +7,8 @@ pub async fn get_settings(pool: &AnyPool) -> Result<ServerSettings, AppError> {
     let row = sqlx::query(
         "SELECT max_emoji_size, max_avatar_size, max_sound_size, max_attachment_size, \
          max_attachments_per_message, server_name, registration_policy, max_spaces, \
-         max_members_per_space, motd, public_listing, updated_at \
+         max_members_per_space, motd, public_listing, tos_enabled, tos_text, \
+         tos_version, tos_url, updated_at \
          FROM server_settings WHERE id = 1",
     )
     .fetch_one(pool)
@@ -25,6 +26,10 @@ pub async fn get_settings(pool: &AnyPool) -> Result<ServerSettings, AppError> {
         max_members_per_space: row.get("max_members_per_space"),
         motd: row.get("motd"),
         public_listing: crate::db::get_bool(&row, "public_listing"),
+        tos_enabled: crate::db::get_bool(&row, "tos_enabled"),
+        tos_text: row.get("tos_text"),
+        tos_version: row.get("tos_version"),
+        tos_url: row.get("tos_url"),
         updated_at: row.get("updated_at"),
     })
 }
@@ -68,6 +73,22 @@ pub async fn update_settings(
     }
     if input.public_listing.is_some() {
         sets.push("public_listing = ?");
+    }
+    if input.tos_enabled.is_some() {
+        sets.push("tos_enabled = ?");
+    }
+    if input.tos_text.is_some() {
+        sets.push("tos_text = ?");
+        // Auto-bump tos_version when tos_text changes (unless explicitly provided)
+        if input.tos_version.is_none() {
+            sets.push("tos_version = tos_version + 1");
+        }
+    }
+    if input.tos_version.is_some() {
+        sets.push("tos_version = ?");
+    }
+    if input.tos_url.is_some() {
+        sets.push("tos_url = ?");
     }
 
     if sets.is_empty() {
@@ -115,6 +136,18 @@ pub async fn update_settings(
         query = query.bind(v);
     }
     if let Some(v) = input.public_listing {
+        query = query.bind(v);
+    }
+    if let Some(v) = input.tos_enabled {
+        query = query.bind(v);
+    }
+    if let Some(ref v) = input.tos_text {
+        query = query.bind(v);
+    }
+    if let Some(v) = input.tos_version {
+        query = query.bind(v);
+    }
+    if let Some(ref v) = input.tos_url {
         query = query.bind(v);
     }
 

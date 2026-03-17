@@ -15,6 +15,10 @@ pub struct ServerSettings {
     pub max_members_per_space: i64,
     pub motd: Option<String>,
     pub public_listing: bool,
+    pub tos_enabled: bool,
+    pub tos_text: Option<String>,
+    pub tos_version: i64,
+    pub tos_url: Option<String>,
     pub updated_at: Option<String>,
 }
 
@@ -32,6 +36,10 @@ impl Default for ServerSettings {
             max_members_per_space: 0,
             motd: None,
             public_listing: false,
+            tos_enabled: true,
+            tos_text: None,
+            tos_version: 1,
+            tos_url: None,
             updated_at: None,
         }
     }
@@ -50,4 +58,8 @@ pub struct UpdateServerSettings {
     pub max_members_per_space: Option<i64>,
     pub motd: Option<String>,
     pub public_listing: Option<bool>,
+    pub tos_enabled: Option<bool>,
+    pub tos_text: Option<String>,
+    pub tos_version: Option<i64>,
+    pub tos_url: Option<String>,
 }

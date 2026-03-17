@@ -36,6 +36,10 @@ pub async fn get_public_settings(
             "server_name": settings.server_name,
             "registration_policy": settings.registration_policy,
             "motd": settings.motd,
+            "tos_enabled": settings.tos_enabled,
+            "tos_text": settings.tos_text,
+            "tos_version": settings.tos_version,
+            "tos_url": settings.tos_url,
         }
     })))
 }

@@ -126,6 +126,11 @@ pub async fn create_message(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
 
+    // Thread permission enforcement
+    if input.thread_id.is_some() {
+        require_channel_permission(&state.db, &channel_id, &auth, "send_in_threads").await?;
+    }
+
     // Input validation
     if input.content.len() > 4000 {
         return Err(AppError::BadRequest(
@@ -173,6 +178,37 @@ pub async fn create_message(
             event,
             intent: "messages".to_string(),
         });
+
+        // When a thread reply is created, broadcast an update for the parent
+        // message so clients can refresh the reply count indicator.
+        if let Some(ref thread_id) = input.thread_id {
+            if let Ok(parent_msg) = db::messages::get_message_row(&state.db, thread_id).await {
+                let reply_count = db::messages::get_thread_reply_count(&state.db, thread_id)
+                    .await
+                    .unwrap_or(0);
+                let parent_attachments =
+                    db::attachments::get_attachments_for_message(&state.db, thread_id)
+                        .await
+                        .unwrap_or_default();
+                let parent_json = message_row_to_json_full(
+                    &parent_msg,
+                    &parent_attachments,
+                    None,
+                    Some(reply_count),
+                );
+                let update_event = serde_json::json!({
+                    "op": 0,
+                    "type": "message.update",
+                    "data": parent_json
+                });
+                let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+                    space_id: channel.space_id.clone(),
+                    target_user_ids: None,
+                    event: update_event,
+                    intent: "messages".to_string(),
+                });
+            }
+        }
     }
 
     // Spawn URL unfurling in the background -- if the message has no embeds
@@ -278,6 +314,11 @@ pub async fn create_message_multipart(
     let input = payload_json.ok_or_else(|| {
         AppError::BadRequest("missing payload_json field in multipart request".to_string())
     })?;
+
+    // Thread permission enforcement
+    if input.thread_id.is_some() {
+        require_channel_permission(&state.db, &channel_id, &auth, "send_in_threads").await?;
+    }
 
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
     let msg = db::messages::create_message(
@@ -484,22 +525,33 @@ pub async fn unpin_message(
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
+#[derive(Deserialize, Default)]
+pub struct TypingIndicatorBody {
+    pub thread_id: Option<String>,
+}
+
 pub async fn typing_indicator(
     state: State<AppState>,
     Path(channel_id): Path<String>,
     auth: AuthUser,
+    body: Option<Json<TypingIndicatorBody>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
+    let thread_id = body.and_then(|b| b.thread_id.clone());
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+        let mut data = serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": auth.user_id,
+            "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+        });
+        if let Some(ref tid) = thread_id {
+            data["thread_id"] = serde_json::Value::String(tid.clone());
+        }
         let event = serde_json::json!({
             "op": 0,
             "type": "typing.start",
-            "data": {
-                "channel_id": channel_id,
-                "user_id": auth.user_id,
-                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()
-            }
+            "data": data
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id,

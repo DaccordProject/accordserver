@@ -21,6 +21,8 @@ pub const DEFAULT_EVERYONE_PERMISSIONS: &[&str] = &[
     "use_external_emojis",
     "stream",
     "use_soundboard",
+    "create_threads",
+    "send_in_threads",
 ];
 
 /// Permissions granted to the default Moderator role.

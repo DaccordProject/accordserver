@@ -313,15 +313,7 @@ async fn find_or_create_test_plugin(
         ..Default::default()
     };
 
-    db::plugins::create_plugin(
-        pool,
-        space_id,
-        creator_id,
-        &manifest,
-        Some(elf_stub),
-        None,
-    )
-    .await
+    db::plugins::create_plugin(pool, space_id, creator_id, &manifest, Some(elf_stub), None).await
 }
 
 async fn find_or_create_space(
