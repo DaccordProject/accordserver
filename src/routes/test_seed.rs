@@ -320,7 +320,6 @@ async fn find_or_create_test_plugin(
         &manifest,
         Some(elf_stub),
         None,
-        None,
     )
     .await
 }
