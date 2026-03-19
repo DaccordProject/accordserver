@@ -499,8 +499,7 @@ pub async fn register(
             Ok(_) => {
                 tracing::info!("auto-joined user {} to default space {}", id, space_id);
                 // Post a system message in the welcome/system channel (if configured)
-                super::system_messages::broadcast_member_join_message(&state, &space_id, &id)
-                    .await;
+                super::system_messages::broadcast_member_join_message(&state, &space_id, &id).await;
             }
             Err(e) => {
                 tracing::error!(

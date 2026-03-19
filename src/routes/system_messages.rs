@@ -38,10 +38,7 @@ pub async fn broadcast_member_join_message(state: &AppState, space_id: &str, use
         }
     };
 
-    let username = user
-        .display_name
-        .as_deref()
-        .unwrap_or(&user.username);
+    let username = user.display_name.as_deref().unwrap_or(&user.username);
 
     let content = format!("{} joined the server.", username);
 

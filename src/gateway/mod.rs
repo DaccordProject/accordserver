@@ -230,11 +230,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     if is_guest_session {
         if let Some(ref gtx) = *state.gateway_tx.read().await {
             for sid in &space_ids {
-                let count = state
-                    .guest_counts
-                    .get(sid)
-                    .map(|c| *c)
-                    .unwrap_or(0);
+                let count = state.guest_counts.get(sid).map(|c| *c).unwrap_or(0);
                 let event = serde_json::json!({
                     "op": events::opcode::EVENT,
                     "type": "anonymous_count_updated",
@@ -721,7 +717,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     // Cleanup: set presence to offline if no other sessions for this user
-    if !is_guest_session && !crate::presence::user_has_other_sessions(&state, &user_id, &session_id).await {
+    if !is_guest_session
+        && !crate::presence::user_has_other_sessions(&state, &user_id, &session_id).await
+    {
         crate::presence::remove_presence(&state, &user_id);
 
         // Broadcast presence.update (offline) to all spaces

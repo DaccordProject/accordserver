@@ -140,6 +140,8 @@ impl TestServer {
             mcp_api_key: None,
             login_failures: Arc::new(DashMap::new()),
             register_attempts: Arc::new(DashMap::new()),
+            guest_attempts: Arc::new(DashMap::new()),
+            guest_counts: Arc::new(DashMap::new()),
         };
 
         Self { state }
@@ -297,6 +299,7 @@ impl TestServer {
                 user_limit: None,
                 rate_limit: None,
                 position: None,
+                allow_anonymous_read: None,
             },
         )
         .await
@@ -319,6 +322,7 @@ impl TestServer {
                 user_limit: None,
                 rate_limit: None,
                 position: None,
+                allow_anonymous_read: None,
             },
         )
         .await

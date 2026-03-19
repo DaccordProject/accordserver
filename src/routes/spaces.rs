@@ -55,12 +55,8 @@ pub async fn get_space(
         Err(e) => return Err(e),
     };
     let is_guest = auth.0.as_ref().map_or(false, |a| a.is_guest);
-    let guest_allowed = is_guest
-        && auth
-            .0
-            .as_ref()
-            .and_then(|a| a.guest_space_id.as_deref())
-            == Some(&space.id);
+    let guest_allowed =
+        is_guest && auth.0.as_ref().and_then(|a| a.guest_space_id.as_deref()) == Some(&space.id);
     if !space.public && !guest_allowed {
         let user = auth
             .0
@@ -425,10 +421,6 @@ pub async fn get_anonymous_count(
     Path(space_id): Path<String>,
     _auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let count = state
-        .guest_counts
-        .get(&space_id)
-        .map(|c| *c)
-        .unwrap_or(0);
+    let count = state.guest_counts.get(&space_id).map(|c| *c).unwrap_or(0);
     Ok(Json(serde_json::json!({ "count": count })))
 }
