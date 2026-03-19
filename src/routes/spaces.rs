@@ -54,7 +54,7 @@ pub async fn get_space(
         Err(AppError::NotFound(_)) => db::spaces::get_space_by_slug(&state.db, &id_or_slug).await?,
         Err(e) => return Err(e),
     };
-    let is_guest = auth.0.as_ref().map_or(false, |a| a.is_guest);
+    let is_guest = auth.0.as_ref().is_some_and(|a| a.is_guest);
     let guest_allowed =
         is_guest && auth.0.as_ref().and_then(|a| a.guest_space_id.as_deref()) == Some(&space.id);
     if !space.public && !guest_allowed {
@@ -185,7 +185,7 @@ pub async fn list_channels(
     auth: OptionalAuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let space = db::spaces::get_space_row(&state.db, &space_id).await?;
-    let is_guest = auth.0.as_ref().map_or(false, |a| a.is_guest);
+    let is_guest = auth.0.as_ref().is_some_and(|a| a.is_guest);
     if !space.public && !is_guest {
         let user = auth
             .0
