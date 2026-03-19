@@ -232,8 +232,7 @@ pub async fn get_channel_active_sessions(
         .ok_or_else(|| AppError::BadRequest("channel has no space".to_string()))?;
     require_membership(&state.db, space_id, &auth.user_id).await?;
 
-    let sessions =
-        db::plugins::get_active_sessions_for_channel(&state.db, &channel_id).await?;
+    let sessions = db::plugins::get_active_sessions_for_channel(&state.db, &channel_id).await?;
     Ok(Json(serde_json::json!({ "data": sessions })))
 }
 
