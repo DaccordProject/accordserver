@@ -371,6 +371,27 @@ pub async fn next_slot_index(pool: &AnyPool, session_id: &str) -> Result<i64, Ap
     Ok(max.map(|m| m + 1).unwrap_or(0))
 }
 
+/// Get active (non-ended) sessions for a channel.
+pub async fn get_active_sessions_for_channel(
+    pool: &AnyPool,
+    channel_id: &str,
+) -> Result<Vec<PluginSession>, AppError> {
+    let rows = sqlx::query(&super::q(
+        "SELECT id, plugin_id, channel_id, host_user_id, state, created_at FROM plugin_sessions WHERE channel_id = ? AND state != 'ended' ORDER BY created_at",
+    ))
+    .bind(channel_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut sessions = Vec::new();
+    for row in rows {
+        let mut session = row_to_session(row);
+        session.participants = list_participants(pool, &session.id).await?;
+        sessions.push(session);
+    }
+    Ok(sessions)
+}
+
 /// Get participant user IDs for a session (for targeted gateway broadcasts).
 pub async fn get_session_user_ids(
     pool: &AnyPool,

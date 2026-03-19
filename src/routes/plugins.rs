@@ -219,6 +219,24 @@ pub async fn get_plugin_icon(
 
 // ── Sessions ────────────────────────────────────────────────────────────────
 
+pub async fn get_channel_active_sessions(
+    state: State<AppState>,
+    Path(channel_id): Path<String>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Look up the channel's space to verify membership
+    let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    let space_id = channel
+        .space_id
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("channel has no space".to_string()))?;
+    require_membership(&state.db, space_id, &auth.user_id).await?;
+
+    let sessions =
+        db::plugins::get_active_sessions_for_channel(&state.db, &channel_id).await?;
+    Ok(Json(serde_json::json!({ "data": sessions })))
+}
+
 pub async fn create_session(
     state: State<AppState>,
     Path(plugin_id): Path<String>,
@@ -249,6 +267,7 @@ pub async fn create_session(
             "state": session.state,
             "channel_id": session.channel_id,
             "host_user_id": session.host_user_id,
+            "participants": session.participants,
         }),
     )
     .await;
@@ -439,7 +458,9 @@ pub async fn assign_role(
 
     let participant_ids = db::plugins::get_session_user_ids(&state.db, &session_id).await?;
 
-    // Broadcast role change to participants
+    let updated_session = db::plugins::get_session(&state.db, &session_id).await?;
+
+    // Broadcast role change to participants (includes full participant list for lobby)
     broadcast_plugin_event(
         &state,
         Some(&plugin.space_id),
@@ -450,11 +471,12 @@ pub async fn assign_role(
             "session_id": session_id,
             "user_id": input.user_id,
             "role": input.role,
+            "participants": updated_session.participants,
         }),
     )
     .await;
 
-    let session = db::plugins::get_session(&state.db, &session_id).await?;
+    let session = updated_session;
     Ok(Json(serde_json::json!({ "data": session })))
 }
 

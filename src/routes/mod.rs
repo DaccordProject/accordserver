@@ -309,6 +309,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/plugins/{plugin_id}/icon", get(plugins::get_plugin_icon))
         .route(
+            "/channels/{channel_id}/sessions/active",
+            get(plugins::get_channel_active_sessions),
+        )
+        .route(
             "/plugins/{plugin_id}/sessions",
             post(plugins::create_session),
         )
