@@ -54,11 +54,20 @@ pub async fn get_space(
         Err(AppError::NotFound(_)) => db::spaces::get_space_by_slug(&state.db, &id_or_slug).await?,
         Err(e) => return Err(e),
     };
-    if !space.public {
+    let is_guest = auth.0.as_ref().map_or(false, |a| a.is_guest);
+    let guest_allowed = is_guest
+        && auth
+            .0
+            .as_ref()
+            .and_then(|a| a.guest_space_id.as_deref())
+            == Some(&space.id);
+    if !space.public && !guest_allowed {
         let user = auth
             .0
             .ok_or_else(|| AppError::Unauthorized("authentication required".into()))?;
-        require_membership(&state.db, &space.id, &user.user_id).await?;
+        if !user.is_guest {
+            require_membership(&state.db, &space.id, &user.user_id).await?;
+        }
     }
     Ok(Json(serde_json::json!({ "data": space })))
 }
@@ -180,13 +189,23 @@ pub async fn list_channels(
     auth: OptionalAuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let space = db::spaces::get_space_row(&state.db, &space_id).await?;
-    if !space.public {
+    let is_guest = auth.0.as_ref().map_or(false, |a| a.is_guest);
+    if !space.public && !is_guest {
         let user = auth
             .0
             .ok_or_else(|| AppError::Unauthorized("authentication required".into()))?;
         require_membership(&state.db, &space_id, &user.user_id).await?;
     }
     let channels = db::channels::list_channels_in_space(&state.db, &space_id).await?;
+    // Guest tokens: filter to only channels with allow_anonymous_read
+    let channels: Vec<_> = if is_guest {
+        channels
+            .into_iter()
+            .filter(|c| c.allow_anonymous_read)
+            .collect()
+    } else {
+        channels
+    };
     let data = channels_to_json_async(&state.db, &channels).await?;
     Ok(Json(serde_json::json!({ "data": data })))
 }
@@ -320,6 +339,7 @@ fn channel_row_to_json_with_overwrites(
         "permission_overwrites": overwrites,
         "archived": row.archived,
         "auto_archive_after": row.auto_archive_after,
+        "allow_anonymous_read": row.allow_anonymous_read,
         "created_at": row.created_at
     })
 }
@@ -391,7 +411,24 @@ pub async fn join_public_space(
         });
     }
 
+    // Post a system message in the welcome/system channel (if configured)
+    super::system_messages::broadcast_member_join_message(&state, &space.id, &auth.user_id).await;
+
     Ok(Json(
         serde_json::json!({ "data": { "space_id": space.id } }),
     ))
+}
+
+/// Returns the current number of anonymous guest viewers in a space.
+pub async fn get_anonymous_count(
+    state: State<AppState>,
+    Path(space_id): Path<String>,
+    _auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let count = state
+        .guest_counts
+        .get(&space_id)
+        .map(|c| *c)
+        .unwrap_or(0);
+    Ok(Json(serde_json::json!({ "count": count })))
 }

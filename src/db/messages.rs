@@ -212,6 +212,42 @@ pub async fn create_message(
     get_message_row(pool, &id).await
 }
 
+/// Creates a system message with a custom type (e.g. "member_join", "member_leave").
+/// Unlike `create_message`, this sets the `type` column to the given value.
+pub async fn create_system_message(
+    pool: &AnyPool,
+    channel_id: &str,
+    author_id: &str,
+    space_id: &str,
+    content: &str,
+    message_type: &str,
+) -> Result<MessageRow, AppError> {
+    let id = snowflake::generate();
+
+    sqlx::query(&super::q(
+        "INSERT INTO messages (id, channel_id, space_id, author_id, content, type, tts, embeds) VALUES (?, ?, ?, ?, ?, ?, FALSE, '[]')"
+    ))
+    .bind(&id)
+    .bind(channel_id)
+    .bind(space_id)
+    .bind(author_id)
+    .bind(content)
+    .bind(message_type)
+    .execute(pool)
+    .await?;
+
+    // Update last_message_id on the channel
+    sqlx::query(&super::q(
+        "UPDATE channels SET last_message_id = ? WHERE id = ?",
+    ))
+    .bind(&id)
+    .bind(channel_id)
+    .execute(pool)
+    .await?;
+
+    get_message_row(pool, &id).await
+}
+
 pub async fn update_message(
     pool: &AnyPool,
     message_id: &str,

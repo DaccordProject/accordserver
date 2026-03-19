@@ -21,6 +21,7 @@ mod seo;
 mod settings;
 mod soundboard;
 pub mod spaces;
+pub mod system_messages;
 #[cfg(feature = "test-seed")]
 mod test_seed;
 mod users;
@@ -74,6 +75,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/login/mfa", post(auth::login_mfa))
+        .route("/auth/guest", post(auth::guest))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/sessions/revoke-all", post(auth::revoke_all_sessions))
         .route("/auth/change-password", post(auth::change_password))
@@ -269,6 +271,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(invites::list_space_invites).post(invites::create_space_invite),
         )
         .route("/spaces/{space_id}/join", post(spaces::join_public_space))
+        .route(
+            "/spaces/{space_id}/anonymous-count",
+            get(spaces::get_anonymous_count),
+        )
         .route(
             "/channels/{channel_id}/invites",
             get(invites::list_channel_invites).post(invites::create_channel_invite),

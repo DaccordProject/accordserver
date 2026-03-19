@@ -186,6 +186,7 @@ async fn resolve_member_permissions_inner(
 
 /// Check that a user has a specific permission in a space.
 /// Instance admins (`auth.is_admin`) bypass all permission checks.
+/// Guest tokens are scoped to read-only access on their assigned space.
 /// Returns `Forbidden` if the user lacks the permission or is not a member.
 pub async fn require_permission(
     pool: &AnyPool,
@@ -193,6 +194,10 @@ pub async fn require_permission(
     auth: &AuthUser,
     perm: &str,
 ) -> Result<(), AppError> {
+    // Guest tokens: only allow read-only permissions on their scoped space
+    if auth.is_guest {
+        return require_guest_space_permission(auth, space_id, perm);
+    }
     let perms =
         resolve_member_permissions_with_admin(pool, space_id, &auth.user_id, auth.is_admin).await?;
     if !has_permission(&perms, perm) {
@@ -201,7 +206,32 @@ pub async fn require_permission(
     Ok(())
 }
 
+/// Guest-only read permissions.
+const GUEST_PERMISSIONS: &[&str] = &["view_channel", "read_history"];
+
+/// Check that a guest token is authorized for the given space and permission.
+fn require_guest_space_permission(
+    auth: &AuthUser,
+    space_id: &str,
+    perm: &str,
+) -> Result<(), AppError> {
+    // Guests can only access their scoped space
+    if auth.guest_space_id.as_deref() != Some(space_id) {
+        return Err(AppError::Forbidden(
+            "guest token not valid for this space".into(),
+        ));
+    }
+    // Guests only have read-only permissions
+    if !GUEST_PERMISSIONS.contains(&perm) {
+        return Err(AppError::Forbidden(
+            "guest accounts cannot perform this action".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Shorthand: require that a user is a member of the space (has view_channel).
+/// Note: does not handle guest tokens — use `require_permission` with an `AuthUser` for guests.
 pub async fn require_membership(
     pool: &AnyPool,
     space_id: &str,
@@ -338,6 +368,7 @@ pub async fn require_dm_access(
 /// Check that a user has a specific permission for a channel.
 /// Uses `resolve_channel_permissions` which accounts for overwrites.
 /// Instance admins (`auth.is_admin`) bypass all permission checks.
+/// Guest tokens are restricted to `allow_anonymous_read` channels with read-only perms.
 /// For DM/group_dm channels, checks participant access instead.
 /// Returns the space_id on success (empty string for DMs).
 pub async fn require_channel_permission(
@@ -347,6 +378,38 @@ pub async fn require_channel_permission(
     perm: &str,
 ) -> Result<String, AppError> {
     let channel = db::channels::get_channel_row(pool, channel_id).await?;
+
+    // Guest token handling: restrict to allow_anonymous_read channels
+    if auth.is_guest {
+        if channel.channel_type == "dm" || channel.channel_type == "group_dm" {
+            return Err(AppError::Forbidden(
+                "guest accounts cannot access DMs".into(),
+            ));
+        }
+        let space_id = channel
+            .space_id
+            .ok_or_else(|| AppError::BadRequest("channel has no space".to_string()))?;
+        // Check space scope
+        if auth.guest_space_id.as_deref() != Some(&space_id) {
+            return Err(AppError::Forbidden(
+                "guest token not valid for this space".into(),
+            ));
+        }
+        // Check channel allows anonymous read
+        if !channel.allow_anonymous_read {
+            return Err(AppError::Forbidden(
+                "this channel is not publicly readable".into(),
+            ));
+        }
+        // Check permission is read-only
+        if !GUEST_PERMISSIONS.contains(&perm) {
+            return Err(AppError::Forbidden(
+                "guest accounts cannot perform this action".into(),
+            ));
+        }
+        return Ok(space_id);
+    }
+
     if channel.channel_type == "dm" || channel.channel_type == "group_dm" {
         require_dm_access(pool, channel_id, &auth.user_id).await?;
         return Ok(String::new());
@@ -377,6 +440,8 @@ pub async fn require_channel_membership(
         user_id: user_id.to_string(),
         is_bot: false,
         is_admin: false,
+        is_guest: false,
+        guest_space_id: None,
     };
     require_channel_permission(pool, channel_id, &auth, "view_channel").await
 }

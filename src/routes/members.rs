@@ -31,7 +31,16 @@ pub async fn list_members(
     auth: AuthUser,
     Query(params): Query<ListMembersQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_membership(&state.db, &space_id, &auth.user_id).await?;
+    // Guest tokens: allowed to list members for their scoped space
+    if auth.is_guest {
+        if auth.guest_space_id.as_deref() != Some(&space_id) {
+            return Err(AppError::Forbidden(
+                "guest token not valid for this space".into(),
+            ));
+        }
+    } else {
+        require_membership(&state.db, &space_id, &auth.user_id).await?;
+    }
     let limit = params.limit.unwrap_or(50).min(1000);
     let mut rows =
         db::members::list_members(&state.db, &space_id, params.after.as_deref(), limit).await?;

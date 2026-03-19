@@ -43,6 +43,7 @@ pub struct ChannelRow {
     pub last_message_id: Option<String>,
     pub archived: bool,
     pub auto_archive_after: Option<i64>,
+    pub allow_anonymous_read: bool,
     pub created_at: String,
 }
 
@@ -58,6 +59,7 @@ pub struct CreateChannel {
     pub user_limit: Option<i64>,
     pub rate_limit: Option<i64>,
     pub position: Option<i64>,
+    pub allow_anonymous_read: Option<bool>,
 }
 
 fn default_channel_type() -> String {
@@ -75,6 +77,7 @@ pub struct UpdateChannel {
     pub bitrate: Option<i64>,
     pub user_limit: Option<i64>,
     pub archived: Option<bool>,
+    pub allow_anonymous_read: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -257,6 +257,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(0),
         },
     )
@@ -274,6 +275,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(1),
         },
     )
@@ -291,6 +293,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(2),
         },
     )
@@ -308,6 +311,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(3),
         },
     )
@@ -328,6 +332,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(0),
         },
     )
@@ -345,6 +350,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(1),
         },
     )
@@ -362,6 +368,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(2),
         },
     )
@@ -379,6 +386,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(0),
         },
     )
@@ -396,6 +404,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(1),
         },
     )
@@ -413,6 +422,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(2),
         },
     )
@@ -430,6 +440,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(0),
         },
     )
@@ -447,6 +458,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: None,
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(1),
         },
     )
@@ -467,6 +479,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: Some(64000),
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(0),
         },
     )
@@ -484,6 +497,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: Some(64000),
             user_limit: Some(10),
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(1),
         },
     )
@@ -501,6 +515,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bitrate: Some(96000),
             user_limit: None,
             rate_limit: None,
+            allow_anonymous_read: None,
             position: Some(2),
         },
     )

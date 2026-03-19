@@ -20,6 +20,21 @@ pub async fn get_current_user(
     state: State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Guest tokens return a synthetic user object
+    if auth.is_guest {
+        return Ok(Json(serde_json::json!({
+            "data": {
+                "id": auth.user_id,
+                "username": "Guest",
+                "display_name": "Guest",
+                "avatar": null,
+                "bot": false,
+                "system": false,
+                "is_guest": true,
+                "created_at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
+            }
+        })));
+    }
     let user = db::users::get_user(&state.db, &auth.user_id).await?;
     Ok(Json(serde_json::json!({ "data": user })))
 }
@@ -146,6 +161,15 @@ pub async fn get_current_user_spaces(
     state: State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Guest tokens: return only their scoped space
+    if auth.is_guest {
+        if let Some(ref space_id) = auth.guest_space_id {
+            if let Ok(space) = db::spaces::get_space_row(&state.db, space_id).await {
+                return Ok(Json(serde_json::json!({ "data": [space] })));
+            }
+        }
+        return Ok(Json(serde_json::json!({ "data": [] })));
+    }
     let space_ids = db::users::get_user_spaces(&state.db, &auth.user_id).await?;
     let mut spaces = Vec::new();
     for id in space_ids {

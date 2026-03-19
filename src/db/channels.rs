@@ -22,11 +22,12 @@ fn row_to_channel(row: sqlx::any::AnyRow) -> ChannelRow {
         last_message_id: row.get("last_message_id"),
         archived: crate::db::get_bool(&row, "archived"),
         auto_archive_after: row.get("auto_archive_after"),
+        allow_anonymous_read: crate::db::get_bool(&row, "allow_anonymous_read"),
         created_at: row.get("created_at"),
     }
 }
 
-const SELECT_CHANNELS: &str = "SELECT id, type, space_id, name, description, topic, position, parent_id, nsfw, rate_limit, bitrate, user_limit, owner_id, last_message_id, archived, auto_archive_after, created_at FROM channels";
+const SELECT_CHANNELS: &str = "SELECT id, type, space_id, name, description, topic, position, parent_id, nsfw, rate_limit, bitrate, user_limit, owner_id, last_message_id, archived, auto_archive_after, allow_anonymous_read, created_at FROM channels";
 
 pub async fn get_channel_row(pool: &AnyPool, channel_id: &str) -> Result<ChannelRow, AppError> {
     let row = sqlx::query(&super::q(&format!("{SELECT_CHANNELS} WHERE id = ?")))
@@ -61,7 +62,7 @@ pub async fn create_channel(
     let position = input.position.unwrap_or(0);
 
     sqlx::query(&super::q(
-        "INSERT INTO channels (id, name, type, space_id, topic, parent_id, nsfw, bitrate, user_limit, rate_limit, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO channels (id, name, type, space_id, topic, parent_id, nsfw, bitrate, user_limit, rate_limit, position, allow_anonymous_read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ))
     .bind(&id)
     .bind(&input.name)
@@ -74,6 +75,7 @@ pub async fn create_channel(
     .bind(input.user_limit)
     .bind(input.rate_limit.unwrap_or(0))
     .bind(position)
+    .bind(input.allow_anonymous_read.unwrap_or(false))
     .execute(pool)
     .await?;
 
@@ -122,6 +124,9 @@ pub async fn update_channel(
     }
     if let Some(archived) = input.archived {
         bool_values.push(("archived".to_string(), archived));
+    }
+    if let Some(allow_anonymous_read) = input.allow_anonymous_read {
+        bool_values.push(("allow_anonymous_read".to_string(), allow_anonymous_read));
     }
 
     for (col, _) in &int_values {

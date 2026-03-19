@@ -121,6 +121,7 @@ pub async fn delete_channel(
                     bitrate: None,
                     user_limit: None,
                     archived: None,
+                    allow_anonymous_read: None,
                 };
                 // We need to update owner_id directly since UpdateChannel doesn't have it
                 sqlx::query(&crate::db::q(

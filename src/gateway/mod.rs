@@ -85,14 +85,22 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 user_intents = identify.intents;
                                                 session_id = crate::snowflake::generate();
 
-                                                // Load user's space memberships
-                                                space_ids = db::spaces::list_space_ids_for_user(&state.db, &user_id).await
-                                                    .map(|sids| sids.into_iter().collect())
-                                                    .unwrap_or_default();
+                                                if auth.is_guest {
+                                                    // Guest: use scoped space only, no mutes
+                                                    space_ids = auth.guest_space_id
+                                                        .into_iter()
+                                                        .collect();
+                                                    muted_channel_ids = HashSet::new();
+                                                } else {
+                                                    // Load user's space memberships
+                                                    space_ids = db::spaces::list_space_ids_for_user(&state.db, &user_id).await
+                                                        .map(|sids| sids.into_iter().collect())
+                                                        .unwrap_or_default();
 
-                                                muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
-                                                    .map(|ids| ids.into_iter().collect())
-                                                    .unwrap_or_default();
+                                                    muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
+                                                        .map(|ids| ids.into_iter().collect())
+                                                        .unwrap_or_default();
+                                                }
 
                                                 break;
                                             }
@@ -117,33 +125,44 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    // Set user presence to online
-    crate::presence::set_presence(&state, &user_id, "online", vec![]);
+    // Guest sessions: track in-memory, skip presence/relationships
+    let is_guest_session = user_id.starts_with("guest:");
 
-    // Collect presences of online members in the user's spaces
-    let mut all_member_ids = std::collections::HashSet::new();
-    for sid in &space_ids {
-        if let Ok(members) = db::spaces::list_member_ids_for_space(&state.db, sid).await {
-            for mid in members {
-                all_member_ids.insert(mid);
+    let presences_json: Vec<serde_json::Value>;
+    let friend_ids: HashSet<String>;
+    let relationships_json: Vec<serde_json::Value>;
+
+    if is_guest_session {
+        presences_json = vec![];
+        friend_ids = HashSet::new();
+        relationships_json = vec![];
+    } else {
+        // Set user presence to online
+        crate::presence::set_presence(&state, &user_id, "online", vec![]);
+
+        // Collect presences of online members in the user's spaces
+        let mut all_member_ids = std::collections::HashSet::new();
+        for sid in &space_ids {
+            if let Ok(members) = db::spaces::list_member_ids_for_space(&state.db, sid).await {
+                for mid in members {
+                    all_member_ids.insert(mid);
+                }
             }
         }
-    }
-    let presences = crate::presence::get_space_presences(&state, &all_member_ids);
-    let presences_json: Vec<serde_json::Value> = presences
-        .iter()
-        .map(|p| serde_json::to_value(p).unwrap_or_default())
-        .collect();
+        let presences = crate::presence::get_space_presences(&state, &all_member_ids);
+        presences_json = presences
+            .iter()
+            .map(|p| serde_json::to_value(p).unwrap_or_default())
+            .collect();
 
-    // Load this user's relationships for READY payload and friend set for presence routing
-    let friend_ids: HashSet<String> = db::relationships::get_friend_ids(&state.db, &user_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+        // Load this user's relationships for READY payload and friend set for presence routing
+        friend_ids = db::relationships::get_friend_ids(&state.db, &user_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
-    let relationships_json: Vec<serde_json::Value> =
-        db::relationships::list_relationships(&state.db, &user_id)
+        relationships_json = db::relationships::list_relationships(&state.db, &user_id)
             .await
             .unwrap_or_default()
             .iter()
@@ -165,6 +184,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 })
             })
             .collect();
+    }
 
     // Send READY event
     let motd = state.settings.load().motd.clone();
@@ -178,6 +198,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             "spaces": space_ids.iter().collect::<Vec<_>>(),
             "presences": presences_json,
             "relationships": relationships_json,
+            "is_guest": is_guest_session,
             "api_version": "v1",
             "server_version": env!("CARGO_PKG_VERSION"),
             "motd": motd
@@ -205,40 +226,66 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         dispatcher.register_session(session);
     }
 
-    // Broadcast presence.update (online) to all spaces
-    if let Some(ref gtx) = *state.gateway_tx.read().await {
-        let presence_data = serde_json::json!({
-            "user_id": user_id,
-            "status": "online",
-            "client_status": { "desktop": "online" },
-            "activities": []
-        });
-        for sid in &space_ids {
-            let event = serde_json::json!({
-                "op": events::opcode::EVENT,
-                "type": "presence.update",
-                "data": presence_data
-            });
-            let _ = gtx.send(GatewayBroadcast {
-                space_id: Some(sid.clone()),
-                target_user_ids: None,
-                event,
-                intent: "presences".to_string(),
-            });
+    // Guest connect: broadcast anonymous_count_updated
+    if is_guest_session {
+        if let Some(ref gtx) = *state.gateway_tx.read().await {
+            for sid in &space_ids {
+                let count = state
+                    .guest_counts
+                    .get(sid)
+                    .map(|c| *c)
+                    .unwrap_or(0);
+                let event = serde_json::json!({
+                    "op": events::opcode::EVENT,
+                    "type": "anonymous_count_updated",
+                    "data": { "count": count, "space_id": sid }
+                });
+                let _ = gtx.send(GatewayBroadcast {
+                    space_id: Some(sid.clone()),
+                    target_user_ids: None,
+                    event,
+                    intent: "members".to_string(),
+                });
+            }
         }
-        // Also broadcast to friends who may not share any space
-        if !friend_ids.is_empty() {
-            let event = serde_json::json!({
-                "op": events::opcode::EVENT,
-                "type": "presence.update",
-                "data": presence_data
+    }
+
+    // Broadcast presence.update (online) to all spaces (skip for guests)
+    if !is_guest_session {
+        if let Some(ref gtx) = *state.gateway_tx.read().await {
+            let presence_data = serde_json::json!({
+                "user_id": user_id,
+                "status": "online",
+                "client_status": { "desktop": "online" },
+                "activities": []
             });
-            let _ = gtx.send(GatewayBroadcast {
-                space_id: None,
-                target_user_ids: Some(friend_ids.iter().cloned().collect()),
-                event,
-                intent: "presences".to_string(),
-            });
+            for sid in &space_ids {
+                let event = serde_json::json!({
+                    "op": events::opcode::EVENT,
+                    "type": "presence.update",
+                    "data": presence_data
+                });
+                let _ = gtx.send(GatewayBroadcast {
+                    space_id: Some(sid.clone()),
+                    target_user_ids: None,
+                    event,
+                    intent: "presences".to_string(),
+                });
+            }
+            // Also broadcast to friends who may not share any space
+            if !friend_ids.is_empty() {
+                let event = serde_json::json!({
+                    "op": events::opcode::EVENT,
+                    "type": "presence.update",
+                    "data": presence_data
+                });
+                let _ = gtx.send(GatewayBroadcast {
+                    space_id: None,
+                    target_user_ids: Some(friend_ids.iter().cloned().collect()),
+                    event,
+                    intent: "presences".to_string(),
+                });
+            }
         }
     }
 
@@ -428,6 +475,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                             user_id: user_id.clone(),
                                                             is_bot,
                                                             is_admin,
+                                                            is_guest: is_guest_session,
+                                                            guest_space_id: None,
                                                         };
                                                         if crate::middleware::permissions::require_channel_permission(
                                                             &state.db, &channel_id, &auth_user, "connect",
@@ -459,6 +508,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                             user_id: user_id.clone(),
                                                             is_bot,
                                                             is_admin,
+                                                            is_guest: is_guest_session,
+                                                            guest_space_id: None,
                                                         };
                                                         let channel = match crate::db::channels::get_channel_row(&state.db, &channel_id).await {
                                                             Ok(ch) => ch,
@@ -642,8 +693,35 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         dispatcher.remove_session(&session_id);
     }
 
+    // Guest cleanup: decrement guest count and broadcast updated count
+    if is_guest_session {
+        for sid in &space_ids {
+            let new_count = {
+                let mut entry = state.guest_counts.entry(sid.clone()).or_insert(0);
+                if *entry > 0 {
+                    *entry -= 1;
+                }
+                *entry
+            };
+            // Broadcast anonymous_count_updated to the space
+            if let Some(ref gtx) = *state.gateway_tx.read().await {
+                let event = serde_json::json!({
+                    "op": events::opcode::EVENT,
+                    "type": "anonymous_count_updated",
+                    "data": { "count": new_count, "space_id": sid }
+                });
+                let _ = gtx.send(GatewayBroadcast {
+                    space_id: Some(sid.clone()),
+                    target_user_ids: None,
+                    event,
+                    intent: "members".to_string(),
+                });
+            }
+        }
+    }
+
     // Cleanup: set presence to offline if no other sessions for this user
-    if !crate::presence::user_has_other_sessions(&state, &user_id, &session_id).await {
+    if !is_guest_session && !crate::presence::user_has_other_sessions(&state, &user_id, &session_id).await {
         crate::presence::remove_presence(&state, &user_id);
 
         // Broadcast presence.update (offline) to all spaces
@@ -689,6 +767,8 @@ struct ResolvedAuth {
     user_id: String,
     is_bot: bool,
     is_admin: bool,
+    is_guest: bool,
+    guest_space_id: Option<String>,
 }
 
 async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
@@ -713,8 +793,31 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
             .bind(&token_hash)
             .fetch_optional(&state.db)
             .await
-            .ok()??;
-        (row.0, false)
+            .ok()?;
+
+        if let Some(row) = row {
+            (row.0, false)
+        } else {
+            // Try guest token lookup
+            let now_fn2 = crate::db::now_sql(state.db_is_postgres);
+            let guest_sql = crate::db::q(&format!(
+                "SELECT space_id FROM guest_tokens WHERE token_hash = ? AND expires_at > {now_fn2}",
+            ));
+            let guest_row = sqlx::query_as::<_, (String,)>(&guest_sql)
+                .bind(&token_hash)
+                .fetch_optional(&state.db)
+                .await
+                .ok()??;
+
+            let guest_user_id = format!("guest:{}", &token_hash[..16]);
+            return Some(ResolvedAuth {
+                user_id: guest_user_id,
+                is_bot: false,
+                is_admin: false,
+                is_guest: true,
+                guest_space_id: Some(guest_row.0),
+            });
+        }
     } else {
         return None;
     };
@@ -730,5 +833,7 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
         user_id,
         is_bot,
         is_admin: user.is_admin,
+        is_guest: false,
+        guest_space_id: None,
     })
 }

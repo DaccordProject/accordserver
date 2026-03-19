@@ -14,6 +14,10 @@ pub struct AuthUser {
     pub user_id: String,
     pub is_bot: bool,
     pub is_admin: bool,
+    /// True when the token is a guest token (anonymous read-only access).
+    pub is_guest: bool,
+    /// Space ID the guest token is scoped to (only set for guest tokens).
+    pub guest_space_id: Option<String>,
 }
 
 fn hash_token(token: &str) -> String {
@@ -46,6 +50,8 @@ async fn resolve_bot_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
         user_id,
         is_bot: true,
         is_admin,
+        is_guest: false,
+        guest_space_id: None,
     })
 }
 
@@ -91,6 +97,51 @@ async fn resolve_bearer_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
         user_id,
         is_bot: false,
         is_admin,
+        is_guest: false,
+        guest_space_id: None,
+    })
+}
+
+async fn resolve_guest_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
+    let token_hash = hash_token(token);
+    let row = sqlx::query(
+        &crate::db::q("SELECT space_id, expires_at FROM guest_tokens WHERE token_hash = ?"),
+    )
+    .bind(&token_hash)
+    .fetch_optional(pool)
+    .await
+    .ok()??;
+
+    use sqlx::Row;
+    let space_id: String = row.get("space_id");
+    let expires_at: String = row.get("expires_at");
+
+    // Parse expiry — handle both SQLite and Postgres datetime formats
+    let expires_utc = chrono::DateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%S%z")
+        .map(|dt| dt.to_utc())
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%S")
+                .map(|dt| dt.and_utc())
+        })
+        .or_else(|_| {
+            chrono::DateTime::parse_from_str(&expires_at, "%Y-%m-%d %H:%M:%S%z")
+                .map(|dt| dt.to_utc())
+        })
+        .ok()?;
+    if expires_utc < chrono::Utc::now() {
+        return None;
+    }
+
+    // Guest tokens use a synthetic user_id derived from the token hash
+    // (no real user account exists)
+    let guest_user_id = format!("guest:{}", &token_hash[..16]);
+
+    Some(AuthUser {
+        user_id: guest_user_id,
+        is_bot: false,
+        is_admin: false,
+        is_guest: true,
+        guest_space_id: Some(space_id),
     })
 }
 
@@ -129,7 +180,14 @@ impl FromRequestParts<AppState> for AuthUser {
                     resolve_bot_token(&pool, &header[4..]).await
                 }
                 Some(header) if header.starts_with("Bearer ") => {
-                    resolve_bearer_token(&pool, &header[7..]).await
+                    let token = &header[7..];
+                    // Try regular bearer token first, fall back to guest token
+                    let user = resolve_bearer_token(&pool, token).await;
+                    if user.is_some() {
+                        user
+                    } else {
+                        resolve_guest_token(&pool, token).await
+                    }
                 }
                 _ => None,
             };
@@ -163,7 +221,13 @@ impl FromRequestParts<AppState> for OptionalAuthUser {
                     resolve_bot_token(&pool, &header[4..]).await
                 }
                 Some(header) if header.starts_with("Bearer ") => {
-                    resolve_bearer_token(&pool, &header[7..]).await
+                    let token = &header[7..];
+                    let user = resolve_bearer_token(&pool, token).await;
+                    if user.is_some() {
+                        user
+                    } else {
+                        resolve_guest_token(&pool, token).await
+                    }
                 }
                 _ => None,
             };

@@ -129,6 +129,7 @@ pub async fn find_existing_dm(
             last_message_id: r.get("last_message_id"),
             archived: r.get("archived"),
             auto_archive_after: r.get("auto_archive_after"),
+            allow_anonymous_read: false,
             created_at: r.get("created_at"),
         }
     }))

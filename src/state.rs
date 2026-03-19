@@ -42,6 +42,13 @@ pub struct RegisterAttemptTracker {
     pub window_start: Instant,
 }
 
+/// Tracks guest token requests per IP for rate limiting.
+#[derive(Clone)]
+pub struct GuestAttemptTracker {
+    pub attempts: u32,
+    pub window_start: Instant,
+}
+
 /// Short-lived MFA ticket issued after password verification when 2FA is required.
 #[derive(Clone)]
 pub struct MfaTicket {
@@ -77,4 +84,8 @@ pub struct AppState {
     pub login_failures: Arc<DashMap<String, LoginFailureTracker>>,
     /// ip_hash -> RegisterAttemptTracker; per-IP rate limiting for /auth/register
     pub register_attempts: Arc<DashMap<String, RegisterAttemptTracker>>,
+    /// ip_hash -> GuestAttemptTracker; per-IP rate limiting for /auth/guest
+    pub guest_attempts: Arc<DashMap<String, GuestAttemptTracker>>,
+    /// Tracks the number of active anonymous guests per space for member list display
+    pub guest_counts: Arc<DashMap<String, u32>>,
 }

@@ -19,7 +19,8 @@ use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::{create_token_hash, generate_token, AuthUser};
 use crate::snowflake;
 use crate::state::{
-    AppState, LoginFailureTracker, MfaTicket, RegisterAttemptTracker, TotpAttemptTracker,
+    AppState, GuestAttemptTracker, LoginFailureTracker, MfaTicket, RegisterAttemptTracker,
+    TotpAttemptTracker,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,13 @@ const LOGIN_WINDOW_SECS: u64 = 900; // 15 minutes
 // ---------------------------------------------------------------------------
 const REGISTER_MAX_ATTEMPTS: u32 = 5;
 const REGISTER_WINDOW_SECS: u64 = 900; // 15 minutes
+
+// ---------------------------------------------------------------------------
+// Guest token constants
+// ---------------------------------------------------------------------------
+const GUEST_MAX_ATTEMPTS: u32 = 10;
+const GUEST_WINDOW_SECS: u64 = 3600; // 1 hour
+const GUEST_TOKEN_LIFETIME_SECS: i64 = 3600; // 1 hour
 
 // ---------------------------------------------------------------------------
 // Request structs
@@ -490,6 +498,9 @@ pub async fn register(
         match db::members::add_member(&state.db, &space_id, &id, state.db_is_postgres).await {
             Ok(_) => {
                 tracing::info!("auto-joined user {} to default space {}", id, space_id);
+                // Post a system message in the welcome/system channel (if configured)
+                super::system_messages::broadcast_member_join_message(&state, &space_id, &id)
+                    .await;
             }
             Err(e) => {
                 tracing::error!(
@@ -1284,6 +1295,126 @@ async fn cleanup_expired_tokens(pool: &sqlx::AnyPool, user_id: &str) {
     .bind(&now)
     .execute(pool)
     .await;
+}
+
+// =========================================================================
+// Guest token (anonymous read-only access)
+// =========================================================================
+
+pub async fn guest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Per-IP rate limit: max 10 guest tokens per hour
+    let ip = extract_request_ip(&headers);
+    check_guest_rate_limit(&state, &ip)?;
+    record_guest_attempt(&state, &ip);
+
+    // Find the default space (first public space, or the first space on the server)
+    let space = find_guest_space(&state.db).await?;
+
+    // Generate a short-lived guest token
+    let token = generate_token();
+    let token_hash = create_token_hash(&token);
+    let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(GUEST_TOKEN_LIFETIME_SECS))
+        .format("%Y-%m-%dT%H:%M:%S+00:00")
+        .to_string();
+
+    // Store the guest token
+    sqlx::query(&crate::db::q(
+        "INSERT INTO guest_tokens (token_hash, space_id, expires_at) VALUES (?, ?, ?)",
+    ))
+    .bind(&token_hash)
+    .bind(&space.id)
+    .bind(&expires_at)
+    .execute(&state.db)
+    .await?;
+
+    // Clean up expired guest tokens (best-effort)
+    let now_fn = crate::db::now_sql(state.db_is_postgres);
+    let _ = sqlx::query(&crate::db::q(&format!(
+        "DELETE FROM guest_tokens WHERE expires_at < {now_fn}"
+    )))
+    .execute(&state.db)
+    .await;
+
+    // Increment guest count for the space
+    state
+        .guest_counts
+        .entry(space.id.clone())
+        .and_modify(|c| *c += 1)
+        .or_insert(1);
+
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "expires_at": expires_at,
+        "space_id": space.id
+    })))
+}
+
+/// Find the space that guest tokens should be scoped to.
+/// Prefers the first public space; falls back to the first space on the server.
+async fn find_guest_space(
+    pool: &sqlx::AnyPool,
+) -> Result<crate::models::space::SpaceRow, AppError> {
+    // Try public spaces first
+    let public = sqlx::query_as::<_, (String,)>(&crate::db::q(
+        "SELECT id FROM spaces WHERE public = true ORDER BY created_at LIMIT 1",
+    ))
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some((id,)) = public {
+        return db::spaces::get_space_row(pool, &id).await;
+    }
+
+    // Fall back to any space
+    let any = sqlx::query_as::<_, (String,)>(&crate::db::q(
+        "SELECT id FROM spaces ORDER BY created_at LIMIT 1",
+    ))
+    .fetch_optional(pool)
+    .await?;
+
+    match any {
+        Some((id,)) => db::spaces::get_space_row(pool, &id).await,
+        None => Err(AppError::NotFound(
+            "no spaces available for guest access".into(),
+        )),
+    }
+}
+
+fn check_guest_rate_limit(state: &AppState, ip: &str) -> Result<(), AppError> {
+    let ip_hash = hash_ip(ip);
+    let now = Instant::now();
+    if let Some(tracker) = state.guest_attempts.get(&ip_hash) {
+        let elapsed = now.duration_since(tracker.window_start).as_secs();
+        if elapsed < GUEST_WINDOW_SECS && tracker.attempts >= GUEST_MAX_ATTEMPTS {
+            let retry_after = GUEST_WINDOW_SECS - elapsed;
+            return Err(AppError::RateLimited { retry_after });
+        }
+    }
+    Ok(())
+}
+
+fn record_guest_attempt(state: &AppState, ip: &str) {
+    let ip_hash = hash_ip(ip);
+    let now = Instant::now();
+    state
+        .guest_attempts
+        .entry(ip_hash)
+        .and_modify(|t| {
+            let elapsed = now.duration_since(t.window_start).as_secs();
+            if elapsed >= GUEST_WINDOW_SECS {
+                t.attempts = 1;
+                t.window_start = now;
+            } else {
+                t.attempts += 1;
+            }
+        })
+        .or_insert(GuestAttemptTracker {
+            attempts: 1,
+            window_start: now,
+        });
 }
 
 /// Minimal percent-encoding for otpauth URI values.

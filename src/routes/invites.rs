@@ -75,6 +75,10 @@ pub async fn accept_invite(
         });
     }
 
+    // Post a system message in the welcome/system channel (if configured)
+    super::system_messages::broadcast_member_join_message(&state, &invite.space_id, &auth.user_id)
+        .await;
+
     Ok(Json(serde_json::json!({ "data": invite })))
 }
 

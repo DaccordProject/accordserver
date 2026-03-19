@@ -472,6 +472,7 @@ async fn tool_create_channel(state: &AppState, args: &Value) -> Result<String, S
         bitrate: None,
         user_limit: None,
         rate_limit: None,
+        allow_anonymous_read: None,
     };
 
     let channel = db::channels::create_channel(&state.db, space_id, &input)

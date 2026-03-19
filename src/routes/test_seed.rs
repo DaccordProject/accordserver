@@ -80,6 +80,7 @@ async fn do_seed(state: &AppState) -> Result<serde_json::Value, AppError> {
                 bitrate: None,
                 user_limit: None,
                 rate_limit: None,
+                allow_anonymous_read: None,
                 position: None,
             },
         )

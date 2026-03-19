@@ -150,6 +150,8 @@ async fn run_main_server(config: Config) {
         mcp_api_key,
         login_failures: Arc::new(DashMap::new()),
         register_attempts: Arc::new(DashMap::new()),
+        guest_attempts: Arc::new(DashMap::new()),
+        guest_counts: Arc::new(DashMap::new()),
     };
 
     // Ensure a default invite exists and display it

@@ -170,6 +170,7 @@ pub async fn get_user_dm_channels(
             last_message_id: row.get("last_message_id"),
             archived: crate::db::get_bool(&row, "archived"),
             auto_archive_after: row.get("auto_archive_after"),
+            allow_anonymous_read: false,
             created_at: row.get("created_at"),
         })
         .collect())
