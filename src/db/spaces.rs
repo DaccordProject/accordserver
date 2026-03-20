@@ -28,12 +28,13 @@ fn row_to_space(row: sqlx::any::AnyRow) -> SpaceRow {
         premium_tier: row.get("premium_tier"),
         premium_subscription_count: row.get("premium_subscription_count"),
         public: crate::db::get_bool(&row, "public"),
+        allow_guest_access: crate::db::get_bool(&row, "allow_guest_access"),
         max_members: row.get("max_members"),
         created_at: row.get("created_at"),
     }
 }
 
-const SELECT_SPACES: &str = "SELECT id, name, slug, description, icon, banner, splash, owner_id, verification_level, default_notifications, explicit_content_filter, vanity_url_code, preferred_locale, afk_channel_id, afk_timeout, system_channel_id, rules_channel_id, nsfw_level, premium_tier, premium_subscription_count, public, max_members, created_at FROM spaces";
+const SELECT_SPACES: &str = "SELECT id, name, slug, description, icon, banner, splash, owner_id, verification_level, default_notifications, explicit_content_filter, vanity_url_code, preferred_locale, afk_channel_id, afk_timeout, system_channel_id, rules_channel_id, nsfw_level, premium_tier, premium_subscription_count, public, allow_guest_access, max_members, created_at FROM spaces";
 
 pub async fn get_space_row(pool: &AnyPool, space_id: &str) -> Result<SpaceRow, AppError> {
     let row = sqlx::query(&super::q(&format!("{SELECT_SPACES} WHERE id = ?")))
@@ -63,7 +64,7 @@ pub async fn create_space(
     let final_slug = ensure_unique_slug(pool, &base_slug, None).await?;
 
     sqlx::query(&super::q(
-        "INSERT INTO spaces (id, name, slug, description, owner_id, public) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO spaces (id, name, slug, description, owner_id, public, allow_guest_access) VALUES (?, ?, ?, ?, ?, ?, ?)",
     ))
     .bind(&id)
     .bind(&input.name)
@@ -71,6 +72,7 @@ pub async fn create_space(
     .bind(&input.description)
     .bind(owner_id)
     .bind(input.public.unwrap_or(false))
+    .bind(input.allow_guest_access.unwrap_or(true))
     .execute(pool)
     .await?;
 
@@ -225,6 +227,10 @@ pub async fn update_space(
         sets.push("public = ?".to_string());
         bool_binds.push(public);
     }
+    if let Some(allow_guest_access) = input.allow_guest_access {
+        sets.push("allow_guest_access = ?".to_string());
+        bool_binds.push(allow_guest_access);
+    }
 
     if sets.is_empty() {
         return get_space_row(pool, space_id).await;
@@ -260,7 +266,7 @@ pub async fn delete_space(pool: &AnyPool, space_id: &str) -> Result<(), AppError
 
 pub async fn list_public_spaces(pool: &AnyPool) -> Result<Vec<PublicSpaceRow>, AppError> {
     let rows = sqlx::query(
-        "SELECT s.id, s.name, s.slug, s.description, s.icon, s.public,
+        "SELECT s.id, s.name, s.slug, s.description, s.icon, s.public, s.allow_guest_access,
                 COUNT(m.user_id) AS member_count
          FROM spaces s
          LEFT JOIN members m ON m.space_id = s.id
@@ -281,6 +287,7 @@ pub async fn list_public_spaces(pool: &AnyPool) -> Result<Vec<PublicSpaceRow>, A
             icon: row.get("icon"),
             member_count: row.get("member_count"),
             public: crate::db::get_bool(&row, "public"),
+            allow_guest_access: crate::db::get_bool(&row, "allow_guest_access"),
         })
         .collect())
 }

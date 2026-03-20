@@ -1,0 +1,1 @@
+ALTER TABLE spaces ADD COLUMN allow_guest_access INTEGER NOT NULL DEFAULT 1;

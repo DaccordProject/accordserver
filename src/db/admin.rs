@@ -31,7 +31,7 @@ pub async fn list_all_spaces(
     };
 
     let sql = format!(
-        "SELECT s.id, s.name, s.slug, s.description, s.icon, s.owner_id, s.public, s.created_at, \
+        "SELECT s.id, s.name, s.slug, s.description, s.icon, s.owner_id, s.public, s.allow_guest_access, s.created_at, \
          COUNT(m.user_id) as member_count \
          FROM spaces s LEFT JOIN members m ON m.space_id = s.id \
          {where_clause} \
@@ -61,6 +61,7 @@ pub async fn list_all_spaces(
             owner_id: row.get("owner_id"),
             member_count: row.get("member_count"),
             public: crate::db::get_bool(&row, "public"),
+            allow_guest_access: crate::db::get_bool(&row, "allow_guest_access"),
             created_at: row.get("created_at"),
         })
         .collect())
@@ -101,22 +102,18 @@ pub async fn admin_update_space(
             .await?;
     }
 
-    if sets.is_empty() && input.public.is_none() {
+    if sets.is_empty() && input.public.is_none() && input.allow_guest_access.is_none() {
         return Ok(());
     }
 
+    let mut bool_binds: Vec<bool> = Vec::new();
     if let Some(public) = input.public {
-        if sets.is_empty() {
-            let sql = format!("UPDATE spaces SET public = ?, updated_at = {now_fn} WHERE id = ?");
-            let sql = super::q(&sql);
-            sqlx::query(&sql)
-                .bind(public)
-                .bind(space_id)
-                .execute(pool)
-                .await?;
-            return Ok(());
-        }
         sets.push("public = ?");
+        bool_binds.push(public);
+    }
+    if let Some(allow_guest_access) = input.allow_guest_access {
+        sets.push("allow_guest_access = ?");
+        bool_binds.push(allow_guest_access);
     }
 
     let updated_at_set = format!("updated_at = {now_fn}");
@@ -128,8 +125,8 @@ pub async fn admin_update_space(
     for v in &str_values {
         query = query.bind(v);
     }
-    if let Some(public) = input.public {
-        query = query.bind(public);
+    for v in &bool_binds {
+        query = query.bind(v);
     }
     query = query.bind(space_id);
     query.execute(pool).await?;

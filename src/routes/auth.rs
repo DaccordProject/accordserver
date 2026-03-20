@@ -355,8 +355,8 @@ fn issue_bearer_token() -> (String, String, String) {
     (token, token_hash, expires_at)
 }
 
-/// Verify a user's password given their user_id. Returns the stored hash for reuse.
-async fn verify_user_password(
+/// Verify a user's password given their user_id.
+pub(crate) async fn verify_user_password(
     state: &AppState,
     user_id: &str,
     password: &str,
@@ -1356,9 +1356,9 @@ pub async fn guest(
 async fn find_guest_space(
     pool: &sqlx::AnyPool,
 ) -> Result<crate::models::space::SpaceRow, AppError> {
-    // Try public spaces first
+    // Try public spaces with guest access enabled first
     let public = sqlx::query_as::<_, (String,)>(&crate::db::q(
-        "SELECT id FROM spaces WHERE public = true ORDER BY created_at LIMIT 1",
+        "SELECT id FROM spaces WHERE public = true AND allow_guest_access = true ORDER BY created_at LIMIT 1",
     ))
     .fetch_optional(pool)
     .await?;
@@ -1367,9 +1367,9 @@ async fn find_guest_space(
         return db::spaces::get_space_row(pool, &id).await;
     }
 
-    // Fall back to any space
+    // Fall back to any space with guest access enabled
     let any = sqlx::query_as::<_, (String,)>(&crate::db::q(
-        "SELECT id FROM spaces ORDER BY created_at LIMIT 1",
+        "SELECT id FROM spaces WHERE allow_guest_access = true ORDER BY created_at LIMIT 1",
     ))
     .fetch_optional(pool)
     .await?;

@@ -159,6 +159,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             slug: Some("accord-community".to_string()),
             description: Some("The official Accord community space. Welcome!".to_string()),
             public: Some(true),
+            allow_guest_access: None,
         },
     )
     .await?;

@@ -75,6 +75,28 @@ pub async fn accept_invite(
         });
     }
 
+    // Audit log: record invite acceptance
+    if let Ok(entry) = db::audit_log::create_entry(
+        &state.db,
+        &invite.space_id,
+        &auth.user_id,
+        "invite_accept",
+        invite.inviter_id.as_deref(),
+        Some("invite"),
+        None,
+        Some(
+            &serde_json::json!({
+                "invite_code": invite.code,
+                "inviter_id": invite.inviter_id
+            })
+            .to_string(),
+        ),
+    )
+    .await
+    {
+        super::audit_log::broadcast_entry(&state, &entry).await;
+    }
+
     // Post a system message in the welcome/system channel (if configured)
     super::system_messages::broadcast_member_join_message(&state, &invite.space_id, &auth.user_id)
         .await;

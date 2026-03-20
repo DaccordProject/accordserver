@@ -31,6 +31,7 @@ pub struct Space {
     pub nsfw_level: String,
     pub premium_tier: String,
     pub public: bool,
+    pub allow_guest_access: bool,
     pub premium_subscription_count: i64,
     pub created_at: String,
 }
@@ -45,6 +46,7 @@ pub struct PublicSpaceRow {
     pub icon: Option<String>,
     pub member_count: i64,
     pub public: bool,
+    pub allow_guest_access: bool,
 }
 
 /// Lightweight version from the DB row before loading relations.
@@ -70,6 +72,7 @@ pub struct SpaceRow {
     pub nsfw_level: String,
     pub premium_tier: String,
     pub public: bool,
+    pub allow_guest_access: bool,
     pub premium_subscription_count: i64,
     pub max_members: i64,
     pub created_at: String,
@@ -81,6 +84,7 @@ pub struct CreateSpace {
     pub slug: Option<String>,
     pub description: Option<String>,
     pub public: Option<bool>,
+    pub allow_guest_access: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +97,7 @@ pub struct AdminSpaceRow {
     pub owner_id: String,
     pub member_count: i64,
     pub public: bool,
+    pub allow_guest_access: bool,
     pub created_at: String,
 }
 
@@ -102,6 +107,7 @@ pub struct AdminUpdateSpace {
     pub description: Option<String>,
     pub owner_id: Option<String>,
     pub public: Option<bool>,
+    pub allow_guest_access: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,4 +125,5 @@ pub struct UpdateSpace {
     pub rules_channel_id: Option<String>,
     pub preferred_locale: Option<String>,
     pub public: Option<bool>,
+    pub allow_guest_access: Option<bool>,
 }

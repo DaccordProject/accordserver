@@ -42,7 +42,7 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
         "typing.start" => Some("message_typing"),
         "presence.update" => Some("presences"),
         "voice.state_update" | "voice.server_update" | "voice.signal" => Some("voice_states"),
-        "ban.create" | "ban.delete" => Some("moderation"),
+        "ban.create" | "ban.delete" | "audit_log.create" => Some("moderation"),
         "invite.create" | "invite.delete" => Some("spaces"),
         "emoji.create" | "emoji.update" | "emoji.delete" => Some("emojis"),
         "soundboard.create" | "soundboard.update" | "soundboard.delete" | "soundboard.play" => {

@@ -132,6 +132,7 @@ pub async fn ensure_default_invite(pool: &AnyPool) -> Result<String, AppError> {
                     slug: None,
                     description: Some("Default space".to_string()),
                     public: Some(true),
+                    allow_guest_access: None,
                 },
             )
             .await?;

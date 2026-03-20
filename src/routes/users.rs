@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
+use sqlx::Row;
 
 use crate::db;
 use crate::error::AppError;
@@ -14,6 +15,11 @@ use crate::storage;
 pub struct CreateDmRequest {
     pub recipient_id: Option<String>,
     pub recipients: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteMeRequest {
+    pub password: String,
 }
 
 pub async fn get_current_user(
@@ -253,4 +259,106 @@ pub async fn create_dm_channel(
     }
 
     Ok(Json(serde_json::json!({ "data": json })))
+}
+
+/// DELETE /users/@me — self-deletion with password verification (GDPR Art. 17).
+pub async fn delete_current_user(
+    state: State<AppState>,
+    auth: AuthUser,
+    Json(input): Json<DeleteMeRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if auth.is_guest {
+        return Err(AppError::BadRequest(
+            "guest accounts cannot be deleted".to_string(),
+        ));
+    }
+
+    // Verify password before deletion
+    super::auth::verify_user_password(&state, &auth.user_id, &input.password).await?;
+
+    // Reuse the admin cascade deletion logic
+    db::admin::delete_user(&state.db, &auth.user_id).await?;
+
+    Ok(Json(serde_json::json!({ "data": null })))
+}
+
+/// GET /users/@me/data-export — export all personal data (GDPR Art. 20).
+pub async fn export_current_user_data(
+    state: State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if auth.is_guest {
+        return Err(AppError::BadRequest(
+            "guest accounts have no data to export".to_string(),
+        ));
+    }
+
+    // User profile
+    let user = db::users::get_user(&state.db, &auth.user_id).await?;
+
+    // Spaces the user is a member of
+    let space_ids = db::users::get_user_spaces(&state.db, &auth.user_id).await?;
+    let mut spaces = Vec::new();
+    for id in &space_ids {
+        if let Ok(space) = db::spaces::get_space_row(&state.db, id).await {
+            spaces.push(serde_json::json!({
+                "id": space.id,
+                "name": space.name,
+            }));
+        }
+    }
+
+    // Messages authored by this user (all channels)
+    let messages = sqlx::query(
+        &crate::db::q(
+            "SELECT id, channel_id, content, created_at FROM messages WHERE author_id = ? ORDER BY created_at ASC"
+        ),
+    )
+    .bind(&auth.user_id)
+    .fetch_all(&state.db)
+    .await?;
+    let messages_json: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.get::<String, _>("id"),
+                "channel_id": r.get::<String, _>("channel_id"),
+                "content": r.get::<String, _>("content"),
+                "created_at": r.get::<String, _>("created_at"),
+            })
+        })
+        .collect();
+
+    // Relationships
+    let relationships = sqlx::query(
+        &crate::db::q(
+            "SELECT user_id, target_id, type, created_at FROM relationships WHERE user_id = ? OR target_id = ?"
+        ),
+    )
+    .bind(&auth.user_id)
+    .bind(&auth.user_id)
+    .fetch_all(&state.db)
+    .await?;
+    let relationships_json: Vec<serde_json::Value> = relationships
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "user_id": r.get::<String, _>("user_id"),
+                "target_id": r.get::<String, _>("target_id"),
+                "type": r.get::<i32, _>("type"),
+                "created_at": r.get::<String, _>("created_at"),
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "data": {
+            "export_date": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string(),
+            "user": user,
+            "spaces": spaces,
+            "messages": messages_json,
+            "message_count": messages_json.len(),
+            "relationships": relationships_json,
+        }
+    })))
 }

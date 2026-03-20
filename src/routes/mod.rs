@@ -1,5 +1,6 @@
 mod admin;
 mod applications;
+mod audit_log;
 mod auth;
 mod bans;
 pub mod channels;
@@ -92,7 +93,13 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         // Users
         .route(
             "/users/@me",
-            get(users::get_current_user).patch(users::update_current_user),
+            get(users::get_current_user)
+                .patch(users::update_current_user)
+                .delete(users::delete_current_user),
+        )
+        .route(
+            "/users/@me/data-export",
+            get(users::export_current_user_data),
         )
         .route("/users/@me/spaces", get(users::get_current_user_spaces))
         .route(
@@ -160,6 +167,11 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(bans::get_ban)
                 .put(bans::create_ban)
                 .delete(bans::delete_ban),
+        )
+        // Audit log
+        .route(
+            "/spaces/{space_id}/audit-log",
+            get(audit_log::list_audit_log),
         )
         // Reports
         .route(
