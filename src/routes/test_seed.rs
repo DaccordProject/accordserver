@@ -339,6 +339,7 @@ async fn find_or_create_space(
                     slug: None,
                     description: None,
                     public: None,
+                    allow_guest_access: None,
                 },
             )
             .await
