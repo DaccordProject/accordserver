@@ -246,6 +246,7 @@ impl TestServer {
                 slug: None,
                 description: None,
                 public: None,
+                allow_guest_access: None,
             },
         )
         .await
@@ -263,6 +264,7 @@ impl TestServer {
                 slug: None,
                 description: None,
                 public: Some(true),
+                allow_guest_access: None,
             },
         )
         .await

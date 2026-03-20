@@ -57,9 +57,10 @@ pub async fn broadcast_entry(state: &AppState, entry: &db::audit_log::AuditLogRo
 }
 
 fn entry_to_json(e: &db::audit_log::AuditLogRow) -> serde_json::Value {
-    let changes = e.changes.as_deref().and_then(|s| {
-        serde_json::from_str::<serde_json::Value>(s).ok()
-    });
+    let changes = e
+        .changes
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
 
     serde_json::json!({
         "id": e.id,

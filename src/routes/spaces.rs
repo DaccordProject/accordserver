@@ -58,7 +58,9 @@ pub async fn get_space(
     let guest_allowed =
         is_guest && auth.0.as_ref().and_then(|a| a.guest_space_id.as_deref()) == Some(&space.id);
     if is_guest && !space.allow_guest_access {
-        return Err(AppError::Forbidden("guest access is disabled for this space".into()));
+        return Err(AppError::Forbidden(
+            "guest access is disabled for this space".into(),
+        ));
     }
     if !space.public && !guest_allowed {
         let user = auth
@@ -190,7 +192,9 @@ pub async fn list_channels(
     let space = db::spaces::get_space_row(&state.db, &space_id).await?;
     let is_guest = auth.0.as_ref().is_some_and(|a| a.is_guest);
     if is_guest && !space.allow_guest_access {
-        return Err(AppError::Forbidden("guest access is disabled for this space".into()));
+        return Err(AppError::Forbidden(
+            "guest access is disabled for this space".into(),
+        ));
     }
     if !space.public && !is_guest {
         let user = auth
