@@ -376,6 +376,54 @@ pub async fn update_session_state(
     Ok(Json(serde_json::json!({ "data": session })))
 }
 
+// ── Leave session ───────────────────────────────────────────────────────────
+
+pub async fn leave_session(
+    state: State<AppState>,
+    Path((plugin_id, session_id)): Path<(String, String)>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let plugin = db::plugins::get_plugin(&state.db, &plugin_id).await?;
+    require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
+
+    let session = db::plugins::get_session(&state.db, &session_id).await?;
+    if session.plugin_id != plugin_id {
+        return Err(AppError::NotFound(
+            "session not found for this plugin".to_string(),
+        ));
+    }
+
+    // Host cannot leave — they must delete the session instead
+    if session.host_user_id == auth.user_id {
+        return Err(AppError::BadRequest(
+            "host must delete the session, not leave it".to_string(),
+        ));
+    }
+
+    db::plugins::remove_participant(&state.db, &session_id, &auth.user_id).await?;
+
+    let participant_ids = db::plugins::get_session_user_ids(&state.db, &session_id).await?;
+    let updated_session = db::plugins::get_session(&state.db, &session_id).await?;
+
+    // Broadcast participant removal to remaining participants
+    broadcast_plugin_event(
+        &state,
+        Some(&plugin.space_id),
+        Some(participant_ids),
+        "plugin.role_changed",
+        serde_json::json!({
+            "plugin_id": plugin_id,
+            "session_id": session_id,
+            "user_id": auth.user_id,
+            "role": "left",
+            "participants": updated_session.participants,
+        }),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({ "data": null })))
+}
+
 // ── Roles ───────────────────────────────────────────────────────────────────
 
 pub async fn assign_role(

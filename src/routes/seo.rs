@@ -29,7 +29,7 @@ const CRAWLER_AGENTS: &[&str] = &[
 ];
 
 /// Returns true if the User-Agent header matches a known web crawler.
-fn is_crawler(headers: &HeaderMap) -> bool {
+pub fn is_crawler(headers: &HeaderMap) -> bool {
     let ua = match headers.get(header::USER_AGENT) {
         Some(v) => match v.to_str() {
             Ok(s) => s,
@@ -41,7 +41,7 @@ fn is_crawler(headers: &HeaderMap) -> bool {
 }
 
 /// Escape HTML special characters.
-fn escape_html(s: &str) -> String {
+pub fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -56,6 +56,120 @@ fn truncate(s: &str, max: usize) -> String {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}...")
     }
+}
+
+/// Extract the host from the Host header (or fallback to "localhost").
+fn extract_host(headers: &HeaderMap) -> String {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost")
+        .to_string()
+}
+
+/// Builds an HTML landing page for human visitors that attempts a `daccord://`
+/// protocol redirect, then falls back to the web client hash URL.
+///
+/// - `daccord_uri`: the `daccord://connect/...` URI to attempt
+/// - `web_fragment`: the `#slug/channel` web client path to fall back to
+/// - `title`: display title for the page
+/// - `description`: description text
+/// - `icon_url`: optional OG image URL
+fn build_redirect_page(
+    daccord_uri: &str,
+    web_fragment: &str,
+    http_url: &str,
+    title: &str,
+    description: &str,
+    icon_url: Option<&str>,
+) -> String {
+    let icon_meta = icon_url
+        .map(|url| format!(r#"    <meta property="og:image" content="{url}">"#))
+        .unwrap_or_default();
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{title} — daccord</title>
+    <meta property="og:title" content="{title}">
+    <meta property="og:description" content="{description}">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="{http_url}">
+    <meta property="og:site_name" content="daccord">
+{icon_meta}
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="{title}">
+    <meta name="twitter:description" content="{description}">
+    <style>
+      * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+      body {{
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #1a1a2e; color: #e0e0e0;
+        display: flex; align-items: center; justify-content: center;
+        min-height: 100vh; padding: 20px;
+      }}
+      .card {{
+        background: #25253e; border-radius: 12px; padding: 40px;
+        max-width: 440px; width: 100%; text-align: center;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      }}
+      h1 {{ font-size: 1.5rem; margin-bottom: 8px; color: #fff; }}
+      .desc {{ color: #a0a0b8; margin-bottom: 24px; line-height: 1.5; }}
+      .btn {{
+        display: inline-block; padding: 12px 32px; border-radius: 8px;
+        font-size: 1rem; font-weight: 600; text-decoration: none;
+        transition: opacity 0.2s;
+      }}
+      .btn:hover {{ opacity: 0.85; }}
+      .btn-primary {{ background: #5b5bf0; color: #fff; }}
+      .btn-secondary {{
+        background: transparent; color: #7c7cf0;
+        border: 1px solid #7c7cf0; margin-top: 12px;
+      }}
+      .btn-tertiary {{
+        background: transparent; color: #a0a0b8;
+        margin-top: 8px; font-size: 0.9rem;
+      }}
+      .actions {{ display: flex; flex-direction: column; align-items: center; gap: 4px; }}
+      .status {{ font-size: 0.85rem; color: #a0a0b8; margin-top: 16px; }}
+      .status a {{ color: #7c7cf0; }}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>{title}</h1>
+      <p class="desc">{description}</p>
+      <div class="actions">
+        <a id="open-btn" class="btn btn-primary" href="{daccord_uri}">Open in daccord</a>
+        <a class="btn btn-secondary" href="/{web_fragment}">Open in browser</a>
+        <a class="btn btn-tertiary" href="https://daccord.cc">Get daccord</a>
+      </div>
+      <p id="status" class="status"></p>
+    </div>
+    <script>
+      var uri = "{daccord_uri}";
+      var opened = false;
+      window.addEventListener("blur", function() {{ opened = true; }});
+      setTimeout(function() {{ window.location.href = uri; }}, 100);
+      setTimeout(function() {{
+        if (!opened) {{
+          document.getElementById("status").innerHTML =
+            'daccord not detected &mdash; <a href="/{web_fragment}">continue in browser</a>';
+        }}
+      }}, 2000);
+    </script>
+  </body>
+</html>"#,
+        title = title,
+        description = description,
+        http_url = http_url,
+        icon_meta = icon_meta,
+        daccord_uri = daccord_uri,
+        web_fragment = web_fragment,
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -75,6 +189,48 @@ pub async fn channel_snapshot(
     headers: HeaderMap,
 ) -> Result<Html<String>, AppError> {
     let space = db::spaces::get_space_by_slug(&state.db, &space_slug).await?;
+
+    // Human visitors always get the redirect landing page (public or not).
+    // The daccord client handles registration/invite prompts as needed.
+    if !is_crawler(&headers) {
+        let host = extract_host(&headers);
+        let daccord_uri = format!(
+            "daccord://connect/{}/{}",
+            escape_html(&host),
+            escape_html(&space_slug),
+        );
+        let web_fragment = format!(
+            "#{}/{}",
+            escape_html(&space_slug),
+            escape_html(&channel_name),
+        );
+        let http_url = format!(
+            "https://{}/s/{}/{}",
+            escape_html(&host),
+            escape_html(&space_slug),
+            escape_html(&channel_name),
+        );
+        let title = format!("{} — {}", escape_html(&channel_name), escape_html(&space.name));
+        let desc = space
+            .description
+            .as_deref()
+            .map(|d| escape_html(&truncate(d, 200)))
+            .unwrap_or_else(|| escape_html(&space.name));
+        let icon_url = space.icon.as_ref().map(|icon| {
+            format!("https://{}/cdn/icons/{}", escape_html(&host), icon)
+        });
+        let html = build_redirect_page(
+            &daccord_uri,
+            &web_fragment,
+            &http_url,
+            &title,
+            &desc,
+            icon_url.as_deref(),
+        );
+        return Ok(Html(html));
+    }
+
+    // Crawlers only get snapshots of public spaces.
     if !space.public {
         return Err(AppError::NotFound("not_found".to_string()));
     }
@@ -84,18 +240,6 @@ pub async fn channel_snapshot(
         .iter()
         .find(|c| c.name.as_deref() == Some(&channel_name))
         .ok_or_else(|| AppError::NotFound("unknown_channel".to_string()))?;
-
-    // Human visitors get a redirect to the web client fragment URL.
-    if !is_crawler(&headers) {
-        let redirect_html = format!(
-            r#"<!DOCTYPE html>
-<html><head><meta http-equiv="refresh" content="0;url=/#{slug}/{chan}"></head>
-<body><p>Redirecting to <a href="/#{slug}/{chan}">#{slug}/{chan}</a>...</p></body></html>"#,
-            slug = escape_html(&space_slug),
-            chan = escape_html(&channel_name),
-        );
-        return Ok(Html(redirect_html));
-    }
 
     // Fetch recent messages (newest first, excluding thread replies).
     let messages = db::messages::list_messages(&state.db, &channel.id, None, 50, None).await?;
@@ -216,6 +360,45 @@ pub async fn post_snapshot(
     headers: HeaderMap,
 ) -> Result<Html<String>, AppError> {
     let space = db::spaces::get_space_by_slug(&state.db, &space_slug).await?;
+
+    // Human visitors always get the redirect landing page (public or not).
+    if !is_crawler(&headers) {
+        let host = extract_host(&headers);
+        let daccord_uri = format!(
+            "daccord://connect/{}/{}",
+            escape_html(&host),
+            escape_html(&space_slug),
+        );
+        let web_fragment = format!(
+            "#{}/{}/{}",
+            escape_html(&space_slug),
+            escape_html(&channel_name),
+            escape_html(&post_id),
+        );
+        let http_url = format!(
+            "https://{}/s/{}/{}/{}",
+            escape_html(&host),
+            escape_html(&space_slug),
+            escape_html(&channel_name),
+            escape_html(&post_id),
+        );
+        let title = format!("Post in {} — {}", escape_html(&channel_name), escape_html(&space.name));
+        let desc = escape_html(&space.name);
+        let icon_url = space.icon.as_ref().map(|icon| {
+            format!("https://{}/cdn/icons/{}", escape_html(&host), icon)
+        });
+        let html = build_redirect_page(
+            &daccord_uri,
+            &web_fragment,
+            &http_url,
+            &title,
+            &desc,
+            icon_url.as_deref(),
+        );
+        return Ok(Html(html));
+    }
+
+    // Crawlers only get snapshots of public spaces.
     if !space.public {
         return Err(AppError::NotFound("not_found".to_string()));
     }
@@ -225,19 +408,6 @@ pub async fn post_snapshot(
         .iter()
         .find(|c| c.name.as_deref() == Some(&channel_name))
         .ok_or_else(|| AppError::NotFound("unknown_channel".to_string()))?;
-
-    // Human visitors get a redirect to the web client fragment URL.
-    if !is_crawler(&headers) {
-        let redirect_html = format!(
-            r#"<!DOCTYPE html>
-<html><head><meta http-equiv="refresh" content="0;url=/#{slug}/{chan}/{pid}"></head>
-<body><p>Redirecting to <a href="/#{slug}/{chan}/{pid}">#{slug}/{chan}/{pid}</a>...</p></body></html>"#,
-            slug = escape_html(&space_slug),
-            chan = escape_html(&channel_name),
-            pid = escape_html(&post_id),
-        );
-        return Ok(Html(redirect_html));
-    }
 
     // Fetch the post (parent message).
     let post = db::messages::get_message_row(&state.db, &post_id).await?;
@@ -456,18 +626,44 @@ pub async fn space_snapshot(
     headers: HeaderMap,
 ) -> Result<Html<String>, AppError> {
     let space = db::spaces::get_space_by_slug(&state.db, &space_slug).await?;
-    if !space.public {
-        return Err(AppError::NotFound("not_found".to_string()));
+
+    // Human visitors always get the redirect landing page (public or not).
+    if !is_crawler(&headers) {
+        let host = extract_host(&headers);
+        let daccord_uri = format!(
+            "daccord://connect/{}/{}",
+            escape_html(&host),
+            escape_html(&space_slug),
+        );
+        let web_fragment = format!("#{}", escape_html(&space_slug));
+        let http_url = format!(
+            "https://{}/s/{}",
+            escape_html(&host),
+            escape_html(&space_slug),
+        );
+        let title = escape_html(&space.name);
+        let desc = space
+            .description
+            .as_deref()
+            .map(|d| escape_html(&truncate(d, 200)))
+            .unwrap_or_else(|| escape_html(&space.name));
+        let icon_url = space.icon.as_ref().map(|icon| {
+            format!("https://{}/cdn/icons/{}", escape_html(&host), icon)
+        });
+        let html = build_redirect_page(
+            &daccord_uri,
+            &web_fragment,
+            &http_url,
+            &title,
+            &desc,
+            icon_url.as_deref(),
+        );
+        return Ok(Html(html));
     }
 
-    if !is_crawler(&headers) {
-        let redirect_html = format!(
-            r#"<!DOCTYPE html>
-<html><head><meta http-equiv="refresh" content="0;url=/#{slug}"></head>
-<body><p>Redirecting to <a href="/#{slug}">#{slug}</a>...</p></body></html>"#,
-            slug = escape_html(&space_slug),
-        );
-        return Ok(Html(redirect_html));
+    // Crawlers only get snapshots of public spaces.
+    if !space.public {
+        return Err(AppError::NotFound("not_found".to_string()));
     }
 
     let channels = db::channels::list_channels_in_space(&state.db, &space.id).await?;

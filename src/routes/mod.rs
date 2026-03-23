@@ -8,6 +8,7 @@ mod emojis;
 mod gateway;
 mod health;
 mod interactions;
+mod invite_page;
 mod invites;
 mod members;
 pub mod messages;
@@ -18,7 +19,7 @@ mod read_states;
 mod relationships;
 mod reports;
 mod roles;
-mod seo;
+pub mod seo;
 mod settings;
 mod soundboard;
 pub mod spaces;
@@ -56,6 +57,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/mcp", post(crate::mcp::handle_mcp))
+        .route("/invite/{code}", get(invite_page::invite_page))
         .nest_service("/cdn", cdn_service)
         .nest("/s", seo)
         .nest("/api/v1", api);
@@ -331,6 +333,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/plugins/{plugin_id}/sessions/{session_id}",
             patch(plugins::update_session_state).delete(plugins::delete_session),
+        )
+        .route(
+            "/plugins/{plugin_id}/sessions/{session_id}/leave",
+            post(plugins::leave_session),
         )
         .route(
             "/plugins/{plugin_id}/sessions/{session_id}/roles",
