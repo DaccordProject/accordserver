@@ -39,8 +39,16 @@ pub async fn invite_page(
     let space = db::spaces::get_space_row(&state.db, &invite.space_id).await?;
 
     // Strip port from host for the daccord:// URI if it's the default
-    let daccord_uri = format!("daccord://invite/{}@{}", escape_html(&code), escape_html(&host));
-    let http_url = format!("https://{}/invite/{}", escape_html(&host), escape_html(&code));
+    let daccord_uri = format!(
+        "daccord://invite/{}@{}",
+        escape_html(&code),
+        escape_html(&host)
+    );
+    let http_url = format!(
+        "https://{}/invite/{}",
+        escape_html(&host),
+        escape_html(&code)
+    );
 
     let space_name = escape_html(&space.name);
     let description = space

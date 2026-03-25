@@ -210,15 +210,20 @@ pub async fn channel_snapshot(
             escape_html(&space_slug),
             escape_html(&channel_name),
         );
-        let title = format!("{} — {}", escape_html(&channel_name), escape_html(&space.name));
+        let title = format!(
+            "{} — {}",
+            escape_html(&channel_name),
+            escape_html(&space.name)
+        );
         let desc = space
             .description
             .as_deref()
             .map(|d| escape_html(&truncate(d, 200)))
             .unwrap_or_else(|| escape_html(&space.name));
-        let icon_url = space.icon.as_ref().map(|icon| {
-            format!("https://{}/cdn/icons/{}", escape_html(&host), icon)
-        });
+        let icon_url = space
+            .icon
+            .as_ref()
+            .map(|icon| format!("https://{}/cdn/icons/{}", escape_html(&host), icon));
         let html = build_redirect_page(
             &daccord_uri,
             &web_fragment,
@@ -382,11 +387,16 @@ pub async fn post_snapshot(
             escape_html(&channel_name),
             escape_html(&post_id),
         );
-        let title = format!("Post in {} — {}", escape_html(&channel_name), escape_html(&space.name));
+        let title = format!(
+            "Post in {} — {}",
+            escape_html(&channel_name),
+            escape_html(&space.name)
+        );
         let desc = escape_html(&space.name);
-        let icon_url = space.icon.as_ref().map(|icon| {
-            format!("https://{}/cdn/icons/{}", escape_html(&host), icon)
-        });
+        let icon_url = space
+            .icon
+            .as_ref()
+            .map(|icon| format!("https://{}/cdn/icons/{}", escape_html(&host), icon));
         let html = build_redirect_page(
             &daccord_uri,
             &web_fragment,
@@ -647,9 +657,10 @@ pub async fn space_snapshot(
             .as_deref()
             .map(|d| escape_html(&truncate(d, 200)))
             .unwrap_or_else(|| escape_html(&space.name));
-        let icon_url = space.icon.as_ref().map(|icon| {
-            format!("https://{}/cdn/icons/{}", escape_html(&host), icon)
-        });
+        let icon_url = space
+            .icon
+            .as_ref()
+            .map(|icon| format!("https://{}/cdn/icons/{}", escape_html(&host), icon));
         let html = build_redirect_page(
             &daccord_uri,
             &web_fragment,
