@@ -54,7 +54,7 @@ pub async fn invite_page(
     let description = space
         .description
         .as_deref()
-        .map(|d| escape_html(d))
+        .map(escape_html)
         .unwrap_or_else(|| format!("You've been invited to join {space_name}"));
 
     let icon_meta = space
