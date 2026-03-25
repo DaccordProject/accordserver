@@ -213,14 +213,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
         // Channels (with permission overwrites)
         if let Ok(channel_rows) = db::channels::list_channels_in_space(&state.db, sid).await {
-            if let Ok(channels) = routes::spaces::channels_to_json_async(&state.db, &channel_rows).await {
+            if let Ok(channels) =
+                routes::spaces::channels_to_json_async(&state.db, &channel_rows).await
+            {
                 all_channels_json.extend(channels);
             }
         }
 
         // Roles
         if let Ok(role_rows) = db::roles::list_roles(&state.db, sid).await {
-            let roles: Vec<serde_json::Value> = role_rows.iter()
+            let roles: Vec<serde_json::Value> = role_rows
+                .iter()
                 .map(routes::roles::role_row_to_json)
                 .collect();
             all_roles_json.extend(roles);
@@ -229,17 +232,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         // Members (all pages, with embedded user objects)
         let mut after: Option<String> = None;
         loop {
-            let rows = match db::members::list_members(&state.db, sid, after.as_deref(), 1000).await {
+            let rows = match db::members::list_members(&state.db, sid, after.as_deref(), 1000).await
+            {
                 Ok(r) => r,
                 Err(_) => break,
             };
             let has_more = rows.len() > 1000;
-            let page: Vec<_> = if has_more { rows[..1000].to_vec() } else { rows.clone() };
+            let page: Vec<_> = if has_more {
+                rows[..1000].to_vec()
+            } else {
+                rows.clone()
+            };
 
             for member_row in &page {
-                let role_ids = db::members::get_member_role_ids(&state.db, sid, &member_row.user_id)
-                    .await
-                    .unwrap_or_default();
+                let role_ids =
+                    db::members::get_member_role_ids(&state.db, sid, &member_row.user_id)
+                        .await
+                        .unwrap_or_default();
                 let member_json = routes::members::member_row_to_json(member_row, &role_ids);
                 all_members_json.push(member_json);
 

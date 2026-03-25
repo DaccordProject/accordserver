@@ -805,7 +805,9 @@ async fn test_gateway_identify_ready_flow() {
     assert_eq!(ready["data"]["user_id"], alice.user.id);
     let spaces = ready["data"]["spaces"].as_array().unwrap();
     assert!(
-        spaces.iter().any(|s| s.as_str() == Some(&space_id)),
+        spaces
+            .iter()
+            .any(|s| s["id"].as_str() == Some(space_id.as_str())),
         "READY should include user's space"
     );
 
