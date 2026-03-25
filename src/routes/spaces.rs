@@ -350,7 +350,7 @@ fn channel_row_to_json_with_overwrites(
     })
 }
 
-async fn channels_to_json_async(
+pub async fn channels_to_json_async(
     pool: &sqlx::AnyPool,
     rows: &[ChannelRow],
 ) -> Result<Vec<serde_json::Value>, AppError> {

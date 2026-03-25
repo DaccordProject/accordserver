@@ -356,7 +356,7 @@ pub async fn remove_role(
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
-fn member_row_to_json(row: &MemberRow, role_ids: &[String]) -> serde_json::Value {
+pub fn member_row_to_json(row: &MemberRow, role_ids: &[String]) -> serde_json::Value {
     serde_json::json!({
         "user_id": row.user_id,
         "space_id": row.space_id,

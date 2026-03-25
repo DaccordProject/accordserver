@@ -142,7 +142,7 @@ pub async fn reorder_roles(
     Ok(Json(serde_json::json!({ "data": roles })))
 }
 
-fn role_row_to_json(row: &RoleRow) -> serde_json::Value {
+pub fn role_row_to_json(row: &RoleRow) -> serde_json::Value {
     let permissions: Vec<String> = serde_json::from_str(&row.permissions).unwrap_or_default();
     serde_json::json!({
         "id": row.id,

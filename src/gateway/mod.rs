@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::db;
 use crate::middleware::auth as auth_resolve;
+use crate::routes;
 use crate::state::AppState;
 use events::{
     GatewayBroadcast, GatewayMessage, IdentifyData, PresenceUpdateData, VoiceStateUpdateData,
@@ -186,6 +187,122 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             .collect();
     }
 
+    // Fetch full initial state for the READY payload
+    let current_user_json = if !is_guest_session {
+        db::users::get_user(&state.db, &user_id)
+            .await
+            .ok()
+            .map(|u| serde_json::to_value(&u).unwrap_or_default())
+    } else {
+        None
+    };
+
+    let mut spaces_json: Vec<serde_json::Value> = Vec::new();
+    let mut all_channels_json: Vec<serde_json::Value> = Vec::new();
+    let mut all_members_json: Vec<serde_json::Value> = Vec::new();
+    let mut all_roles_json: Vec<serde_json::Value> = Vec::new();
+    let mut all_voice_states_json: Vec<serde_json::Value> = Vec::new();
+    let mut all_users_json: Vec<serde_json::Value> = Vec::new();
+    let mut seen_user_ids: HashSet<String> = HashSet::new();
+
+    for sid in &space_ids {
+        // Space
+        if let Ok(space_row) = db::spaces::get_space_row(&state.db, sid).await {
+            spaces_json.push(serde_json::to_value(&space_row).unwrap_or_default());
+        }
+
+        // Channels (with permission overwrites)
+        if let Ok(channel_rows) = db::channels::list_channels_in_space(&state.db, sid).await {
+            if let Ok(channels) = routes::spaces::channels_to_json_async(&state.db, &channel_rows).await {
+                all_channels_json.extend(channels);
+            }
+        }
+
+        // Roles
+        if let Ok(role_rows) = db::roles::list_roles(&state.db, sid).await {
+            let roles: Vec<serde_json::Value> = role_rows.iter()
+                .map(routes::roles::role_row_to_json)
+                .collect();
+            all_roles_json.extend(roles);
+        }
+
+        // Members (all pages, with embedded user objects)
+        let mut after: Option<String> = None;
+        loop {
+            let rows = match db::members::list_members(&state.db, sid, after.as_deref(), 1000).await {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            let has_more = rows.len() > 1000;
+            let page: Vec<_> = if has_more { rows[..1000].to_vec() } else { rows.clone() };
+
+            for member_row in &page {
+                let role_ids = db::members::get_member_role_ids(&state.db, sid, &member_row.user_id)
+                    .await
+                    .unwrap_or_default();
+                let member_json = routes::members::member_row_to_json(member_row, &role_ids);
+                all_members_json.push(member_json);
+
+                // Collect unique user objects
+                if !seen_user_ids.contains(&member_row.user_id) {
+                    if let Ok(user) = db::users::get_user(&state.db, &member_row.user_id).await {
+                        all_users_json.push(serde_json::to_value(&user).unwrap_or_default());
+                        seen_user_ids.insert(member_row.user_id.clone());
+                    }
+                }
+            }
+
+            if has_more {
+                after = page.last().map(|m| m.user_id.clone());
+            } else {
+                break;
+            }
+        }
+
+        // Voice states for this space
+        let voice_states = crate::voice::state::get_space_voice_states(&state, sid);
+        for vs in &voice_states {
+            all_voice_states_json.push(serde_json::to_value(vs).unwrap_or_default());
+        }
+    }
+
+    // DM channels (with recipients)
+    let dm_channels_json: Vec<serde_json::Value> = if !is_guest_session {
+        match db::users::get_user_dm_channels(&state.db, &user_id).await {
+            Ok(dm_rows) => {
+                let mut dms = Vec::new();
+                for row in &dm_rows {
+                    dms.push(routes::spaces::channel_row_to_json_pub(&state.db, row).await);
+                }
+                dms
+            }
+            Err(_) => vec![],
+        }
+    } else {
+        vec![]
+    };
+
+    // Muted channel IDs (already loaded as muted_channel_ids HashSet)
+    let mutes_json: Vec<serde_json::Value> = muted_channel_ids
+        .iter()
+        .map(|cid| serde_json::json!({ "channel_id": cid }))
+        .collect();
+
+    // Unread states
+    let unread_json: Vec<serde_json::Value> = if !is_guest_session {
+        db::read_states::get_unread_channels(&state.db, &user_id)
+            .await
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| serde_json::to_value(e).unwrap_or_default())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
     // Send READY event
     let motd = state.settings.load().motd.clone();
     let ready = serde_json::json!({
@@ -195,7 +312,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         "data": {
             "session_id": session_id,
             "user_id": user_id,
-            "spaces": space_ids.iter().collect::<Vec<_>>(),
+            "user": current_user_json,
+            "spaces": spaces_json,
+            "channels": all_channels_json,
+            "members": all_members_json,
+            "roles": all_roles_json,
+            "users": all_users_json,
+            "voice_states": all_voice_states_json,
+            "dm_channels": dm_channels_json,
+            "mutes": mutes_json,
+            "unread": unread_json,
             "presences": presences_json,
             "relationships": relationships_json,
             "is_guest": is_guest_session,

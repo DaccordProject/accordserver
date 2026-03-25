@@ -74,6 +74,16 @@ pub fn get_channel_voice_states(state: &AppState, channel_id: &str) -> Vec<Voice
         .collect()
 }
 
+/// Get all voice states for a given space.
+pub fn get_space_voice_states(state: &AppState, space_id: &str) -> Vec<VoiceState> {
+    state
+        .voice_states
+        .iter()
+        .filter(|entry| entry.value().space_id.as_deref() == Some(space_id))
+        .map(|entry| entry.value().clone())
+        .collect()
+}
+
 /// Get a single user's voice state.
 pub fn get_user_voice_state(state: &AppState, user_id: &str) -> Option<VoiceState> {
     state.voice_states.get(user_id).map(|vs| vs.clone())
