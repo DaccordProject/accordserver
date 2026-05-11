@@ -4,13 +4,17 @@ use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
 use crate::models::attachment::Attachment;
-use crate::snowflake;
 
+/// Insert an attachment row. The caller is responsible for generating the
+/// `attachment_id` and passing the canonical `url` (the same URL that
+/// resolves to the file written by `storage::save_attachment`). The URL
+/// returned to the client and the URL stored in the database are identical:
+/// the file path on disk is the single source of truth.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_attachment(
     pool: &AnyPool,
+    attachment_id: &str,
     message_id: &str,
-    channel_id: &str,
     filename: &str,
     content_type: Option<&str>,
     size: i64,
@@ -18,12 +22,11 @@ pub async fn insert_attachment(
     width: Option<i64>,
     height: Option<i64>,
 ) -> Result<Attachment, AppError> {
-    let id = snowflake::generate();
     sqlx::query(
         &super::q("INSERT INTO attachments (id, message_id, filename, content_type, size, url, width, height) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
     )
-    .bind(&id)
+    .bind(attachment_id)
     .bind(message_id)
     .bind(filename)
     .bind(content_type)
@@ -35,12 +38,12 @@ pub async fn insert_attachment(
     .await?;
 
     Ok(Attachment {
-        id,
+        id: attachment_id.to_string(),
         filename: filename.to_string(),
         description: None,
         content_type: content_type.map(|s| s.to_string()),
         size,
-        url: format!("/cdn/attachments/{channel_id}/{message_id}/{filename}"),
+        url: url.to_string(),
         width,
         height,
     })

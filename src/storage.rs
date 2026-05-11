@@ -198,11 +198,18 @@ pub async fn delete_avatar(
 }
 
 /// Save an uploaded attachment file to disk.
+///
+/// Files are organized by `attachment_id` (a stable, unique ID generated for
+/// each upload) rather than `message_id`, so the on-disk location does not
+/// depend on the message ID the client thinks the attachment belongs to.
+/// This makes the URL the single source of truth and avoids 404s if a client
+/// reconstructs URLs from a stale or mismatched message ID.
+///
 /// Returns `(relative_url, file_size)`.
 pub async fn save_attachment(
     storage_path: &Path,
     channel_id: &str,
-    message_id: &str,
+    attachment_id: &str,
     filename: &str,
     bytes: &[u8],
     max_size: usize,
@@ -217,7 +224,7 @@ pub async fn save_attachment(
     let dir = storage_path
         .join("attachments")
         .join(channel_id)
-        .join(message_id);
+        .join(attachment_id);
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| AppError::Internal(format!("failed to create attachment directory: {e}")))?;
@@ -229,7 +236,7 @@ pub async fn save_attachment(
         .await
         .map_err(|e| AppError::Internal(format!("failed to write attachment file: {e}")))?;
 
-    let relative_url = format!("/cdn/attachments/{channel_id}/{message_id}/{safe_filename}");
+    let relative_url = format!("/cdn/attachments/{channel_id}/{attachment_id}/{safe_filename}");
     Ok((relative_url, size))
 }
 

@@ -1448,3 +1448,182 @@ async fn test_upload_respects_custom_limit() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+// ---------------------------------------------------------------------------
+// Attachment upload regression test (GitHub issue #9)
+//
+// Verifies that the URL returned by POST /channels/{id}/messages/upload
+// resolves to a file that is actually served by /cdn. Previously the URL in
+// the response could disagree with the on-disk path (different filename
+// sanitization, or — under client-side message ID confusion — a different
+// directory name entirely) causing the client to get a 404 when fetching
+// an image it had just successfully uploaded.
+// ---------------------------------------------------------------------------
+
+fn build_multipart_upload_body(
+    boundary: &str,
+    payload_json: &serde_json::Value,
+    filename: &str,
+    content_type: &str,
+    file_bytes: &[u8],
+) -> Vec<u8> {
+    let mut body: Vec<u8> = Vec::new();
+    let payload_str = serde_json::to_string(payload_json).unwrap();
+
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"payload_json\"\r\n\
+          Content-Type: application/json\r\n\r\n",
+    );
+    body.extend_from_slice(payload_str.as_bytes());
+    body.extend_from_slice(b"\r\n");
+
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"files[0]\"; filename=\"{filename}\"\r\n\
+             Content-Type: {content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(file_bytes);
+    body.extend_from_slice(b"\r\n");
+
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
+fn tiny_png_bytes() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC, 0x33, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ]
+}
+
+#[tokio::test]
+async fn test_attachment_upload_url_resolves_via_cdn() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "AttachSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let png_bytes = tiny_png_bytes();
+
+    let boundary = "----accordtestboundary";
+    let body = build_multipart_upload_body(
+        boundary,
+        &serde_json::json!({ "content": "look at this picture" }),
+        "image.png",
+        "image/png",
+        &png_bytes,
+    );
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/channels/{channel_id}/messages/upload"))
+        .header("Authorization", alice.auth_header())
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "multipart upload should succeed"
+    );
+    let upload_body = parse_body(response).await;
+
+    let attachments = upload_body["data"]["attachments"]
+        .as_array()
+        .expect("response should include attachments array");
+    assert_eq!(attachments.len(), 1);
+    let url = attachments[0]["url"]
+        .as_str()
+        .expect("attachment should have a url")
+        .to_string();
+    assert!(
+        url.starts_with("/cdn/attachments/"),
+        "unexpected url shape: {url}"
+    );
+
+    // The URL the client just received must resolve via /cdn. This is the
+    // exact failure mode reported in issue #9: upload returns 200 but the
+    // subsequent GET returns 404 because the URL points to a different
+    // path than where the file was actually written.
+    let cdn_req = Request::builder()
+        .method(Method::GET)
+        .uri(&url)
+        .body(Body::empty())
+        .unwrap();
+    let cdn_response = server.router().oneshot(cdn_req).await.unwrap();
+    assert_eq!(
+        cdn_response.status(),
+        StatusCode::OK,
+        "uploaded attachment URL {url} did not resolve"
+    );
+    let served = axum::body::to_bytes(cdn_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&served[..], &png_bytes[..]);
+}
+
+#[tokio::test]
+async fn test_attachment_upload_url_resolves_with_special_filename() {
+    // A filename with characters that get rewritten by the server's
+    // sanitizer (spaces, parentheses) must still produce a URL the client
+    // can resolve. Previously the response URL used the raw filename while
+    // the file on disk used the sanitized filename, producing a 404.
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "AttachSpace").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let png_bytes = tiny_png_bytes();
+
+    let boundary = "----accordtestboundary2";
+    let body = build_multipart_upload_body(
+        boundary,
+        &serde_json::json!({ "content": "with spaces" }),
+        "my photo (1).png",
+        "image/png",
+        &png_bytes,
+    );
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/channels/{channel_id}/messages/upload"))
+        .header("Authorization", alice.auth_header())
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let upload_body = parse_body(response).await;
+    let url = upload_body["data"]["attachments"][0]["url"]
+        .as_str()
+        .expect("attachment should have a url")
+        .to_string();
+
+    let cdn_req = Request::builder()
+        .method(Method::GET)
+        .uri(&url)
+        .body(Body::empty())
+        .unwrap();
+    let cdn_response = server.router().oneshot(cdn_req).await.unwrap();
+    assert_eq!(
+        cdn_response.status(),
+        StatusCode::OK,
+        "URL {url} returned by upload did not resolve via /cdn"
+    );
+}
