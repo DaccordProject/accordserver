@@ -330,13 +330,20 @@ pub async fn create_message_multipart(
     )
     .await?;
 
-    // Save files and create attachment records
+    // Save files and create attachment records.
+    //
+    // We generate the attachment ID up front and use it as the on-disk
+    // directory name (instead of the message ID). This way the URL returned
+    // to the client, the URL stored in the database, and the file path on
+    // disk are all derived from the same stable identifier and cannot drift.
     let mut attachments: Vec<Attachment> = Vec::new();
     for (filename, content_type, bytes) in &files {
+        let attachment_id = crate::snowflake::generate();
+
         let (url, size) = storage::save_attachment(
             &state.storage_path,
             &channel_id,
-            &msg.id,
+            &attachment_id,
             filename,
             bytes,
             max_attachment_size,
@@ -352,8 +359,8 @@ pub async fn create_message_multipart(
 
         let attachment = db::attachments::insert_attachment(
             &state.db,
+            &attachment_id,
             &msg.id,
-            &channel_id,
             filename,
             Some(content_type.as_str()),
             size as i64,
