@@ -2,9 +2,9 @@
 
 A self-hosted Discord-like chat and voice server backend, built in Rust with [Axum](https://github.com/tokio-rs/axum). Designed as the backend for a [Godot](https://godotengine.org/) game client.
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/daccordproject/accordserver&envs=RUST_LOG,TOTP_ENCRYPTION_KEY,LIVEKIT_INTERNAL_URL,LIVEKIT_EXTERNAL_URL,LIVEKIT_API_KEY,LIVEKIT_API_SECRET&optionalEnvs=LIVEKIT_INTERNAL_URL,LIVEKIT_EXTERNAL_URL,LIVEKIT_API_KEY,LIVEKIT_API_SECRET&RUST_LOGDesc=Log+filter&RUST_LOGDefault=accordserver%3Dinfo%2Ctower_http%3Dinfo&TOTP_ENCRYPTION_KEYDesc=Random+secret+used+to+encrypt+TOTP+secrets+at+rest+%28generate+with+%60openssl+rand+-hex+32%60%29)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2Fdaccordproject%2Faccordserver)
 
-> See [Deploying to Railway](#deploying-to-railway) for required env vars, volume setup, and voice/LiveKit caveats.
+> The button above does an **ad-hoc repo deploy**: Railway clones the default branch, builds from `Dockerfile`, and applies `railway.json`. It does **not** pre-prompt for env vars or provision Postgres — Railway only supports that for *published templates*, which must be created through the dashboard (see [RAILWAY_TEMPLATE.md](RAILWAY_TEMPLATE.md) for the walkthrough). After the initial deploy, follow [Deploying to Railway](#deploying-to-railway) to add Postgres / a volume, env vars, and a public domain.
 
 ## Features
 
@@ -217,6 +217,8 @@ volumes:
 ## Deploying to Railway
 
 Click the [Deploy on Railway](#accord-server) button at the top of this README to provision a service from this repo. Railway builds with the included `Dockerfile` and reads configuration from `railway.json` (healthcheck `/health`, restart-on-failure).
+
+> **Note:** Railway deploys the repo's **default branch**. `railway.json` and any env-var defaults only take effect once they're merged into `main` — if you click the button against a branch where this file hasn't landed yet, Railway falls back to auto-detection and may build with different defaults.
 
 Railway injects a `PORT` env var at runtime; the server binds to it automatically — no manual port config required.
 
