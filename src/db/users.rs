@@ -52,6 +52,36 @@ pub async fn create_user(pool: &AnyPool, input: &CreateUser) -> Result<User, App
     get_user(pool, &id).await
 }
 
+/// Returns the id of the singleton System user, creating it if absent.
+/// Used as the author/actor id for server-originated writes (MCP, automated
+/// moderation) so they satisfy the `users(id)` foreign keys.
+pub async fn get_or_create_system_user(pool: &AnyPool) -> Result<String, AppError> {
+    if let Some(row) = sqlx::query(&super::q(
+        "SELECT id FROM users WHERE system = TRUE LIMIT 1",
+    ))
+    .fetch_optional(pool)
+    .await?
+    {
+        return Ok(row.get("id"));
+    }
+
+    let user = create_user(
+        pool,
+        &CreateUser {
+            username: "System".to_string(),
+            display_name: Some("System".to_string()),
+        },
+    )
+    .await?;
+
+    sqlx::query(&super::q("UPDATE users SET system = TRUE WHERE id = ?"))
+        .bind(&user.id)
+        .execute(pool)
+        .await?;
+
+    Ok(user.id)
+}
+
 pub async fn update_user(
     pool: &AnyPool,
     user_id: &str,

@@ -402,8 +402,12 @@ async fn tool_send_message(state: &AppState, args: &Value) -> Result<String, Str
         .await
         .map_err(map_err)?;
 
-    // MCP messages are sent as a system/bot user — use a synthetic author ID.
-    // We use "mcp" as the author to distinguish MCP-originated messages.
+    // MCP-originated messages are attributed to the System user so they
+    // satisfy the messages.author_id → users.id foreign key.
+    let system_user_id = db::users::get_or_create_system_user(&state.db)
+        .await
+        .map_err(map_err)?;
+
     let input = CreateMessage {
         content: content.to_string(),
         tts: None,
@@ -416,7 +420,7 @@ async fn tool_send_message(state: &AppState, args: &Value) -> Result<String, Str
     let msg = db::messages::create_message(
         &state.db,
         channel_id,
-        "mcp",
+        &system_user_id,
         channel.space_id.as_deref(),
         &input,
     )
@@ -479,6 +483,22 @@ async fn tool_create_channel(state: &AppState, args: &Value) -> Result<String, S
         .await
         .map_err(map_err)?;
 
+    // Broadcast channel.create so connected clients live-update their sidebar.
+    if let Some(ref tx) = *state.gateway_tx.read().await {
+        let json = crate::routes::spaces::channel_row_to_json_pub(&state.db, &channel).await;
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "channel.create",
+            "data": json,
+        });
+        let _ = tx.send(crate::gateway::events::GatewayBroadcast {
+            space_id: channel.space_id.clone(),
+            target_user_ids: None,
+            event,
+            intent: "channels".to_string(),
+        });
+    }
+
     Ok(serde_json::json!({
         "id": channel.id,
         "name": channel.name,
@@ -491,6 +511,28 @@ async fn tool_create_channel(state: &AppState, args: &Value) -> Result<String, S
 
 async fn tool_delete_channel(state: &AppState, args: &Value) -> Result<String, String> {
     let channel_id = require_str(args, "channel_id")?;
+
+    // Look up the channel before deleting so we know which space to broadcast to.
+    let existing = db::channels::get_channel_row(&state.db, channel_id)
+        .await
+        .map_err(map_err)?;
+
+    if let Some(ref space_id) = existing.space_id {
+        if let Some(ref tx) = *state.gateway_tx.read().await {
+            let event = serde_json::json!({
+                "op": 0,
+                "type": "channel.delete",
+                "data": { "id": channel_id, "space_id": space_id },
+            });
+            let _ = tx.send(crate::gateway::events::GatewayBroadcast {
+                space_id: Some(space_id.clone()),
+                target_user_ids: None,
+                event,
+                intent: "channels".to_string(),
+            });
+        }
+    }
+
     db::channels::delete_channel(&state.db, channel_id)
         .await
         .map_err(map_err)?;
@@ -511,14 +553,17 @@ async fn tool_ban_user(state: &AppState, args: &Value) -> Result<String, String>
     let user_id = require_str(args, "user_id")?;
     let reason = opt_str(args, "reason");
 
-    // Remove membership first, then ban
+    // Remove membership first, then ban (attributed to the System user)
+    let system_user_id = db::users::get_or_create_system_user(&state.db)
+        .await
+        .map_err(map_err)?;
     let _ = db::members::remove_member(&state.db, space_id, user_id).await;
     let ban = db::bans::create_ban(
         &state.db,
         space_id,
         user_id,
         reason,
-        "mcp",
+        &system_user_id,
         state.db_is_postgres,
     )
     .await
