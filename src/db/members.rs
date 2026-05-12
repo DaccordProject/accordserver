@@ -43,9 +43,11 @@ pub async fn list_members(
     after: Option<&str>,
     limit: i64,
 ) -> Result<Vec<MemberRow>, AppError> {
+    // Join users so we can hide the System user from the sidebar.
+    let select = "SELECT m.user_id, m.space_id, m.nickname, m.avatar, m.joined_at, m.premium_since, m.deaf, m.mute, m.pending, m.timed_out_until FROM members m INNER JOIN users u ON m.user_id = u.id";
     let rows = if let Some(after_id) = after {
         sqlx::query(&super::q(&format!(
-            "{SELECT_MEMBERS} WHERE space_id = ? AND user_id > ? ORDER BY user_id ASC LIMIT ?"
+            "{select} WHERE m.space_id = ? AND u.system = FALSE AND m.user_id > ? ORDER BY m.user_id ASC LIMIT ?"
         )))
         .bind(space_id)
         .bind(after_id)
@@ -54,7 +56,7 @@ pub async fn list_members(
         .await?
     } else {
         sqlx::query(&super::q(&format!(
-            "{SELECT_MEMBERS} WHERE space_id = ? ORDER BY user_id ASC LIMIT ?"
+            "{select} WHERE m.space_id = ? AND u.system = FALSE ORDER BY m.user_id ASC LIMIT ?"
         )))
         .bind(space_id)
         .bind(limit + 1)
@@ -73,7 +75,7 @@ pub async fn search_members(
 ) -> Result<Vec<MemberRow>, AppError> {
     let pattern = format!("%{query}%");
     let rows = sqlx::query(
-        &super::q("SELECT m.user_id, m.space_id, m.nickname, m.avatar, m.joined_at, m.premium_since, m.deaf, m.mute, m.pending, m.timed_out_until FROM members m INNER JOIN users u ON m.user_id = u.id WHERE m.space_id = ? AND (u.username LIKE ? OR m.nickname LIKE ?) LIMIT ?")
+        &super::q("SELECT m.user_id, m.space_id, m.nickname, m.avatar, m.joined_at, m.premium_since, m.deaf, m.mute, m.pending, m.timed_out_until FROM members m INNER JOIN users u ON m.user_id = u.id WHERE m.space_id = ? AND u.system = FALSE AND (u.username LIKE ? OR m.nickname LIKE ?) LIMIT ?")
     )
     .bind(space_id)
     .bind(&pattern)
