@@ -182,9 +182,7 @@ async fn run_main_server(config: Config) {
         .await
         .expect("failed to bind");
 
-    let actual_addr = listener
-        .local_addr()
-        .expect("failed to get local address");
+    let actual_addr = listener.local_addr().expect("failed to get local address");
     eprintln!("  \x1b[32m→ listening on {actual_addr}\x1b[0m");
     eprintln!();
 
