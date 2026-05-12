@@ -2,10 +2,6 @@
 
 A self-hosted Discord-like chat and voice server backend, built in Rust with [Axum](https://github.com/tokio-rs/axum). Designed as the backend for a [Godot](https://godotengine.org/) game client.
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2Fdaccordproject%2Faccordserver)
-
-> The button above does an **ad-hoc repo deploy**: Railway clones the default branch, builds from `Dockerfile`, and applies `railway.json`. It does **not** pre-prompt for env vars or provision Postgres — Railway only supports that for *published templates*, which must be created through the dashboard (see [RAILWAY_TEMPLATE.md](RAILWAY_TEMPLATE.md) for the walkthrough). After the initial deploy, follow [Deploying to Railway](#deploying-to-railway) to add Postgres / a volume, env vars, and a public domain.
-
 ## Features
 
 - **User Registration & Login** — Register with username/password, login to get bearer tokens, logout to revoke tokens. Passwords hashed with Argon2id.
@@ -213,44 +209,6 @@ volumes:
 | `permission denied for schema public` | PG 15+ restricts schema access | The server handles this automatically. If it still fails, grant manually: `docker compose exec postgres psql -U postgres -d accord -c "GRANT ALL ON SCHEMA public TO accord;"` |
 | `password authentication failed` | Password mismatch between `DATABASE_URL` and Postgres | Ensure passwords match. Check for unquoted `!` in YAML and missing URL-encoding in `DATABASE_URL`. |
 | Changes to `POSTGRES_USER`/`POSTGRES_DB` have no effect | Volume has existing data | PostgreSQL only reads these on first init. Delete the volume: `docker compose down -v` then `docker compose up -d` |
-
-## Deploying to Railway
-
-Click the [Deploy on Railway](#accord-server) button at the top of this README to provision a service from this repo. Railway builds with the included `Dockerfile` and reads configuration from `railway.json` (healthcheck `/health`, restart-on-failure).
-
-> **Note:** Railway deploys the repo's **default branch**. `railway.json` and any env-var defaults only take effect once they're merged into `main` — if you click the button against a branch where this file hasn't landed yet, Railway falls back to auto-detection and may build with different defaults.
-
-Railway injects a `PORT` env var at runtime; the server binds to it automatically — no manual port config required.
-
-### After the deploy completes
-
-1. **Add a Volume for SQLite persistence.** In your Railway service, click *Settings → Volumes → New Volume* and mount it at `/app/data`. Without a volume the database is wiped on every redeploy.
-   - Or skip the volume and use PostgreSQL instead (see next step).
-2. **(Optional) Add PostgreSQL.** Click *+ New → Database → PostgreSQL* in your Railway project, then in the accordserver service set `DATABASE_URL=${{Postgres.DATABASE_URL}}` so the two services stay linked via reference variables.
-3. **Generate a `TOTP_ENCRYPTION_KEY`.** The deploy form prompts for one; if you skipped it, run `openssl rand -hex 32` locally and add it in *Variables*. Without this, TOTP secrets are stored in plaintext.
-4. **Expose a public domain.** In *Settings → Networking* click *Generate Domain* — Railway proxies it to the container port, terminates TLS, and natively supports the gateway WebSocket at `/ws`.
-
-### Voice / LiveKit on Railway
-
-Railway only exposes **TCP** ports. LiveKit's signaling is WebSocket-over-TCP (fine), but the **media plane requires UDP** for WebRTC — which Railway does not route. This means:
-
-- **You cannot self-host LiveKit on Railway.** Audio/video will fail to negotiate even though signaling connects.
-- **Use [LiveKit Cloud](https://livekit.io/cloud)** (or any UDP-capable host) and point Accord at it:
-
-  ```
-  LIVEKIT_INTERNAL_URL=wss://your-project.livekit.cloud
-  LIVEKIT_EXTERNAL_URL=wss://your-project.livekit.cloud
-  LIVEKIT_API_KEY=<from LiveKit dashboard>
-  LIVEKIT_API_SECRET=<from LiveKit dashboard>
-  ```
-
-- Leave the four `LIVEKIT_*` vars unset to disable voice entirely; chat, presence, and the gateway WebSocket work without them.
-
-### Railway-specific notes
-
-- The gateway WebSocket (`/ws`) works out of the box — Railway's edge proxy supports the HTTP Upgrade handshake.
-- The `Dockerfile`'s `ENV PORT=39099` is overridden by Railway's injected `PORT`; no change needed.
-- The `/health` endpoint is used by Railway for liveness — startup must complete within `healthcheckTimeout` (100s, set in `railway.json`).
 
 ## Architecture
 
