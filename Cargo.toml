@@ -26,6 +26,7 @@ totp-rs = { version = "5", features = ["gen_secret"] }
 data-encoding = "2"
 aes-gcm = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+clap = { version = "4", features = ["derive"] }
 
 [[bin]]
 name = "accordserver"

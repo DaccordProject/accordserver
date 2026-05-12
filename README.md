@@ -33,17 +33,44 @@ The server creates a SQLite database by default and runs migrations automaticall
 
 ## Configuration
 
-All configuration is done via environment variables.
+Configuration comes from environment variables, with optional CLI flags as overrides (handy when launching from a wrapper like the [desktop tray app](desktop/README.md)).
+
+### Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `39099` | Server listen port |
+| `ACCORD_BIND` | `0.0.0.0` | Address to bind |
 | `DATABASE_URL` | `sqlite:data/accord.db?mode=rwc` | Database connection string (SQLite or PostgreSQL) |
+| `ACCORD_STORAGE_PATH` | `./data/cdn` | Where uploaded emoji, avatars, and attachments live |
 | `RUST_LOG` | `accordserver=debug,tower_http=debug` | Tracing log filter |
 | `LIVEKIT_INTERNAL_URL` | | LiveKit server URL for server communication (e.g. `http://livekit:7880`) |
 | `LIVEKIT_EXTERNAL_URL` | | LiveKit server URL for client connections (e.g. `wss://livekit.example.com`) |
 | `LIVEKIT_API_KEY` | | LiveKit API key |
 | `LIVEKIT_API_SECRET` | | LiveKit API secret |
+
+### CLI flags
+
+```
+accordserver [--data-dir <path>] [--port <n>] [--bind <addr>]
+             [--livekit-url <url>] [--livekit-key <k>] [--livekit-secret <s>]
+```
+
+`--data-dir` is the most useful flag for embedded launches: it sets the defaults for both `DATABASE_URL` (`sqlite:{data-dir}/accord.db`) and `ACCORD_STORAGE_PATH` (`{data-dir}/cdn`) so you can drop the server anywhere on disk without crafting URLs. Explicit env vars still win if both are set.
+
+## Desktop install (early access)
+
+If you'd rather run Accord like any other desktop app — no terminal, no Docker — the [`desktop/`](desktop/) crate builds a tray-icon installer for macOS, Linux, and Windows. It bundles `accordserver` and a `livekit-server` sidecar, so chat and voice both work out of the box.
+
+| Platform | Installer | Tray location |
+|---|---|---|
+| macOS | `.dmg` | Menu bar (top right) |
+| Linux | `.deb`, `.AppImage` | System tray |
+| Windows | `.msi`, `.exe` (NSIS) | Notification area |
+
+After install, click the tray icon → **Open in browser** to see the server at `http://localhost:39099`. Data lives in the platform user data directory (see [`desktop/README.md`](desktop/README.md)).
+
+Builds are currently **unsigned**, so on first launch you'll need to click through Gatekeeper (macOS: right-click → Open) or SmartScreen (Windows: More info → Run anyway). To let friends connect from outside your LAN you'll need to port-forward TCP `39099`, TCP `7880`/`7881`, and UDP `50000-60000`.
 
 ## Database
 

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Accord",
+  "version": "0.1.21",
+  "identifier": "gg.daccord.desktop",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../dist",
+    "devUrl": null
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "msi", "nsis", "deb", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "SocialNetworking",
+    "shortDescription": "Self-hosted Accord chat & voice server",
+    "longDescription": "A self-hosted, Discord-style chat and voice server. Includes a bundled LiveKit server for WebRTC voice. Runs in the background with a tray icon for control.",
+    "externalBin": [
+      "binaries/accordserver",
+      "binaries/livekit-server"
+    ],
+    "resources": [],
+    "publisher": "Accord",
+    "homepage": "https://github.com/jakecattrall/accordserver",
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perUser"
+      }
+    }
+  }
+}
