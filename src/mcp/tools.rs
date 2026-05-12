@@ -545,6 +545,9 @@ async fn tool_kick_member(state: &AppState, args: &Value) -> Result<String, Stri
     db::members::remove_member(&state.db, space_id, user_id)
         .await
         .map_err(map_err)?;
+
+    broadcast_member_leave(state, space_id, user_id).await;
+
     Ok(format!("User {user_id} kicked from space {space_id}"))
 }
 
@@ -557,7 +560,9 @@ async fn tool_ban_user(state: &AppState, args: &Value) -> Result<String, String>
     let system_user_id = db::users::get_or_create_system_user(&state.db)
         .await
         .map_err(map_err)?;
-    let _ = db::members::remove_member(&state.db, space_id, user_id).await;
+    let member_removed = db::members::remove_member(&state.db, space_id, user_id)
+        .await
+        .is_ok();
     let ban = db::bans::create_ban(
         &state.db,
         space_id,
@@ -568,6 +573,30 @@ async fn tool_ban_user(state: &AppState, args: &Value) -> Result<String, String>
     )
     .await
     .map_err(map_err)?;
+
+    if member_removed {
+        broadcast_member_leave(state, space_id, user_id).await;
+    }
+
+    if let Some(ref tx) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "ban.create",
+            "data": {
+                "user_id": ban.user_id,
+                "space_id": ban.space_id,
+                "reason": ban.reason,
+                "banned_by": ban.banned_by,
+                "created_at": ban.created_at,
+            },
+        });
+        let _ = tx.send(crate::gateway::events::GatewayBroadcast {
+            space_id: Some(space_id.to_string()),
+            target_user_ids: None,
+            event,
+            intent: "moderation".to_string(),
+        });
+    }
 
     Ok(serde_json::json!({
         "user_id": ban.user_id,
@@ -584,15 +613,77 @@ async fn tool_unban_user(state: &AppState, args: &Value) -> Result<String, Strin
     db::bans::delete_ban(&state.db, space_id, user_id)
         .await
         .map_err(map_err)?;
+
+    if let Some(ref tx) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "ban.delete",
+            "data": {
+                "user_id": user_id,
+                "space_id": space_id,
+            },
+        });
+        let _ = tx.send(crate::gateway::events::GatewayBroadcast {
+            space_id: Some(space_id.to_string()),
+            target_user_ids: None,
+            event,
+            intent: "moderation".to_string(),
+        });
+    }
+
     Ok(format!("User {user_id} unbanned from space {space_id}"))
 }
 
 async fn tool_delete_message(state: &AppState, args: &Value) -> Result<String, String> {
     let message_id = require_str(args, "message_id")?;
+
+    // Look up the message first so we can broadcast which channel/space it belonged to.
+    let existing = db::messages::get_message_row(&state.db, message_id)
+        .await
+        .map_err(map_err)?;
+
     db::messages::delete_message(&state.db, message_id)
         .await
         .map_err(map_err)?;
+
+    if let Some(ref tx) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "message.delete",
+            "data": {
+                "id": message_id,
+                "channel_id": existing.channel_id,
+                "space_id": existing.space_id,
+            },
+        });
+        let _ = tx.send(crate::gateway::events::GatewayBroadcast {
+            space_id: existing.space_id.clone(),
+            target_user_ids: None,
+            event,
+            intent: "messages".to_string(),
+        });
+    }
+
     Ok(format!("Message {message_id} deleted"))
+}
+
+async fn broadcast_member_leave(state: &AppState, space_id: &str, user_id: &str) {
+    if let Some(ref tx) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.leave",
+            "data": {
+                "space_id": space_id,
+                "user_id": user_id,
+            },
+        });
+        let _ = tx.send(crate::gateway::events::GatewayBroadcast {
+            space_id: Some(space_id.to_string()),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
 }
 
 async fn tool_server_info(state: &AppState) -> Result<String, String> {
