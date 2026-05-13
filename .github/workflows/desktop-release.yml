@@ -18,11 +18,11 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-            livekit_asset: livekit_${{ vars.LIVEKIT_VERSION || '1.8.0' }}_darwin_arm64.tar.gz
+            livekit_asset: ""
             tauri_target_flag: --target aarch64-apple-darwin
           - os: macos-14
             target: x86_64-apple-darwin
-            livekit_asset: livekit_${{ vars.LIVEKIT_VERSION || '1.8.0' }}_darwin_amd64.tar.gz
+            livekit_asset: ""
             tauri_target_flag: --target x86_64-apple-darwin
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -30,7 +30,7 @@ jobs:
             tauri_target_flag: ""
           - os: windows-2022
             target: x86_64-pc-windows-msvc
-            livekit_asset: livekit_${{ vars.LIVEKIT_VERSION || '1.8.0' }}_windows_amd64.tar.gz
+            livekit_asset: livekit_${{ vars.LIVEKIT_VERSION || '1.8.0' }}_windows_amd64.zip
             tauri_target_flag: ""
 
     runs-on: ${{ matrix.os }}
@@ -74,9 +74,23 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p livekit-dl
-          curl -fsSL -o livekit-dl/livekit.tar.gz \
-            "https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VERSION}/${ASSET}"
-          tar -xzf livekit-dl/livekit.tar.gz -C livekit-dl
+          case "${{ runner.os }}" in
+            macOS)
+              # LiveKit publishes no darwin binaries on GitHub releases; use Homebrew.
+              brew install livekit
+              cp "$(brew --prefix)/bin/livekit-server" livekit-dl/livekit-server
+              ;;
+            Windows)
+              curl -fsSL -o livekit-dl/livekit.zip \
+                "https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VERSION}/${ASSET}"
+              unzip -q livekit-dl/livekit.zip -d livekit-dl
+              ;;
+            *)
+              curl -fsSL -o livekit-dl/livekit.tar.gz \
+                "https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VERSION}/${ASSET}"
+              tar -xzf livekit-dl/livekit.tar.gz -C livekit-dl
+              ;;
+          esac
 
       - name: Stage sidecar binaries
         shell: bash
@@ -111,8 +125,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-          cache-dependency-path: desktop/pnpm-lock.yaml
 
       - name: Install Tauri CLI
         working-directory: desktop
