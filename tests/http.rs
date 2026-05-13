@@ -410,6 +410,99 @@ async fn test_message_search_empty_filters_bad_request() {
 }
 
 // ---------------------------------------------------------------------------
+// Read State / Unread Tests
+// ---------------------------------------------------------------------------
+
+/// Regression test: a thread reply must not bump channels.last_message_id, so
+/// the channel stops appearing in get_unread_channels for users who have already
+/// acked the channel's main timeline. Previously, every message insert bumped
+/// the pointer, which caused a channel to silently re-highlight as unread after
+/// any thread activity once the client reconnected and re-read the unread list.
+#[tokio::test]
+async fn test_thread_reply_does_not_mark_channel_unread() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "ThreadUnreadSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+    let channel_id = server.create_channel(&space_id, "announcements").await;
+
+    // Alice posts a top-level message.
+    let parent = accordserver::db::messages::create_message(
+        server.pool(),
+        &channel_id,
+        &alice.user.id,
+        Some(&space_id),
+        &accordserver::models::message::CreateMessage {
+            content: "official announcement".to_string(),
+            tts: None,
+            embeds: None,
+            reply_to: None,
+            thread_id: None,
+            title: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Bob acks the channel at that message — he has now read everything.
+    let is_postgres = accordserver::db::url_is_postgres(
+        &std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string()),
+    );
+    accordserver::db::read_states::ack_channel(
+        server.pool(),
+        &bob.user.id,
+        &channel_id,
+        &parent.id,
+        is_postgres,
+    )
+    .await
+    .unwrap();
+
+    let unread_before = accordserver::db::read_states::get_unread_channels(
+        server.pool(),
+        &bob.user.id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !unread_before.iter().any(|u| u.channel_id == channel_id),
+        "channel should not be unread immediately after ack"
+    );
+
+    // Alice posts a thread reply against the parent message.
+    accordserver::db::messages::create_message(
+        server.pool(),
+        &channel_id,
+        &alice.user.id,
+        Some(&space_id),
+        &accordserver::models::message::CreateMessage {
+            content: "thread reply".to_string(),
+            tts: None,
+            embeds: None,
+            reply_to: None,
+            thread_id: Some(parent.id.clone()),
+            title: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Bob still has no unseen top-level content, so the channel must not be
+    // reported as unread.
+    let unread_after = accordserver::db::read_states::get_unread_channels(
+        server.pool(),
+        &bob.user.id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !unread_after.iter().any(|u| u.channel_id == channel_id),
+        "channel should not become unread from a thread reply alone"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Emoji Tests
 // ---------------------------------------------------------------------------
 

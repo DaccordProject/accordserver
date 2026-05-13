@@ -200,14 +200,18 @@ pub async fn create_message(
     .execute(pool)
     .await?;
 
-    // Update last_message_id on the channel
-    sqlx::query(&super::q(
-        "UPDATE channels SET last_message_id = ? WHERE id = ?",
-    ))
-    .bind(&id)
-    .bind(channel_id)
-    .execute(pool)
-    .await?;
+    // Only top-level messages bump channels.last_message_id. Thread replies live
+    // inside a thread; bumping the channel pointer would make get_unread_channels
+    // report the channel as unread for everyone who isn't following that thread.
+    if input.thread_id.is_none() {
+        sqlx::query(&super::q(
+            "UPDATE channels SET last_message_id = ? WHERE id = ?",
+        ))
+        .bind(&id)
+        .bind(channel_id)
+        .execute(pool)
+        .await?;
+    }
 
     get_message_row(pool, &id).await
 }
