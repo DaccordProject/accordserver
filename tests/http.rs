@@ -423,7 +423,9 @@ async fn test_thread_reply_does_not_mark_channel_unread() {
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;
     let bob = server.create_user_with_token("bob").await;
-    let space_id = server.create_space(&alice.user.id, "ThreadUnreadSpace").await;
+    let space_id = server
+        .create_space(&alice.user.id, "ThreadUnreadSpace")
+        .await;
     server.add_member(&space_id, &bob.user.id).await;
     let channel_id = server.create_channel(&space_id, "announcements").await;
 
@@ -459,12 +461,10 @@ async fn test_thread_reply_does_not_mark_channel_unread() {
     .await
     .unwrap();
 
-    let unread_before = accordserver::db::read_states::get_unread_channels(
-        server.pool(),
-        &bob.user.id,
-    )
-    .await
-    .unwrap();
+    let unread_before =
+        accordserver::db::read_states::get_unread_channels(server.pool(), &bob.user.id)
+            .await
+            .unwrap();
     assert!(
         !unread_before.iter().any(|u| u.channel_id == channel_id),
         "channel should not be unread immediately after ack"
@@ -490,12 +490,10 @@ async fn test_thread_reply_does_not_mark_channel_unread() {
 
     // Bob still has no unseen top-level content, so the channel must not be
     // reported as unread.
-    let unread_after = accordserver::db::read_states::get_unread_channels(
-        server.pool(),
-        &bob.user.id,
-    )
-    .await
-    .unwrap();
+    let unread_after =
+        accordserver::db::read_states::get_unread_channels(server.pool(), &bob.user.id)
+            .await
+            .unwrap();
     assert!(
         !unread_after.iter().any(|u| u.channel_id == channel_id),
         "channel should not become unread from a thread reply alone"
