@@ -1,10 +1,11 @@
 use arc_swap::ArcSwap;
+use clap::Parser;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 
-use accordserver::config::Config;
+use accordserver::config::{Cli, Config};
 use accordserver::gateway::dispatcher::Dispatcher;
 use accordserver::state::AppState;
 
@@ -17,7 +18,8 @@ async fn main() {
         )
         .init();
 
-    let config = Config::from_env();
+    let cli = Cli::parse();
+    let config = Config::from_cli(&cli);
     print_banner(&config);
     run_main_server(config).await;
 }
@@ -176,15 +178,12 @@ async fn run_main_server(config: Config) {
 
     let app = accordserver::routes::router(state);
 
-    let listener = TcpListener::bind(("0.0.0.0", config.port))
+    let listener = TcpListener::bind((config.bind.as_str(), config.port))
         .await
         .expect("failed to bind");
 
-    let actual_port = listener
-        .local_addr()
-        .expect("failed to get local address")
-        .port();
-    eprintln!("  \x1b[32m→ listening on 0.0.0.0:{actual_port}\x1b[0m");
+    let actual_addr = listener.local_addr().expect("failed to get local address");
+    eprintln!("  \x1b[32m→ listening on {actual_addr}\x1b[0m");
     eprintln!();
 
     axum::serve(listener, app).await.expect("server error");
