@@ -1,6 +1,6 @@
 [package]
 name = "accord-desktop"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2021"
 description = "Accord chat & voice server — desktop tray app"
 rust-version = "1.77"
