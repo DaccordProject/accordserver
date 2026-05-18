@@ -1803,6 +1803,55 @@ async fn test_admin_delete_user() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// Regression: deleting a user that has rows in tables which reference
+// users(id) without ON DELETE CASCADE (e.g. `reports`) must not fail with a
+// foreign-key violation surfaced as "referenced resource does not exist".
+#[tokio::test]
+async fn test_admin_delete_user_with_filed_report() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("admin").await;
+    let auth = admin.auth_header();
+    let testuser = server.create_user_with_token("testuser").await;
+
+    let space_id = server.create_space(&admin.user.id, "Space").await;
+    server.add_member(&space_id, &testuser.user.id).await;
+
+    // testuser files a report -> reports.reporter_id references testuser.
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/reports"),
+        &testuser.auth_header(),
+        &serde_json::json!({
+            "target_type": "user",
+            "target_id": admin.user.id,
+            "category": "other",
+            "description": "test report",
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Deleting testuser must succeed despite the dangling report reference.
+    let app = server.router();
+    let req = authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/admin/users/{}", testuser.user.id),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let app = server.router();
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/users/{}", testuser.user.id),
+        &auth,
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn test_admin_delete_user_owns_spaces_rejected() {
     let server = TestServer::new().await;

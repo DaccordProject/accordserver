@@ -276,71 +276,136 @@ pub async fn delete_user(pool: &AnyPool, user_id: &str) -> Result<(), AppError> 
         ));
     }
 
-    // Manual cascade deletion
+    // Manual cascade deletion. Every table that references users(id) without an
+    // ON DELETE CASCADE clause must be cleaned up here, otherwise the final
+    // `DELETE FROM users` fails with a foreign-key violation (surfaced to the
+    // client as "referenced resource does not exist"). The whole sequence runs
+    // in a transaction so a failure can never leave a half-deleted user behind.
+    //
+    // Ordering matters: rows are removed children-first so intermediate states
+    // never violate a foreign key.
+    let mut tx = pool.begin().await?;
+
+    // Plugin graph: participants -> sessions -> plugins. Deleting a parent
+    // cascades to its children, but rows that merely *reference* this user
+    // (e.g. a session this user hosts inside someone else's plugin) must be
+    // removed explicitly first.
+    sqlx::query(&super::q(
+        "DELETE FROM plugin_session_participants WHERE user_id = ?",
+    ))
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(&super::q(
+        "DELETE FROM plugin_sessions WHERE host_user_id = ?",
+    ))
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(&super::q("DELETE FROM plugins WHERE creator_id = ?"))
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Reports: reporter_id is NOT NULL so reports filed by the user are
+    // deleted; actioned_by is nullable so it is detached instead.
+    sqlx::query(&super::q("DELETE FROM reports WHERE reporter_id = ?"))
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(&super::q(
+        "UPDATE reports SET actioned_by = NULL WHERE actioned_by = ?",
+    ))
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Audit log entries (user_id is NOT NULL) are removed with the user.
+    sqlx::query(&super::q("DELETE FROM audit_log WHERE user_id = ?"))
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
     sqlx::query(&super::q("DELETE FROM user_tokens WHERE user_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(&super::q("DELETE FROM bot_tokens WHERE user_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    // Detach this user as a bot identity before owned applications are removed
+    // (an application may be owned by someone else but bound to this bot user).
+    sqlx::query(&super::q(
+        "UPDATE applications SET bot_user_id = NULL WHERE bot_user_id = ?",
+    ))
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(&super::q("DELETE FROM applications WHERE owner_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(&super::q("DELETE FROM reactions WHERE user_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(&super::q("DELETE FROM dm_participants WHERE user_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(&super::q("DELETE FROM member_roles WHERE user_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(&super::q("DELETE FROM members WHERE user_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(&super::q("DELETE FROM bans WHERE user_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(&super::q(
         "UPDATE bans SET banned_by = NULL WHERE banned_by = ?",
     ))
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(&super::q(
         "UPDATE invites SET inviter_id = NULL WHERE inviter_id = ?",
     ))
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(&super::q(
         "UPDATE emojis SET creator_id = NULL WHERE creator_id = ?",
     ))
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(&super::q(
+        "UPDATE soundboard_sounds SET creator_id = NULL WHERE creator_id = ?",
+    ))
+    .bind(user_id)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(&super::q(
         "UPDATE channels SET owner_id = NULL WHERE owner_id = ?",
     ))
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(&super::q("DELETE FROM messages WHERE author_id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(&super::q("DELETE FROM users WHERE id = ?"))
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }
