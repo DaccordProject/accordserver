@@ -63,6 +63,16 @@ pub async fn broadcast_member_join_message(state: &AppState, space_id: &str, use
                 user_id,
                 e
             );
+            // Roll back the introduction claim so the user can still receive
+            // a welcome on a future join (the message was never delivered).
+            if let Err(del_err) = revoke_introduction(state, space_id, user_id).await {
+                tracing::warn!(
+                    "system message: failed to revoke introduction claim for user {} in space {}: {:?}",
+                    user_id,
+                    space_id,
+                    del_err
+                );
+            }
             return;
         }
     };
@@ -88,6 +98,16 @@ pub async fn broadcast_member_join_message(state: &AppState, space_id: &str, use
                 system_channel_id,
                 e
             );
+            // Roll back the introduction claim so the user can still receive
+            // a welcome on a future join (the message was never delivered).
+            if let Err(del_err) = revoke_introduction(state, space_id, user_id).await {
+                tracing::warn!(
+                    "system message: failed to revoke introduction claim for user {} in space {}: {:?}",
+                    user_id,
+                    space_id,
+                    del_err
+                );
+            }
             return;
         }
     };
@@ -129,4 +149,22 @@ async fn claim_introduction(
         .execute(&state.db)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Removes a previously-claimed introduction record so that the next join
+/// attempt can post a welcome message. Used to roll back a claim when the
+/// subsequent message creation fails.
+async fn revoke_introduction(
+    state: &AppState,
+    space_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(&db::q(
+        "DELETE FROM space_introductions WHERE space_id = ? AND user_id = ?",
+    ))
+    .bind(space_id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
 }
