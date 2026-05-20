@@ -5,9 +5,11 @@ edition = "2021"
 description = "Accord chat & voice server — desktop tray app"
 rust-version = "1.77"
 
-[lib]
-name = "accord_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop-only binary crate; no library is built. The previous [lib] block
+# named a target (accord_desktop_lib) with no backing src/lib.rs, which made
+# `cargo metadata` fail and broke `tauri build` in the desktop-release
+# workflow. If mobile (iOS/Android) targets are added later, reintroduce a
+# real lib.rs alongside this section.
 
 [[bin]]
 name = "accord-desktop"
