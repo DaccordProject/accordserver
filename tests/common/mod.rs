@@ -72,6 +72,7 @@ impl TestServer {
                 "channel_mutes",
                 "dm_participants",
                 "member_roles",
+                "space_introductions",
                 "members",
                 "bans",
                 "invites",

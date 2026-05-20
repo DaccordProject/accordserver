@@ -751,6 +751,88 @@ async fn test_join_public_space_idempotent() {
 }
 
 #[tokio::test]
+async fn test_introduction_message_only_posted_once_per_account() {
+    use accordserver::db;
+    use accordserver::models::space::UpdateSpace;
+
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server
+        .create_public_space(&alice.user.id, "Welcome Space")
+        .await;
+    let intro_channel_id = server.create_channel(&space_id, "introductions").await;
+
+    // Designate the channel as the system/welcome channel.
+    db::spaces::update_space(
+        server.pool(),
+        &space_id,
+        &UpdateSpace {
+            name: None,
+            slug: None,
+            description: None,
+            icon: None,
+            banner: None,
+            verification_level: None,
+            default_notifications: None,
+            afk_channel_id: None,
+            afk_timeout: None,
+            system_channel_id: Some(intro_channel_id.clone()),
+            rules_channel_id: None,
+            preferred_locale: None,
+            public: None,
+            allow_guest_access: None,
+        },
+        server.state.db_is_postgres,
+    )
+    .await
+    .expect("failed to set system channel");
+
+    let join = |auth_header: String| {
+        let app = server.router();
+        let path = format!("/api/v1/spaces/{space_id}/join");
+        async move {
+            let req = authenticated_request(Method::POST, &path, &auth_header);
+            app.oneshot(req).await.unwrap()
+        }
+    };
+
+    // First join → one welcome message.
+    let resp = join(bob.auth_header()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let msgs = db::messages::list_messages(server.pool(), &intro_channel_id, None, 50, None)
+        .await
+        .unwrap();
+    let intros: Vec<_> = msgs
+        .iter()
+        .filter(|m| m.message_type == "member_join" && m.author_id == bob.user.id)
+        .collect();
+    assert_eq!(intros.len(), 1, "first join should post exactly one intro");
+
+    // Bob leaves (simulate kick / leave).
+    db::members::remove_member(server.pool(), &space_id, &bob.user.id)
+        .await
+        .unwrap();
+
+    // Bob rejoins → no second welcome message.
+    let resp = join(bob.auth_header()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let msgs = db::messages::list_messages(server.pool(), &intro_channel_id, None, 50, None)
+        .await
+        .unwrap();
+    let intros: Vec<_> = msgs
+        .iter()
+        .filter(|m| m.message_type == "member_join" && m.author_id == bob.user.id)
+        .collect();
+    assert_eq!(
+        intros.len(),
+        1,
+        "rejoin must not post a duplicate intro (got {} messages)",
+        intros.len()
+    );
+}
+
+#[tokio::test]
 async fn test_join_nonexistent_space_returns_404() {
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;

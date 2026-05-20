@@ -1,10 +1,15 @@
 use crate::db;
+use crate::error::AppError;
 use crate::gateway::events::GatewayBroadcast;
 use crate::routes::messages::message_row_to_json;
 use crate::state::AppState;
 
 /// If the space has a `system_channel_id`, creates a "member_join" system message
 /// authored by the joining user and broadcasts it via the gateway.
+///
+/// Only the first join per (space, user) ever produces an introduction message.
+/// Subsequent joins (after leaving, getting kicked, etc.) are silent — the
+/// introduction is a one-time event per account.
 ///
 /// Failures are logged but do not propagate — a failed welcome message should
 /// never block the join itself.
@@ -26,6 +31,30 @@ pub async fn broadcast_member_join_message(state: &AppState, space_id: &str, use
         _ => return, // No system channel configured — nothing to do
     };
 
+    // Atomically claim the "has been introduced" slot for this (space, user).
+    // If the row already exists, this user has been welcomed before and we
+    // must not post another introduction.
+    match claim_introduction(state, space_id, user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                "system message: user {} has already been introduced in space {}, skipping",
+                user_id,
+                space_id
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "system message: failed to record introduction for user {} in space {}: {:?}",
+                user_id,
+                space_id,
+                e
+            );
+            return;
+        }
+    }
+
     let user = match db::users::get_user(&state.db, user_id).await {
         Ok(u) => u,
         Err(e) => {
@@ -34,6 +63,16 @@ pub async fn broadcast_member_join_message(state: &AppState, space_id: &str, use
                 user_id,
                 e
             );
+            // Roll back the introduction claim so the user can still receive
+            // a welcome on a future join (the message was never delivered).
+            if let Err(del_err) = revoke_introduction(state, space_id, user_id).await {
+                tracing::warn!(
+                    "system message: failed to revoke introduction claim for user {} in space {}: {:?}",
+                    user_id,
+                    space_id,
+                    del_err
+                );
+            }
             return;
         }
     };
@@ -59,6 +98,16 @@ pub async fn broadcast_member_join_message(state: &AppState, space_id: &str, use
                 system_channel_id,
                 e
             );
+            // Roll back the introduction claim so the user can still receive
+            // a welcome on a future join (the message was never delivered).
+            if let Err(del_err) = revoke_introduction(state, space_id, user_id).await {
+                tracing::warn!(
+                    "system message: failed to revoke introduction claim for user {} in space {}: {:?}",
+                    user_id,
+                    space_id,
+                    del_err
+                );
+            }
             return;
         }
     };
@@ -78,4 +127,44 @@ pub async fn broadcast_member_join_message(state: &AppState, space_id: &str, use
             intent: "messages".to_string(),
         });
     }
+}
+
+/// Records that the given user has now received their introduction message in
+/// the given space. Returns `Ok(true)` if this call inserted a new row (the
+/// caller should post the welcome), `Ok(false)` if a row already existed
+/// (welcome should be skipped).
+async fn claim_introduction(
+    state: &AppState,
+    space_id: &str,
+    user_id: &str,
+) -> Result<bool, AppError> {
+    let sql = if state.db_is_postgres {
+        "INSERT INTO space_introductions (space_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+    } else {
+        "INSERT OR IGNORE INTO space_introductions (space_id, user_id) VALUES (?, ?)"
+    };
+    let result = sqlx::query(&db::q(sql))
+        .bind(space_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Removes a previously-claimed introduction record so that the next join
+/// attempt can post a welcome message. Used to roll back a claim when the
+/// subsequent message creation fails.
+async fn revoke_introduction(
+    state: &AppState,
+    space_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(&db::q(
+        "DELETE FROM space_introductions WHERE space_id = ? AND user_id = ?",
+    ))
+    .bind(space_id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
 }
