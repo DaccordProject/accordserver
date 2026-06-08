@@ -109,10 +109,7 @@ fn main() {
         });
 }
 
-fn build_menu(
-    app: &tauri::AppHandle,
-    autostart: &CheckMenuItem<Wry>,
-) -> tauri::Result<Menu<Wry>> {
+fn build_menu(app: &tauri::AppHandle, autostart: &CheckMenuItem<Wry>) -> tauri::Result<Menu<Wry>> {
     let open = MenuItem::with_id(app, "open", "Open in browser", true, None::<&str>)?;
     let data = MenuItem::with_id(app, "data", "Open data folder", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "View logs", true, None::<&str>)?;

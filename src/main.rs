@@ -82,10 +82,15 @@ fn print_banner(config: &Config) {
     };
 
     eprintln!();
-    status_line(format!("  \x1b[1;36maccord\x1b[0m \x1b[2mv{version}\x1b[0m"));
+    status_line(format!(
+        "  \x1b[1;36maccord\x1b[0m \x1b[2mv{version}\x1b[0m"
+    ));
     eprintln!();
     status_line(format!("  \x1b[2mport\x1b[0m         {}", config.port));
-    status_line(format!("  \x1b[2mdatabase\x1b[0m     {}", config.database_url));
+    status_line(format!(
+        "  \x1b[2mdatabase\x1b[0m     {}",
+        config.database_url
+    ));
     status_line(format!("  \x1b[2mvoice\x1b[0m        {voice}"));
     status_line(format!("  \x1b[2mmaster\x1b[0m       {master}"));
     status_line(format!("  \x1b[2mmcp\x1b[0m          {mcp}"));
