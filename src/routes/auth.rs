@@ -386,6 +386,33 @@ pub(crate) async fn verify_user_password(
     Ok(())
 }
 
+/// Validate a username's character set and format.
+///
+/// Usernames are public identifiers that login looks users up by, so they must
+/// not be email addresses. Allowed characters are lowercase `[a-z0-9_.]`, with
+/// no leading or trailing `.`. Length is validated separately by callers.
+pub(crate) fn validate_username(username: &str) -> Result<(), AppError> {
+    if username.contains('@') {
+        return Err(AppError::BadRequest(
+            "username may not be an email address".to_string(),
+        ));
+    }
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+    {
+        return Err(AppError::BadRequest(
+            "username may only contain lowercase letters, digits, '_' and '.'".to_string(),
+        ));
+    }
+    if username.starts_with('.') || username.ends_with('.') {
+        return Err(AppError::BadRequest(
+            "username may not start or end with '.'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 // =========================================================================
 // Registration
 // =========================================================================
@@ -423,6 +450,7 @@ pub async fn register(
             "username must be between 1 and 32 characters".to_string(),
         ));
     }
+    validate_username(username)?;
 
     // Validate display_name length if provided
     if let Some(ref dn) = input.display_name {

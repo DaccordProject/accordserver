@@ -58,6 +58,7 @@ pub async fn update_current_user(
                 "username must be between 1 and 32 characters".into(),
             ));
         }
+        crate::routes::auth::validate_username(u)?;
     }
     if let Some(ref display_name) = input.display_name {
         if display_name.len() > 32 {
