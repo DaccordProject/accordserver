@@ -145,7 +145,7 @@ fn build_redirect_page(
       <div class="actions">
         <a id="open-btn" class="btn btn-primary" href="{daccord_uri}">Open in daccord</a>
         <a class="btn btn-secondary" href="/{web_fragment}">Open in browser</a>
-        <a class="btn btn-tertiary" href="https://daccord.cc">Get daccord</a>
+        <a class="btn btn-tertiary" href="https://www.daccord.gg">Get daccord</a>
       </div>
       <p id="status" class="status"></p>
     </div>
