@@ -1396,6 +1396,50 @@ async fn test_register_short_password() {
 }
 
 #[tokio::test]
+async fn test_register_rejects_email_username() {
+    let server = TestServer::new().await;
+
+    let app = server.router();
+    let req = json_request(
+        Method::POST,
+        "/api/v1/auth/register",
+        &serde_json::json!({
+            "username": "user@example.com",
+            "password": "securepassword123"
+        }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "email-shaped username should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_register_rejects_invalid_username_charset() {
+    let server = TestServer::new().await;
+
+    for bad in ["Alice", "user name", ".alice", "alice."] {
+        let app = server.router();
+        let req = json_request(
+            Method::POST,
+            "/api/v1/auth/register",
+            &serde_json::json!({
+                "username": bad,
+                "password": "securepassword123"
+            }),
+        );
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "username {bad:?} should be rejected"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_login_wrong_password() {
     let server = TestServer::new().await;
 
