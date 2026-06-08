@@ -132,6 +132,7 @@ impl TestServer {
             livekit_client,
             rate_limits: Arc::new(DashMap::new()),
             storage_path,
+            update_status_path: None,
             settings: Arc::new(ArcSwap::from_pointee(settings)),
             master_config: None,
             master_task: Arc::new(Mutex::new(None)),

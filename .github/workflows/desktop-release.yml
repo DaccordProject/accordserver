@@ -140,6 +140,9 @@ jobs:
       - name: Build installer
         working-directory: desktop
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           pnpm tauri build ${{ matrix.tauri_target_flag }}
 
@@ -153,11 +156,15 @@ jobs:
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.tar.gz
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.sig
             desktop/src-tauri/target/release/bundle/**/*.dmg
             desktop/src-tauri/target/release/bundle/**/*.msi
             desktop/src-tauri/target/release/bundle/**/*.exe
             desktop/src-tauri/target/release/bundle/**/*.deb
             desktop/src-tauri/target/release/bundle/**/*.AppImage
+            desktop/src-tauri/target/release/bundle/**/*.tar.gz
+            desktop/src-tauri/target/release/bundle/**/*.sig
           if-no-files-found: warn
 
       - name: Attach to release
@@ -171,9 +178,103 @@ jobs:
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.tar.gz
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.sig
             desktop/src-tauri/target/release/bundle/**/*.dmg
             desktop/src-tauri/target/release/bundle/**/*.msi
             desktop/src-tauri/target/release/bundle/**/*.exe
             desktop/src-tauri/target/release/bundle/**/*.deb
             desktop/src-tauri/target/release/bundle/**/*.AppImage
+            desktop/src-tauri/target/release/bundle/**/*.tar.gz
+            desktop/src-tauri/target/release/bundle/**/*.sig
           fail_on_unmatched_files: false
+
+  # Assemble the updater manifest (latest.json) from every platform's signed
+  # artifacts and attach it to the release. tauri-plugin-updater fetches this
+  # file from the "latest" release to decide whether a newer version exists.
+  manifest:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate latest.json
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          node <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const tag = process.env.TAG;                 // e.g. v0.1.26
+          const repo = process.env.REPO;               // owner/name
+          const version = tag.replace(/^v/, '');
+          const base = `https://github.com/${repo}/releases/download/${tag}`;
+
+          // Map the uploaded per-target artifact dir to the updater platform key
+          // and the file pattern tauri produces for that platform's updater.
+          const targets = [
+            { dir: 'accord-aarch64-apple-darwin',      key: 'darwin-aarch64', ext: /\.app\.tar\.gz$/ },
+            { dir: 'accord-x86_64-apple-darwin',       key: 'darwin-x86_64',  ext: /\.app\.tar\.gz$/ },
+            { dir: 'accord-x86_64-unknown-linux-gnu',  key: 'linux-x86_64',   ext: /\.AppImage$/ },
+            { dir: 'accord-x86_64-pc-windows-msvc',    key: 'windows-x86_64', ext: /-setup\.exe$/ },
+          ];
+
+          function walk(dir) {
+            const out = [];
+            if (!fs.existsSync(dir)) return out;
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const p = path.join(dir, entry.name);
+              if (entry.isDirectory()) out.push(...walk(p));
+              else out.push(p);
+            }
+            return out;
+          }
+
+          const platforms = {};
+          for (const t of targets) {
+            const files = walk(path.join('artifacts', t.dir));
+            const artifact = files.find((f) => t.ext.test(f));
+            if (!artifact) {
+              console.log(`! no updater artifact for ${t.key} (dir ${t.dir}); skipping`);
+              continue;
+            }
+            const sig = files.find((f) => f === artifact + '.sig');
+            if (!sig) {
+              console.log(`! no signature for ${artifact}; skipping ${t.key}`);
+              continue;
+            }
+            platforms[t.key] = {
+              signature: fs.readFileSync(sig, 'utf8').trim(),
+              url: `${base}/${path.basename(artifact)}`,
+            };
+          }
+
+          if (Object.keys(platforms).length === 0) {
+            console.error('no signed updater artifacts found — is signing configured?');
+            process.exit(1);
+          }
+
+          const manifest = {
+            version,
+            pub_date: new Date().toISOString(),
+            platforms,
+          };
+          fs.writeFileSync('latest.json', JSON.stringify(manifest, null, 2));
+          console.log(JSON.stringify(manifest, null, 2));
+          EOF
+
+      - name: Attach manifest to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: latest.json
+          fail_on_unmatched_files: true

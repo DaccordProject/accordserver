@@ -6,6 +6,9 @@
 mod app_config;
 mod paths;
 mod sidecar;
+mod updater;
+
+use std::sync::Arc;
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -16,6 +19,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::app_config::AppConfig;
 use crate::paths::AppPaths;
 use crate::sidecar::{spawn_accordserver, spawn_livekit, Supervisor};
+use crate::updater::UpdateManager;
 
 struct AppState {
     paths: AppPaths,
@@ -51,6 +55,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -71,7 +76,18 @@ fn main() {
                 None::<&str>,
             )?;
 
-            let tray_menu = build_menu(app.handle(), &autostart_item)?;
+            let update_item =
+                MenuItem::with_id(app, "update", "Check for updates", true, None::<&str>)?;
+
+            let update_manager = Arc::new(UpdateManager::new(
+                paths.data_dir.join("update_status.json"),
+                update_item.clone(),
+            ));
+            // Seed the status file so the server has something to read on boot.
+            update_manager.write_initial();
+            app.manage(update_manager.clone());
+
+            let tray_menu = build_menu(app.handle(), &update_item, &autostart_item)?;
 
             let state = AppState {
                 paths: paths.clone(),
@@ -81,6 +97,8 @@ fn main() {
                 autostart_item,
             };
             app.manage(state);
+
+            tauri::async_runtime::spawn(updater::run(handle.clone(), update_manager));
 
             let mut tray = TrayIconBuilder::with_id("accord-tray")
                 .tooltip("Accord server")
@@ -109,7 +127,11 @@ fn main() {
         });
 }
 
-fn build_menu(app: &tauri::AppHandle, autostart: &CheckMenuItem<Wry>) -> tauri::Result<Menu<Wry>> {
+fn build_menu(
+    app: &tauri::AppHandle,
+    update: &MenuItem<Wry>,
+    autostart: &CheckMenuItem<Wry>,
+) -> tauri::Result<Menu<Wry>> {
     let open = MenuItem::with_id(app, "open", "Open in browser", true, None::<&str>)?;
     let data = MenuItem::with_id(app, "data", "Open data folder", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "View logs", true, None::<&str>)?;
@@ -117,7 +139,10 @@ fn build_menu(app: &tauri::AppHandle, autostart: &CheckMenuItem<Wry>) -> tauri::
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Accord", true, None::<&str>)?;
 
-    Menu::with_items(app, &[&open, &data, &logs, &sep1, autostart, &sep2, &quit])
+    Menu::with_items(
+        app,
+        &[&open, &data, &logs, &sep1, update, autostart, &sep2, &quit],
+    )
 }
 
 fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
@@ -148,6 +173,17 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
             {
                 tracing::error!("open_path failed: {e}");
             }
+        }
+        "update" => {
+            let app = app.clone();
+            let manager = app.state::<Arc<UpdateManager>>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                // If an update is already staged, the click means "apply it now".
+                if *manager.pending_restart.lock().await {
+                    app.restart();
+                }
+                updater::check_once(&app, &manager).await;
+            });
         }
         "autostart" => {
             let mgr = app.autolaunch();

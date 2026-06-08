@@ -1,9 +1,37 @@
 use axum::extract::State;
 use axum::response::Html;
+use axum::Json;
 
 use crate::state::AppState;
 
 use super::seo::escape_html;
+
+/// GET /update-status
+///
+/// Returns the desktop tray app's auto-update status, read from the
+/// `update_status.json` file it writes into the shared data directory. The
+/// landing page polls this to show an update banner. Returns a neutral
+/// `unknown` status for standalone (non-desktop) deployments.
+pub async fn update_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let default = serde_json::json!({
+        "phase": "unknown",
+        "current_version": env!("CARGO_PKG_VERSION"),
+        "new_version": null,
+        "message": null,
+    });
+
+    let Some(path) = state.update_status_path.as_ref() else {
+        return Json(default);
+    };
+
+    match tokio::fs::read(path).await {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(v) => Json(v),
+            Err(_) => Json(default),
+        },
+        Err(_) => Json(default),
+    }
+}
 
 async fn count(state: &AppState, table: &str) -> i64 {
     // Table names are hardcoded literals below, never user input.
@@ -95,10 +123,14 @@ pub async fn landing(State(state): State<AppState>) -> Html<String> {
       }}
       .links a.primary {{ background: #5b5bf0; color: #fff; border-color: #5b5bf0; }}
       footer {{ color: #6c6c85; font-size: 0.82rem; text-align: center; margin-top: 28px; }}
+      .update-banner {{ border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.92rem; font-weight: 600; }}
+      .update-banner.info {{ background: rgba(91,91,240,0.15); color: #b9b9ff; border: 1px solid #5b5bf0; }}
+      .update-banner.ready {{ background: rgba(67,196,127,0.15); color: #8fe6b5; border: 1px solid #43c47f; }}
     </style>
   </head>
   <body>
     <div class="wrap">
+      <div id="update-banner" class="update-banner" style="display:none"></div>
       <header>
         <h1>{server_name}</h1>
         <span class="badge">Online</span>
@@ -146,6 +178,28 @@ pub async fn landing(State(state): State<AppState>) -> Html<String> {
 
       <footer>Accord &middot; powered by Axum &amp; LiveKit</footer>
     </div>
+    <script>
+      function renderUpdate(s) {{
+        var el = document.getElementById('update-banner');
+        if (!s || !s.phase) {{ el.style.display = 'none'; return; }}
+        var msg = null, cls = 'info';
+        if (s.phase === 'available' || s.phase === 'downloading') {{
+          msg = 'Downloading update' + (s.new_version ? ' v' + s.new_version : '') + '…';
+        }} else if (s.phase === 'ready') {{
+          msg = 'Update' + (s.new_version ? ' v' + s.new_version : '') + ' ready — restart Accord to apply.';
+          cls = 'ready';
+        }}
+        if (!msg) {{ el.style.display = 'none'; return; }}
+        el.textContent = msg;
+        el.className = 'update-banner ' + cls;
+        el.style.display = 'block';
+      }}
+      function pollUpdate() {{
+        fetch('/update-status').then(function (r) {{ return r.json(); }}).then(renderUpdate).catch(function () {{}});
+      }}
+      pollUpdate();
+      setInterval(pollUpdate, 30000);
+    </script>
   </body>
 </html>"#
     );

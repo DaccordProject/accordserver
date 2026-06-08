@@ -9,7 +9,9 @@ The app has no main window. It lives in the menu bar / system tray and offers:
 - **Open in browser** — `http://localhost:39099`
 - **Open data folder** — platform data dir (see below)
 - **View logs** — `accord.log` in the data folder
-- **Enable / disable start on login**
+- **Check for updates** — shows update status; click to check now, or to
+  restart-and-apply once an update is staged (see [Updates](#updates))
+- **Start on login** — checkbox reflecting the autostart state
 - **Quit Accord** — gracefully stops both sidecars
 
 ## Data locations
@@ -29,6 +31,9 @@ Contents:
 - `accord.db` — SQLite database
 - `cdn/` — uploaded emoji, avatars, attachments
 - `logs/accord.log`, `logs/livekit.log`, `logs/desktop.log*`
+- `update_status.json` — current updater phase, written by the desktop app and
+  read by the bundled server to surface update state on its landing page (see
+  [Updates](#updates))
 
 Delete the data dir to fully reset; keep it across reinstalls to preserve
 state.
@@ -40,6 +45,52 @@ state.
 3. Launch the app → tray icon appears.
 4. Click **Open in browser** → the Godot client (or any REST client) hits
    `http://localhost:39099`.
+
+## Updates
+
+The app updates itself in the background using
+[`tauri-plugin-updater`](https://v2.tauri.app/plugin/updater/). It checks 10
+seconds after launch and every 6 hours thereafter, fetching the `latest.json`
+manifest attached to the newest GitHub Release:
+
+```
+https://github.com/DaccordProject/accordserver/releases/latest/download/latest.json
+```
+
+When a newer signed version is published, the bundle is downloaded and staged
+silently. It is **not** applied live — the running sidecars keep serving the
+old version until the user restarts the app, at which point the new version is
+used. This matches the "update quietly, swap on next restart" behaviour.
+
+Visual indication of update state appears in two places:
+
+- **Tray menu** — the **Check for updates** item relabels itself through the
+  phases (`Checking…`, `Downloading update vX…`, `Update vX ready — restart to
+  apply`). Once an update is staged, clicking it restarts the app to apply;
+  otherwise clicking triggers an immediate check.
+- **Web view** — the server's landing page (`http://localhost:39099`) polls
+  `update_status.json` (via `/update-status`) and shows a banner while an
+  update is downloading or ready.
+
+### Signing
+
+The updater only installs bundles signed with the project's minisign key.
+Building signed installers in CI requires two repository secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY` — the minisign private key
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — its password (empty if generated
+  without one)
+
+The matching public key is committed in `tauri.conf.json` under
+`plugins.updater.pubkey`. Generate a keypair with:
+
+```bash
+pnpm tauri signer generate -w ~/.tauri/accord.key
+```
+
+> **Platform note:** on Linux the Tauri updater only supports the **AppImage**
+> bundle, not `.deb`. `.deb` users update through their package manager or by
+> reinstalling. macOS (`.app`) and Windows (NSIS `-setup.exe`) update in place.
 
 ## Local build
 
@@ -115,8 +166,9 @@ uploaded to the matching GitHub Release.
   port-forwarding for TCP 39099 (chat), TCP 7880/7881 (LiveKit signaling), and
   UDP 50000–60000 (LiveKit media). A Tailscale-style relay is a possible
   future addition.
-- **Auto-update** — the Tauri updater plugin is not wired yet; it requires
-  signed builds.
+- **Auto-update on Linux `.deb`** — the updater swaps AppImage bundles in
+  place but cannot update a system-installed `.deb`; those users reinstall or
+  update via their package manager (see [Updates](#updates)).
 - **Settings UI** — currently the only settings surface is editing
   `config.toml` by hand. A small webview for port / LiveKit key regeneration
   / connected-user stats could be added.

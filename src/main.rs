@@ -185,6 +185,7 @@ async fn run_main_server(config: Config) {
         test_mode: config.test_mode,
         livekit_client,
         rate_limits: Arc::new(DashMap::new()),
+        update_status_path: storage_path.parent().map(|p| p.join("update_status.json")),
         storage_path,
         settings: Arc::new(ArcSwap::from_pointee(settings.clone())),
         master_config: master_config.clone(),

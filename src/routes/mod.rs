@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
 
     let base = Router::new()
         .route("/", get(landing::landing))
+        .route("/update-status", get(landing::update_status))
         .route("/health", get(health::health))
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/mcp", post(crate::mcp::handle_mcp))
