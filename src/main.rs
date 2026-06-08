@@ -1,7 +1,8 @@
 use arc_swap::ArcSwap;
 use clap::Parser;
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::io::IsTerminal;
+use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 
@@ -9,9 +10,46 @@ use accordserver::config::{Cli, Config};
 use accordserver::gateway::dispatcher::Dispatcher;
 use accordserver::state::AppState;
 
+/// Whether stderr is an interactive terminal. When the server runs as a
+/// sidecar (e.g. under the desktop app) stderr is a pipe, so ANSI colour
+/// codes would otherwise end up as unreadable escape sequences in the log
+/// file. Computed once.
+fn use_color() -> bool {
+    static C: OnceLock<bool> = OnceLock::new();
+    *C.get_or_init(|| std::io::stderr().is_terminal())
+}
+
+/// Remove ANSI SGR escape sequences (`\x1b[...m`) from a string.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for n in chars.by_ref() {
+                if n == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Print a status line to stderr, stripping colour codes when not on a TTY.
+fn status_line(s: String) {
+    if use_color() {
+        eprintln!("{s}");
+    } else {
+        eprintln!("{}", strip_ansi(&s));
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
+        .with_ansi(use_color())
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "accordserver=debug,tower_http=debug".into()),
@@ -44,17 +82,22 @@ fn print_banner(config: &Config) {
     };
 
     eprintln!();
-    eprintln!("  \x1b[1;36maccord\x1b[0m \x1b[2mv{version}\x1b[0m");
+    status_line(format!(
+        "  \x1b[1;36maccord\x1b[0m \x1b[2mv{version}\x1b[0m"
+    ));
     eprintln!();
-    eprintln!("  \x1b[2mport\x1b[0m         {}", config.port);
-    eprintln!("  \x1b[2mdatabase\x1b[0m     {}", config.database_url);
-    eprintln!("  \x1b[2mvoice\x1b[0m        {voice}");
-    eprintln!("  \x1b[2mmaster\x1b[0m       {master}");
-    eprintln!("  \x1b[2mmcp\x1b[0m          {mcp}");
+    status_line(format!("  \x1b[2mport\x1b[0m         {}", config.port));
+    status_line(format!(
+        "  \x1b[2mdatabase\x1b[0m     {}",
+        config.database_url
+    ));
+    status_line(format!("  \x1b[2mvoice\x1b[0m        {voice}"));
+    status_line(format!("  \x1b[2mmaster\x1b[0m       {master}"));
+    status_line(format!("  \x1b[2mmcp\x1b[0m          {mcp}"));
 
     if config.test_mode {
         eprintln!();
-        eprintln!("  \x1b[33m! test mode enabled\x1b[0m");
+        status_line("  \x1b[33m! test mode enabled\x1b[0m".to_string());
     }
 
     eprintln!();
@@ -94,11 +137,11 @@ async fn run_main_server(config: Config) {
             );
             match client.check_connectivity().await {
                 Ok(()) => {
-                    eprintln!("  \x1b[32m✓ livekit reachable\x1b[0m");
+                    status_line("  \x1b[32m✓ livekit reachable\x1b[0m".to_string());
                 }
                 Err(e) => {
                     eprintln!();
-                    eprintln!("  \x1b[31m✗ livekit preflight failed\x1b[0m");
+                    status_line("  \x1b[31m✗ livekit preflight failed\x1b[0m".to_string());
                     eprintln!("    {e}");
                     eprintln!();
                     eprintln!("  Voice will not work until LiveKit is reachable.");
@@ -142,6 +185,7 @@ async fn run_main_server(config: Config) {
         test_mode: config.test_mode,
         livekit_client,
         rate_limits: Arc::new(DashMap::new()),
+        update_status_path: storage_path.parent().map(|p| p.join("update_status.json")),
         storage_path,
         settings: Arc::new(ArcSwap::from_pointee(settings.clone())),
         master_config: master_config.clone(),
@@ -159,7 +203,7 @@ async fn run_main_server(config: Config) {
     // Ensure a default invite exists and display it
     match accordserver::db::invites::ensure_default_invite(&state.db).await {
         Ok(code) => {
-            eprintln!("  \x1b[2minvite\x1b[0m       {code}");
+            status_line(format!("  \x1b[2minvite\x1b[0m       {code}"));
         }
         Err(e) => {
             tracing::warn!("failed to create default invite: {:?}", e);
@@ -183,7 +227,7 @@ async fn run_main_server(config: Config) {
         .expect("failed to bind");
 
     let actual_addr = listener.local_addr().expect("failed to get local address");
-    eprintln!("  \x1b[32m→ listening on {actual_addr}\x1b[0m");
+    status_line(format!("  \x1b[32m→ listening on {actual_addr}\x1b[0m"));
     eprintln!();
 
     axum::serve(listener, app).await.expect("server error");

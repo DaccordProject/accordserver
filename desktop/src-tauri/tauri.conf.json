@@ -16,8 +16,17 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/DaccordProject/accordserver/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxMzJBMDlDRDUyQjU3OApSV1I0dFZMTkNTb1REbCtwcmtvbC9VN3hVbXNXVmh3aEtGNm1PZUs4NFZ6M0I0bXNzL0habVFUWgo="
+    }
+  },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["dmg", "msi", "nsis", "deb", "appimage"],
     "icon": [
       "icons/32x32.png",
@@ -35,7 +44,7 @@
     ],
     "resources": [],
     "publisher": "Accord",
-    "homepage": "https://github.com/jakecattrall/accordserver",
+    "homepage": "https://www.daccord.gg",
     "linux": {
       "deb": {
         "depends": []

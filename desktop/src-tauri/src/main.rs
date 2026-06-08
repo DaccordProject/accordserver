@@ -6,22 +6,27 @@
 mod app_config;
 mod paths;
 mod sidecar;
+mod updater;
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use std::sync::Arc;
+
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, Wry};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::app_config::AppConfig;
 use crate::paths::AppPaths;
 use crate::sidecar::{spawn_accordserver, spawn_livekit, Supervisor};
+use crate::updater::UpdateManager;
 
 struct AppState {
     paths: AppPaths,
     config: AppConfig,
     accord: Supervisor,
     livekit: Supervisor,
+    autostart_item: CheckMenuItem<Wry>,
 }
 
 fn main() {
@@ -50,6 +55,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -60,21 +66,49 @@ fn main() {
             let livekit = spawn_livekit(&handle, &paths);
             let accord = spawn_accordserver(&handle, &paths, &config);
 
+            let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+            let autostart_item = CheckMenuItem::with_id(
+                app,
+                "autostart",
+                "Start on login",
+                true,
+                autostart_enabled,
+                None::<&str>,
+            )?;
+
+            let update_item =
+                MenuItem::with_id(app, "update", "Check for updates", true, None::<&str>)?;
+
+            let update_manager = Arc::new(UpdateManager::new(
+                paths.data_dir.join("update_status.json"),
+                update_item.clone(),
+            ));
+            // Seed the status file so the server has something to read on boot.
+            update_manager.write_initial();
+            app.manage(update_manager.clone());
+
+            let tray_menu = build_menu(app.handle(), &update_item, &autostart_item)?;
+
             let state = AppState {
                 paths: paths.clone(),
                 config: config.clone(),
                 accord,
                 livekit,
+                autostart_item,
             };
             app.manage(state);
 
-            let tray_menu = build_menu(app.handle())?;
-            TrayIconBuilder::with_id("accord-tray")
+            tauri::async_runtime::spawn(updater::run(handle.clone(), update_manager));
+
+            let mut tray = TrayIconBuilder::with_id("accord-tray")
                 .tooltip("Accord server")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(handle_menu_event)
-                .build(app)?;
+                .on_menu_event(handle_menu_event);
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
 
             Ok(())
         })
@@ -93,23 +127,22 @@ fn main() {
         });
 }
 
-fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+fn build_menu(
+    app: &tauri::AppHandle,
+    update: &MenuItem<Wry>,
+    autostart: &CheckMenuItem<Wry>,
+) -> tauri::Result<Menu<Wry>> {
     let open = MenuItem::with_id(app, "open", "Open in browser", true, None::<&str>)?;
     let data = MenuItem::with_id(app, "data", "Open data folder", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "View logs", true, None::<&str>)?;
-    let autostart = MenuItem::with_id(app, "autostart", autostart_label(app), true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Accord", true, None::<&str>)?;
 
-    Menu::with_items(app, &[&open, &data, &logs, &sep1, &autostart, &sep2, &quit])
-}
-
-fn autostart_label(app: &tauri::AppHandle) -> &'static str {
-    match app.autolaunch().is_enabled() {
-        Ok(true) => "Disable start on login",
-        _ => "Enable start on login",
-    }
+    Menu::with_items(
+        app,
+        &[&open, &data, &logs, &sep1, update, autostart, &sep2, &quit],
+    )
 }
 
 fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
@@ -141,15 +174,37 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 tracing::error!("open_path failed: {e}");
             }
         }
+        "update" => {
+            let app = app.clone();
+            let manager = app.state::<Arc<UpdateManager>>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                // If an update is already staged, the click means "apply it now".
+                if *manager.pending_restart.lock().await {
+                    app.restart();
+                }
+                updater::check_once(&app, &manager).await;
+            });
+        }
         "autostart" => {
             let mgr = app.autolaunch();
-            match mgr.is_enabled() {
+            let now_enabled = match mgr.is_enabled() {
                 Ok(true) => {
-                    let _ = mgr.disable();
+                    if let Err(e) = mgr.disable() {
+                        tracing::error!("autostart disable failed: {e}");
+                    }
+                    false
                 }
                 _ => {
-                    let _ = mgr.enable();
+                    if let Err(e) = mgr.enable() {
+                        tracing::error!("autostart enable failed: {e}");
+                    }
+                    true
                 }
+            };
+            // Reflect the real state back into the checkbox.
+            let actual = mgr.is_enabled().unwrap_or(now_enabled);
+            if let Err(e) = state.autostart_item.set_checked(actual) {
+                tracing::error!("could not update autostart checkbox: {e}");
             }
         }
         "quit" => {
@@ -167,6 +222,9 @@ fn init_tracing(paths: &AppPaths) {
     Box::leak(Box::new(guard));
 
     tracing_subscriber::fmt()
+        // Logs go to a file, never a terminal — ANSI colour codes would just
+        // be unreadable escape sequences in the log.
+        .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "accord_desktop=info,warn".into()),

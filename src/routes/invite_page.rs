@@ -157,7 +157,7 @@ pub async fn invite_page(
       <div class="invite-code">{code_escaped}</div>
       <div class="actions">
         <a id="open-btn" class="btn btn-primary" href="{daccord_uri}">Open in daccord</a>
-        <a class="btn btn-secondary" href="https://daccord.cc">Get daccord</a>
+        <a class="btn btn-secondary" href="https://www.daccord.gg">Get daccord</a>
       </div>
       <p id="status" class="status"></p>
     </div>
@@ -172,7 +172,7 @@ pub async fn invite_page(
       setTimeout(function() {{
         if (!opened) {{
           document.getElementById("status").innerHTML =
-            'daccord not detected. <a href="https://daccord.cc">Download it</a> or copy the invite code above.';
+            'daccord not detected. <a href="https://www.daccord.gg">Download it</a> or copy the invite code above.';
         }}
       }}, 2000);
     </script>

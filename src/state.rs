@@ -69,6 +69,9 @@ pub struct AppState {
     pub livekit_client: Option<LiveKitClient>,
     pub rate_limits: Arc<DashMap<String, RateLimitBucket>>,
     pub storage_path: PathBuf,
+    /// Path to `update_status.json` written by the desktop tray app (when the
+    /// server runs as a bundled sidecar). `None` for standalone deployments.
+    pub update_status_path: Option<PathBuf>,
     pub settings: Arc<ArcSwap<ServerSettings>>,
     pub master_config: Option<MasterServerConfig>,
     pub master_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,

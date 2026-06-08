@@ -10,6 +10,7 @@ mod health;
 mod interactions;
 mod invite_page;
 mod invites;
+mod landing;
 pub mod members;
 pub mod messages;
 mod mutes;
@@ -54,6 +55,8 @@ pub fn router(state: AppState) -> Router {
         );
 
     let base = Router::new()
+        .route("/", get(landing::landing))
+        .route("/update-status", get(landing::update_status))
         .route("/health", get(health::health))
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/mcp", post(crate::mcp::handle_mcp))
