@@ -35,7 +35,7 @@
     ],
     "resources": [],
     "publisher": "Accord",
-    "homepage": "https://github.com/jakecattrall/accordserver",
+    "homepage": "https://www.daccord.gg",
     "linux": {
       "deb": {
         "depends": []
