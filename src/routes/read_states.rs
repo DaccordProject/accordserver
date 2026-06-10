@@ -20,6 +20,7 @@ pub async fn get_unread_channels(
         .map(|u| {
             serde_json::json!({
                 "channel_id": u.channel_id,
+                "space_id": u.space_id,
                 "last_read_message_id": u.last_read_message_id,
                 "last_message_id": u.last_message_id,
                 "mention_count": u.mention_count,
@@ -52,6 +53,27 @@ pub async fn ack_channel(
         state.db_is_postgres,
     )
     .await?;
+
+    // Sync the new read position to the user's *other* sessions (multi-device:
+    // reading on your phone clears the badge on desktop). Targeted at the acking
+    // user only, so it carries no space_id and isn't muted-channel-suppressed.
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "read_state.update",
+            "data": {
+                "channel_id": channel_id,
+                "last_read_message_id": input.message_id,
+                "mention_count": 0,
+            }
+        });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id: None,
+            target_user_ids: Some(vec![auth.user_id.clone()]),
+            event,
+            intent: "messages".to_string(),
+        });
+    }
 
     Ok(Json(serde_json::json!({ "data": null })))
 }

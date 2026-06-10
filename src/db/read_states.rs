@@ -14,6 +14,7 @@ pub struct ReadState {
 #[derive(Debug, Clone, Serialize)]
 pub struct UnreadChannel {
     pub channel_id: String,
+    pub space_id: Option<String>,
     pub last_read_message_id: Option<String>,
     pub last_message_id: Option<String>,
     pub mention_count: i64,
@@ -28,8 +29,8 @@ pub async fn get_unread_channels(
 ) -> Result<Vec<UnreadChannel>, AppError> {
     // Get channels the user is a member of (space channels + DMs) that have
     // messages newer than their last read position.
-    let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, i64)>(&super::q(
-        "SELECT c.id, rs.last_read_message_id, c.last_message_id, COALESCE(rs.mention_count, 0)
+    let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, i64)>(&super::q(
+        "SELECT c.id, c.space_id, rs.last_read_message_id, c.last_message_id, COALESCE(rs.mention_count, 0)
          FROM channels c
          LEFT JOIN read_states rs ON rs.channel_id = c.id AND rs.user_id = ?
          WHERE c.last_message_id IS NOT NULL
@@ -58,11 +59,14 @@ pub async fn get_unread_channels(
     Ok(rows
         .into_iter()
         .map(
-            |(channel_id, last_read_message_id, last_message_id, mention_count)| UnreadChannel {
-                channel_id,
-                last_read_message_id,
-                last_message_id,
-                mention_count,
+            |(channel_id, space_id, last_read_message_id, last_message_id, mention_count)| {
+                UnreadChannel {
+                    channel_id,
+                    space_id,
+                    last_read_message_id,
+                    last_message_id,
+                    mention_count,
+                }
             },
         )
         .collect())
