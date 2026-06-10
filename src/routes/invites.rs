@@ -47,7 +47,7 @@ pub async fn accept_invite(
         ));
     }
 
-    let member = db::members::add_member(
+    let (member, newly_added) = db::members::add_member(
         &state.db,
         &invite.space_id,
         &auth.user_id,
@@ -55,51 +55,57 @@ pub async fn accept_invite(
     )
     .await?;
 
-    // Broadcast member.join to the space
-    let user = db::users::get_user(&state.db, &auth.user_id).await?;
-    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
-        let event = serde_json::json!({
-            "op": 0,
-            "type": "member.join",
-            "data": {
-                "space_id": invite.space_id,
-                "user": user,
-                "joined_at": member.joined_at
-            }
-        });
-        let _ = dispatcher.send(GatewayBroadcast {
-            space_id: Some(invite.space_id.clone()),
-            target_user_ids: None,
-            event,
-            intent: "members".to_string(),
-        });
-    }
+    if newly_added {
+        // Broadcast member.join to the space
+        let user = db::users::get_user(&state.db, &auth.user_id).await?;
+        if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+            let event = serde_json::json!({
+                "op": 0,
+                "type": "member.join",
+                "data": {
+                    "space_id": invite.space_id,
+                    "user": user,
+                    "joined_at": member.joined_at
+                }
+            });
+            let _ = dispatcher.send(GatewayBroadcast {
+                space_id: Some(invite.space_id.clone()),
+                target_user_ids: None,
+                event,
+                intent: "members".to_string(),
+            });
+        }
 
-    // Audit log: record invite acceptance
-    if let Ok(entry) = db::audit_log::create_entry(
-        &state.db,
-        &invite.space_id,
-        &auth.user_id,
-        "invite_accept",
-        invite.inviter_id.as_deref(),
-        Some("invite"),
-        None,
-        Some(
-            &serde_json::json!({
-                "invite_code": invite.code,
-                "inviter_id": invite.inviter_id
-            })
-            .to_string(),
-        ),
-    )
-    .await
-    {
-        super::audit_log::broadcast_entry(&state, &entry).await;
-    }
+        // Audit log: record invite acceptance
+        if let Ok(entry) = db::audit_log::create_entry(
+            &state.db,
+            &invite.space_id,
+            &auth.user_id,
+            "invite_accept",
+            invite.inviter_id.as_deref(),
+            Some("invite"),
+            None,
+            Some(
+                &serde_json::json!({
+                    "invite_code": invite.code,
+                    "inviter_id": invite.inviter_id
+                })
+                .to_string(),
+            ),
+        )
+        .await
+        {
+            super::audit_log::broadcast_entry(&state, &entry).await;
+        }
 
-    // Post a system message in the welcome/system channel (if configured)
-    super::system_messages::broadcast_member_join_message(&state, &invite.space_id, &auth.user_id)
+        // Post a system message in the welcome/system channel (if configured)
+        super::system_messages::broadcast_member_join_message(
+            &state,
+            &invite.space_id,
+            &auth.user_id,
+        )
         .await;
+    }
 
     Ok(Json(serde_json::json!({ "data": invite })))
 }

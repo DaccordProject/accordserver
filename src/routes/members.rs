@@ -215,6 +215,58 @@ pub async fn kick_member(
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
+#[derive(Deserialize)]
+pub struct LeaveQuery {
+    pub delete_data: Option<bool>,
+}
+
+/// DELETE /spaces/{space_id}/members/@me — leave a space. If
+/// `?delete_data=true` is provided, all of the user's messages, reactions,
+/// read states, and channel mutes within the space are also deleted (GDPR
+/// right to erasure, per-space).
+pub async fn leave_space(
+    state: State<AppState>,
+    Path(space_id): Path<String>,
+    auth: AuthUser,
+    Query(params): Query<LeaveQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_membership(&state.db, &space_id, &auth.user_id).await?;
+
+    // Prevent the space owner from leaving without transferring ownership
+    let space = db::spaces::get_space_row(&state.db, &space_id).await?;
+    if space.owner_id == auth.user_id {
+        return Err(AppError::BadRequest(
+            "space owner must transfer ownership before leaving".to_string(),
+        ));
+    }
+
+    if params.delete_data.unwrap_or(false) {
+        db::members::remove_member_and_data(&state.db, &space_id, &auth.user_id).await?;
+    } else {
+        db::members::remove_member(&state.db, &space_id, &auth.user_id).await?;
+    }
+
+    // Broadcast member.leave to the space
+    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "member.leave",
+            "data": {
+                "space_id": space_id,
+                "user_id": auth.user_id
+            }
+        });
+        let _ = dispatcher.send(GatewayBroadcast {
+            space_id: Some(space_id),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "data": null })))
+}
+
 pub async fn update_own_member(
     state: State<AppState>,
     Path(space_id): Path<String>,

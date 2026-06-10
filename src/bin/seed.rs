@@ -169,7 +169,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Add all users as members (alice is already a member from create_space)
     for uid in &user_ids[1..] {
-        db::members::add_member(&pool, space_id, uid, is_postgres).await?;
+        let _ = db::members::add_member(&pool, space_id, uid, is_postgres).await?;
     }
 
     // ── Roles ──────────────────────────────────────────────────────

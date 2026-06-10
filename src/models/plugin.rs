@@ -40,6 +40,8 @@ pub struct PluginManifest {
     pub signed: bool,
     #[serde(default)]
     pub signature: String,
+    #[serde(default)]
+    pub services: Option<serde_json::Value>,
 }
 
 fn default_plugin_type() -> String {
@@ -77,6 +79,8 @@ pub struct Plugin {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canvas_size: Option<[i64; 2]>,
     pub signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub services: Option<serde_json::Value>,
     /// Internal manifest — not serialized to clients.
     #[serde(skip)]
     pub manifest: PluginManifest,
@@ -124,4 +128,32 @@ pub struct AssignRole {
 pub struct PluginAction {
     #[serde(flatten)]
     pub data: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LeaderboardSubmit {
+    pub score: f64,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaderboardRecord {
+    pub user_id: String,
+    pub display_name: String,
+    pub score: f64,
+    pub rank: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LeaderboardQuery {
+    #[serde(default = "default_leaderboard_limit")]
+    pub limit: i64,
+    pub cursor: Option<String>,
+}
+
+fn default_leaderboard_limit() -> i64 {
+    50
 }
