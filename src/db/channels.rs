@@ -98,6 +98,10 @@ pub async fn update_channel(
         sets.push("name = ?".to_string());
         str_values.push(Some(name.clone()));
     }
+    if let Some(ref channel_type) = input.channel_type {
+        sets.push("type = ?".to_string());
+        str_values.push(Some(channel_type.clone()));
+    }
     if let Some(ref topic) = input.topic {
         sets.push("topic = ?".to_string());
         str_values.push(Some(topic.clone()));

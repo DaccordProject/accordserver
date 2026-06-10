@@ -69,6 +69,11 @@ fn default_channel_type() -> String {
 #[derive(Debug, Deserialize)]
 pub struct UpdateChannel {
     pub name: Option<String>,
+    /// New channel type. Only non-destructive conversions are accepted by the
+    /// route layer (see `is_non_destructive_type_change`); the DB layer just
+    /// writes whatever it's given.
+    #[serde(rename = "type")]
+    pub channel_type: Option<String>,
     pub topic: Option<String>,
     pub position: Option<i64>,
     pub parent_id: Option<Option<String>>,

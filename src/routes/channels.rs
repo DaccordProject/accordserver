@@ -31,6 +31,16 @@ pub async fn get_channel(
     Ok(Json(serde_json::json!({ "data": json })))
 }
 
+/// Whether a channel's `type` may be changed from `from` to `to` without losing
+/// data. Only the message-backed text channels are interchangeable: `text` and
+/// `announcement` share an identical storage and rendering model, so switching
+/// between them is purely cosmetic. Voice, category, forum, and DM channels have
+/// incompatible storage/semantics, so conversions to or from them are rejected.
+fn is_non_destructive_type_change(from: &str, to: &str) -> bool {
+    const TEXT_LIKE: &[&str] = &["text", "announcement"];
+    TEXT_LIKE.contains(&from) && TEXT_LIKE.contains(&to)
+}
+
 pub async fn update_channel(
     state: State<AppState>,
     Path(channel_id): Path<String>,
@@ -50,6 +60,22 @@ pub async fn update_channel(
     } else {
         require_channel_permission(&state.db, &channel_id, &auth, "manage_channels").await?;
     }
+
+    // A channel's type may only be changed retroactively when the conversion is
+    // non-destructive (no stored data becomes orphaned or unreadable). Anything
+    // else — including any conversion to/from voice, category, or a DM — is
+    // rejected so a mistaken PATCH can't strand a channel's contents.
+    if let Some(ref new_type) = input.channel_type {
+        if *new_type != existing.channel_type
+            && !is_non_destructive_type_change(&existing.channel_type, new_type)
+        {
+            return Err(AppError::BadRequest(format!(
+                "cannot change channel type from '{}' to '{}'",
+                existing.channel_type, new_type
+            )));
+        }
+    }
+
     let channel =
         db::channels::update_channel(&state.db, &channel_id, &input, state.db_is_postgres).await?;
     let json = super::spaces::channel_row_to_json_pub(&state.db, &channel).await;
@@ -113,6 +139,7 @@ pub async fn delete_channel(
             if let Some(new_owner) = ids.first() {
                 let update = UpdateChannel {
                     name: None,
+                    channel_type: None,
                     topic: None,
                     position: None,
                     parent_id: None,
