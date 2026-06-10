@@ -44,6 +44,7 @@ fn row_to_plugin(row: sqlx::any::AnyRow) -> Plugin {
         data_topics: manifest.data_topics.clone(),
         canvas_size: manifest.canvas_size,
         signature: manifest.signature.clone(),
+        services: manifest.services.clone(),
         manifest,
     }
 }
@@ -369,6 +370,31 @@ pub async fn next_slot_index(pool: &AnyPool, session_id: &str) -> Result<i64, Ap
     .await?
     .flatten();
     Ok(max.map(|m| m + 1).unwrap_or(0))
+}
+
+/// Get all active (non-ended) sessions across all channels in a space.
+pub async fn get_active_sessions_for_space(
+    pool: &AnyPool,
+    space_id: &str,
+) -> Result<Vec<PluginSession>, AppError> {
+    let rows = sqlx::query(&super::q(
+        "SELECT ps.id, ps.plugin_id, ps.channel_id, ps.host_user_id, ps.state, ps.created_at \
+         FROM plugin_sessions ps \
+         JOIN plugins p ON ps.plugin_id = p.id \
+         WHERE p.space_id = ? AND ps.state != 'ended' \
+         ORDER BY ps.created_at",
+    ))
+    .bind(space_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut sessions = Vec::new();
+    for row in rows {
+        let mut session = row_to_session(row);
+        session.participants = list_participants(pool, &session.id).await?;
+        sessions.push(session);
+    }
+    Ok(sessions)
 }
 
 /// Get active (non-ended) sessions for a channel.

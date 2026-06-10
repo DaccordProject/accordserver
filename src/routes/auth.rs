@@ -524,10 +524,13 @@ pub async fn register(
             .map_err(AppError::from)?;
     if let Some((space_id,)) = default_space {
         match db::members::add_member(&state.db, &space_id, &id, state.db_is_postgres).await {
-            Ok(_) => {
+            Ok((_member, newly_added)) => {
                 tracing::info!("auto-joined user {} to default space {}", id, space_id);
-                // Post a system message in the welcome/system channel (if configured)
-                super::system_messages::broadcast_member_join_message(&state, &space_id, &id).await;
+                if newly_added {
+                    // Post a system message in the welcome/system channel (if configured)
+                    super::system_messages::broadcast_member_join_message(&state, &space_id, &id)
+                        .await;
+                }
             }
             Err(e) => {
                 tracing::error!(

@@ -12,7 +12,8 @@ use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::AuthUser;
 use crate::middleware::permissions::{require_membership, require_permission};
 use crate::models::plugin::{
-    AssignRole, CreateSession, PluginAction, PluginManifest, UpdateSessionState,
+    AssignRole, CreateSession, LeaderboardQuery, LeaderboardSubmit, PluginAction, PluginManifest,
+    UpdateSessionState,
 };
 use crate::state::AppState;
 
@@ -236,6 +237,16 @@ pub async fn get_channel_active_sessions(
     Ok(Json(serde_json::json!({ "data": sessions })))
 }
 
+pub async fn get_space_active_sessions(
+    state: State<AppState>,
+    Path(space_id): Path<String>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_membership(&state.db, &space_id, &auth.user_id).await?;
+    let sessions = db::plugins::get_active_sessions_for_space(&state.db, &space_id).await?;
+    Ok(Json(serde_json::json!({ "data": sessions })))
+}
+
 pub async fn create_session(
     state: State<AppState>,
     Path(plugin_id): Path<String>,
@@ -267,6 +278,7 @@ pub async fn create_session(
             "channel_id": session.channel_id,
             "host_user_id": session.host_user_id,
             "participants": session.participants,
+            "space_id": plugin.space_id,
         }),
     )
     .await;
@@ -308,6 +320,7 @@ pub async fn delete_session(
             "plugin_id": plugin_id,
             "session_id": session_id,
             "state": "ended",
+            "space_id": plugin.space_id,
         }),
     )
     .await;
@@ -369,6 +382,7 @@ pub async fn update_session_state(
             "plugin_id": plugin_id,
             "session_id": session_id,
             "state": session.state,
+            "space_id": plugin.space_id,
         }),
     )
     .await;
@@ -582,6 +596,161 @@ pub async fn send_action(
     .await;
 
     Ok(Json(serde_json::json!({ "data": { "ok": true } })))
+}
+
+// ── Leaderboards ──────────────────────────────────────────────────────────
+
+pub async fn leaderboard_submit(
+    state: State<AppState>,
+    Path((plugin_id, board_id)): Path<(String, String)>,
+    auth: AuthUser,
+    Json(input): Json<LeaderboardSubmit>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let plugin = db::plugins::get_plugin(&state.db, &plugin_id).await?;
+    require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
+
+    // Look up board config from manifest services
+    let (sort, operator) = get_board_config(&plugin.manifest, &board_id)?;
+
+    let final_score = db::plugin_leaderboards::upsert_record(
+        &state.db,
+        &plugin_id,
+        &plugin.space_id,
+        &board_id,
+        &auth.user_id,
+        input.score,
+        input.metadata.as_ref(),
+        &operator,
+        &sort,
+        state.db_is_postgres,
+    )
+    .await?;
+
+    // Broadcast update to space members
+    broadcast_plugin_event(
+        &state,
+        Some(&plugin.space_id),
+        None,
+        "plugin.leaderboard_updated",
+        serde_json::json!({
+            "plugin_id": plugin_id,
+            "board_id": board_id,
+            "user_id": auth.user_id,
+            "score": final_score,
+        }),
+    )
+    .await;
+
+    Ok(Json(
+        serde_json::json!({ "data": { "score": final_score } }),
+    ))
+}
+
+pub async fn leaderboard_list(
+    state: State<AppState>,
+    Path((plugin_id, board_id)): Path<(String, String)>,
+    auth: AuthUser,
+    Query(query): Query<LeaderboardQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let plugin = db::plugins::get_plugin(&state.db, &plugin_id).await?;
+    require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
+
+    let (sort, _) = get_board_config(&plugin.manifest, &board_id)?;
+    let limit = query.limit.clamp(1, 100);
+
+    let records = db::plugin_leaderboards::get_leaderboard(
+        &state.db,
+        &plugin_id,
+        &plugin.space_id,
+        &board_id,
+        limit,
+        &sort,
+    )
+    .await?;
+
+    Ok(Json(serde_json::json!({ "data": records })))
+}
+
+pub async fn leaderboard_around(
+    state: State<AppState>,
+    Path((plugin_id, board_id)): Path<(String, String)>,
+    auth: AuthUser,
+    Query(query): Query<LeaderboardQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let plugin = db::plugins::get_plugin(&state.db, &plugin_id).await?;
+    require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
+
+    let (sort, _) = get_board_config(&plugin.manifest, &board_id)?;
+    let limit = query.limit.clamp(1, 100);
+
+    let records = db::plugin_leaderboards::get_around(
+        &state.db,
+        &plugin_id,
+        &plugin.space_id,
+        &board_id,
+        &auth.user_id,
+        limit,
+        &sort,
+    )
+    .await?;
+
+    Ok(Json(serde_json::json!({ "data": records })))
+}
+
+pub async fn leaderboard_get_user(
+    state: State<AppState>,
+    Path((plugin_id, board_id, user_id)): Path<(String, String, String)>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let plugin = db::plugins::get_plugin(&state.db, &plugin_id).await?;
+    require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
+
+    let (sort, _) = get_board_config(&plugin.manifest, &board_id)?;
+
+    let record = db::plugin_leaderboards::get_user_record(
+        &state.db,
+        &plugin_id,
+        &plugin.space_id,
+        &board_id,
+        &user_id,
+        &sort,
+    )
+    .await?;
+
+    match record {
+        Some(r) => Ok(Json(serde_json::json!({ "data": r }))),
+        None => Err(AppError::NotFound("no record for this user".to_string())),
+    }
+}
+
+/// Extract sort direction and operator for a board from the plugin manifest.
+fn get_board_config(
+    manifest: &PluginManifest,
+    board_id: &str,
+) -> Result<(String, String), AppError> {
+    if let Some(ref services) = manifest.services {
+        if let Some(boards) = services.get("leaderboards") {
+            if let Some(arr) = boards.as_array() {
+                for board in arr {
+                    if board.get("id").and_then(|v| v.as_str()) == Some(board_id) {
+                        let sort = board
+                            .get("sort")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("descending")
+                            .to_string();
+                        let operator = board
+                            .get("operator")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("best")
+                            .to_string();
+                        return Ok((sort, operator));
+                    }
+                }
+            }
+        }
+    }
+    // Default to descending/best if board not declared in manifest
+    Ok(("descending".to_string(), "best".to_string()))
 }
 
 // ── Bundle parsing ──────────────────────────────────────────────────────────

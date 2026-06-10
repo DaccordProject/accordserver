@@ -394,47 +394,50 @@ pub async fn join_public_space(
         ));
     }
 
-    let member =
+    let (member, newly_added) =
         db::members::add_member(&state.db, &space.id, &auth.user_id, state.db_is_postgres).await?;
 
-    // Broadcast member.join to the space
-    let user = db::users::get_user(&state.db, &auth.user_id).await?;
-    if let Some(ref dispatcher) = *state.gateway_tx.read().await {
-        let event = serde_json::json!({
-            "op": 0,
-            "type": "member.join",
-            "data": {
-                "space_id": space.id,
-                "user": user,
-                "joined_at": member.joined_at
-            }
-        });
-        let _ = dispatcher.send(GatewayBroadcast {
-            space_id: Some(space.id.clone()),
-            target_user_ids: None,
-            event,
-            intent: "members".to_string(),
-        });
-    }
+    if newly_added {
+        // Broadcast member.join to the space
+        let user = db::users::get_user(&state.db, &auth.user_id).await?;
+        if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+            let event = serde_json::json!({
+                "op": 0,
+                "type": "member.join",
+                "data": {
+                    "space_id": space.id,
+                    "user": user,
+                    "joined_at": member.joined_at
+                }
+            });
+            let _ = dispatcher.send(GatewayBroadcast {
+                space_id: Some(space.id.clone()),
+                target_user_ids: None,
+                event,
+                intent: "members".to_string(),
+            });
+        }
 
-    // Audit log: record public join
-    if let Ok(entry) = db::audit_log::create_entry(
-        &state.db,
-        &space.id,
-        &auth.user_id,
-        "member_join",
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    {
-        super::audit_log::broadcast_entry(&state, &entry).await;
-    }
+        // Audit log: record public join
+        if let Ok(entry) = db::audit_log::create_entry(
+            &state.db,
+            &space.id,
+            &auth.user_id,
+            "member_join",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            super::audit_log::broadcast_entry(&state, &entry).await;
+        }
 
-    // Post a system message in the welcome/system channel (if configured)
-    super::system_messages::broadcast_member_join_message(&state, &space.id, &auth.user_id).await;
+        // Post a system message in the welcome/system channel (if configured)
+        super::system_messages::broadcast_member_join_message(&state, &space.id, &auth.user_id)
+            .await;
+    }
 
     Ok(Json(
         serde_json::json!({ "data": { "space_id": space.id } }),

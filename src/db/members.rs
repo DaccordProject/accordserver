@@ -113,24 +113,28 @@ pub async fn resolve_mention_user_ids(
     Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
 }
 
+/// Adds a user as a member of a space. Returns `(MemberRow, newly_added)` where
+/// `newly_added` is `true` only if the user was not already a member.
 pub async fn add_member(
     pool: &AnyPool,
     space_id: &str,
     user_id: &str,
     is_postgres: bool,
-) -> Result<MemberRow, AppError> {
+) -> Result<(MemberRow, bool), AppError> {
     let sql = if is_postgres {
         "INSERT INTO members (user_id, space_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
     } else {
         "INSERT OR IGNORE INTO members (user_id, space_id) VALUES (?, ?)"
     };
-    sqlx::query(&super::q(sql))
+    let result = sqlx::query(&super::q(sql))
         .bind(user_id)
         .bind(space_id)
         .execute(pool)
         .await?;
 
-    get_member_row(pool, space_id, user_id).await
+    let newly_added = result.rows_affected() > 0;
+    let member = get_member_row(pool, space_id, user_id).await?;
+    Ok((member, newly_added))
 }
 
 pub async fn remove_member(pool: &AnyPool, space_id: &str, user_id: &str) -> Result<(), AppError> {
@@ -141,6 +145,80 @@ pub async fn remove_member(pool: &AnyPool, space_id: &str, user_id: &str) -> Res
     .bind(user_id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Removes a member from a space and deletes all their content within that
+/// space: messages (in channels belonging to the space), reactions on those
+/// messages, read states, and channel mutes.
+pub async fn remove_member_and_data(
+    pool: &AnyPool,
+    space_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
+    // Delete reactions by this user on messages in this space's channels
+    sqlx::query(&super::q(
+        "DELETE FROM reactions WHERE user_id = ? AND message_id IN \
+         (SELECT m.id FROM messages m \
+          INNER JOIN channels c ON m.channel_id = c.id \
+          WHERE c.space_id = ?)",
+    ))
+    .bind(user_id)
+    .bind(space_id)
+    .execute(pool)
+    .await?;
+
+    // Delete messages by this user in this space's channels
+    sqlx::query(&super::q(
+        "DELETE FROM messages WHERE author_id = ? AND channel_id IN \
+         (SELECT id FROM channels WHERE space_id = ?)",
+    ))
+    .bind(user_id)
+    .bind(space_id)
+    .execute(pool)
+    .await?;
+
+    // Delete read states for this user in this space's channels
+    sqlx::query(&super::q(
+        "DELETE FROM read_states WHERE user_id = ? AND channel_id IN \
+         (SELECT id FROM channels WHERE space_id = ?)",
+    ))
+    .bind(user_id)
+    .bind(space_id)
+    .execute(pool)
+    .await?;
+
+    // Delete channel mutes for this user in this space's channels
+    sqlx::query(&super::q(
+        "DELETE FROM channel_mutes WHERE user_id = ? AND channel_id IN \
+         (SELECT id FROM channels WHERE space_id = ?)",
+    ))
+    .bind(user_id)
+    .bind(space_id)
+    .execute(pool)
+    .await?;
+
+    // NULL out invites created by this user in this space
+    sqlx::query(&super::q(
+        "UPDATE invites SET inviter_id = NULL WHERE inviter_id = ? AND space_id = ?",
+    ))
+    .bind(user_id)
+    .bind(space_id)
+    .execute(pool)
+    .await?;
+
+    // NULL out emojis created by this user in this space
+    sqlx::query(&super::q(
+        "UPDATE emojis SET creator_id = NULL WHERE creator_id = ? AND space_id = ?",
+    ))
+    .bind(user_id)
+    .bind(space_id)
+    .execute(pool)
+    .await?;
+
+    // Finally remove the membership (cascades member_roles via FK)
+    remove_member(pool, space_id, user_id).await?;
+
     Ok(())
 }
 

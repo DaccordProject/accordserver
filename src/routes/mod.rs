@@ -148,7 +148,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route(
             "/spaces/{space_id}/members/@me",
-            patch(members::update_own_member),
+            patch(members::update_own_member).delete(members::leave_space),
         )
         .route(
             "/spaces/{space_id}/members/{user_id}",
@@ -330,6 +330,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(plugins::get_channel_active_sessions),
         )
         .route(
+            "/spaces/{space_id}/sessions/active",
+            get(plugins::get_space_active_sessions),
+        )
+        .route(
             "/plugins/{plugin_id}/sessions",
             post(plugins::create_session),
         )
@@ -348,6 +352,23 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/plugins/{plugin_id}/sessions/{session_id}/actions",
             post(plugins::send_action),
+        )
+        // Plugin leaderboards
+        .route(
+            "/plugins/{plugin_id}/leaderboards/{board_id}/submit",
+            post(plugins::leaderboard_submit),
+        )
+        .route(
+            "/plugins/{plugin_id}/leaderboards/{board_id}",
+            get(plugins::leaderboard_list),
+        )
+        .route(
+            "/plugins/{plugin_id}/leaderboards/{board_id}/around",
+            get(plugins::leaderboard_around),
+        )
+        .route(
+            "/plugins/{plugin_id}/leaderboards/{board_id}/user/{user_id}",
+            get(plugins::leaderboard_get_user),
         )
         // Soundboard
         .route(
