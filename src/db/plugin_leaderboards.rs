@@ -8,6 +8,7 @@ use crate::snowflake;
 ///
 /// `operator`: "set" | "best" | "increment"
 /// `sort`: "ascending" | "descending"
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_record(
     pool: &AnyPool,
     plugin_id: &str,
@@ -124,8 +125,7 @@ pub async fn get_leaderboard(
     let mut records = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter().enumerate() {
         let metadata_str: Option<String> = row.get("metadata");
-        let metadata = metadata_str
-            .and_then(|s| serde_json::from_str(&s).ok());
+        let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
         records.push(LeaderboardRecord {
             user_id: row.get("user_id"),
             display_name: row.get("display_name"),
@@ -209,8 +209,7 @@ pub async fn get_around(
     let mut records = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter().enumerate() {
         let metadata_str: Option<String> = row.get("metadata");
-        let metadata = metadata_str
-            .and_then(|s| serde_json::from_str(&s).ok());
+        let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
         records.push(LeaderboardRecord {
             user_id: row.get("user_id"),
             display_name: row.get("display_name"),
@@ -271,8 +270,7 @@ pub async fn get_user_record(
     let rank: i64 = rank_row.try_get::<i64, _>("rank").unwrap_or(1);
 
     let metadata_str: Option<String> = row.get("metadata");
-    let metadata = metadata_str
-        .and_then(|s| serde_json::from_str(&s).ok());
+    let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
 
     Ok(Some(LeaderboardRecord {
         user_id: user_id.to_string(),

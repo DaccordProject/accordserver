@@ -148,8 +148,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route(
             "/spaces/{space_id}/members/@me",
-            patch(members::update_own_member)
-                .delete(members::leave_space),
+            patch(members::update_own_member).delete(members::leave_space),
         )
         .route(
             "/spaces/{space_id}/members/{user_id}",

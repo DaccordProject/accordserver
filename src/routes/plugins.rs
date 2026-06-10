@@ -641,7 +641,9 @@ pub async fn leaderboard_submit(
     )
     .await;
 
-    Ok(Json(serde_json::json!({ "data": { "score": final_score } })))
+    Ok(Json(
+        serde_json::json!({ "data": { "score": final_score } }),
+    ))
 }
 
 pub async fn leaderboard_list(
@@ -654,7 +656,7 @@ pub async fn leaderboard_list(
     require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
 
     let (sort, _) = get_board_config(&plugin.manifest, &board_id)?;
-    let limit = query.limit.min(100).max(1);
+    let limit = query.limit.clamp(1, 100);
 
     let records = db::plugin_leaderboards::get_leaderboard(
         &state.db,
@@ -679,7 +681,7 @@ pub async fn leaderboard_around(
     require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
 
     let (sort, _) = get_board_config(&plugin.manifest, &board_id)?;
-    let limit = query.limit.min(100).max(1);
+    let limit = query.limit.clamp(1, 100);
 
     let records = db::plugin_leaderboards::get_around(
         &state.db,
