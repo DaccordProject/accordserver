@@ -118,6 +118,26 @@ pub async fn get_message(
     ))
 }
 
+/// Bumps the per-channel mention counter for every user mentioned by [msg]
+/// (already resolved into `msg.mentions` at insert time), skipping the author so
+/// self-mentions never badge yourself. This is what makes the red mention badge
+/// survive a reconnect — the live gateway event only updates open clients.
+async fn apply_mention_counts(state: &AppState, msg: &MessageRow) {
+    let mentions: Vec<String> = serde_json::from_str(&msg.mentions).unwrap_or_default();
+    for uid in &mentions {
+        if uid == &msg.author_id {
+            continue;
+        }
+        let _ = db::read_states::increment_mention_count(
+            &state.db,
+            uid,
+            &msg.channel_id,
+            state.db_is_postgres,
+        )
+        .await;
+    }
+}
+
 pub async fn create_message(
     state: State<AppState>,
     Path(channel_id): Path<String>,
@@ -162,6 +182,8 @@ pub async fn create_message(
         &input,
     )
     .await?;
+
+    apply_mention_counts(&state, &msg).await;
 
     let json = message_row_to_json_with_attachments(&msg, &[], None);
 
@@ -329,6 +351,8 @@ pub async fn create_message_multipart(
         &input,
     )
     .await?;
+
+    apply_mention_counts(&state, &msg).await;
 
     // Save files and create attachment records.
     //

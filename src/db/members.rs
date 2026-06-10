@@ -87,6 +87,32 @@ pub async fn search_members(
     Ok(rows.into_iter().map(row_to_member).collect())
 }
 
+/// Resolves `@username` handles to the user IDs of members in [space_id].
+/// Matching is case-insensitive on `username`; non-members and unknown handles
+/// are dropped. Used to turn parsed message mentions into concrete recipients
+/// for the per-channel mention counter.
+pub async fn resolve_mention_user_ids(
+    pool: &AnyPool,
+    space_id: &str,
+    usernames: &[String],
+) -> Result<Vec<String>, AppError> {
+    if usernames.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders: Vec<&str> = usernames.iter().map(|_| "?").collect();
+    let in_clause = placeholders.join(", ");
+    let sql = super::q(&format!(
+        "SELECT u.id FROM users u INNER JOIN members m ON m.user_id = u.id \
+         WHERE m.space_id = ? AND lower(u.username) IN ({in_clause})"
+    ));
+    let mut q = sqlx::query(&sql).bind(space_id);
+    for name in usernames {
+        q = q.bind(name.to_lowercase());
+    }
+    let rows = q.fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+}
+
 pub async fn add_member(
     pool: &AnyPool,
     space_id: &str,

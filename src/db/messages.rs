@@ -184,8 +184,23 @@ pub async fn create_message(
     let id = snowflake::generate();
     let embeds_json = serde_json::to_string(&input.embeds.as_deref().unwrap_or(&[])).unwrap();
 
+    // Resolve inline @-mentions so the persisted message (and its gateway
+    // broadcast) carries the concrete recipient IDs. `@everyone`/`@here` set the
+    // flag; `@username` resolves to member IDs within the space (DMs have no
+    // space, so usernames there are left as plain text).
+    let parsed = crate::mentions::parse_mentions(&input.content);
+    let mention_user_ids = match space_id {
+        Some(sid) if !parsed.usernames.is_empty() => {
+            super::members::resolve_mention_user_ids(pool, sid, &parsed.usernames)
+                .await
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    let mentions_json = serde_json::to_string(&mention_user_ids).unwrap();
+
     sqlx::query(&super::q(
-        "INSERT INTO messages (id, channel_id, space_id, author_id, content, tts, embeds, reply_to, thread_id, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO messages (id, channel_id, space_id, author_id, content, tts, mention_everyone, mentions, embeds, reply_to, thread_id, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ))
     .bind(&id)
     .bind(channel_id)
@@ -193,6 +208,8 @@ pub async fn create_message(
     .bind(author_id)
     .bind(&input.content)
     .bind(input.tts.unwrap_or(false))
+    .bind(parsed.everyone)
+    .bind(&mentions_json)
     .bind(&embeds_json)
     .bind(&input.reply_to)
     .bind(&input.thread_id)
