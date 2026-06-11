@@ -72,7 +72,8 @@ pub async fn create_invite(
 ) -> Result<Invite, AppError> {
     let code = generate_code();
     let max_age = input.max_age;
-    let expires_at = max_age.map(|age| {
+    // A max_age of 0 (or null) means the invite never expires.
+    let expires_at = max_age.filter(|age| *age > 0).map(|age| {
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::seconds(age);
         expires.format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
@@ -207,9 +208,9 @@ pub async fn use_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> 
         }
     }
 
-    // Check max uses
+    // Check max uses. A max_uses of 0 (or null) means unlimited.
     if let Some(max_uses) = invite.max_uses {
-        if invite.uses >= max_uses {
+        if max_uses > 0 && invite.uses >= max_uses {
             return Err(AppError::BadRequest(
                 "invite has reached max uses".to_string(),
             ));
