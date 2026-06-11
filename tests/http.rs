@@ -1316,6 +1316,60 @@ async fn test_member_avatar_upload() {
 }
 
 #[tokio::test]
+async fn test_list_members_with_user_embeds_public_user() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "MembersSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Default: no embedded user object (clients fetch users separately).
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/members"),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let members = body["data"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(
+        members.iter().all(|m| m.get("user").is_none()),
+        "members must not embed a user object without with_user"
+    );
+
+    // with_user=true: each member carries its public user object, resolved in
+    // a single batched query.
+    let req = authenticated_request(
+        Method::GET,
+        &format!("/api/v1/spaces/{space_id}/members?with_user=true"),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let members = body["data"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+
+    let usernames: Vec<String> = members
+        .iter()
+        .map(|m| {
+            let user = m.get("user").expect("member should embed a user object");
+            // Embedded user is the public shape — sensitive fields are stripped.
+            assert!(user.get("is_admin").is_none(), "must not leak is_admin");
+            assert!(
+                user.get("mfa_enabled").is_none(),
+                "must not leak mfa_enabled"
+            );
+            user["username"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert!(usernames.contains(&"alice".to_string()));
+    assert!(usernames.contains(&"bob".to_string()));
+}
+
+#[tokio::test]
 async fn test_space_icon_upload() {
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;

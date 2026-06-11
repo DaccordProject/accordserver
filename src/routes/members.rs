@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
@@ -10,6 +12,7 @@ use crate::middleware::permissions::{
     require_hierarchy, require_membership, require_permission, require_role_hierarchy,
 };
 use crate::models::member::{MemberRow, UpdateMember};
+use crate::models::user::PublicUser;
 use crate::state::AppState;
 use crate::storage;
 
@@ -17,12 +20,43 @@ use crate::storage;
 pub struct ListMembersQuery {
     pub after: Option<String>,
     pub limit: Option<i64>,
+    /// When `true`, embed each member's public `user` object (resolved in a
+    /// single batched query) so clients don't have to fetch users one by one.
+    #[serde(default)]
+    pub with_user: bool,
 }
 
 #[derive(Deserialize)]
 pub struct SearchMembersQuery {
     pub query: String,
     pub limit: Option<i64>,
+    #[serde(default)]
+    pub with_user: bool,
+}
+
+/// Batch-resolves the public `user` object for each row's `user_id` when
+/// [want] is set, returning a `user_id -> user JSON` map. Empty (and does no
+/// query) when [want] is false. Lets the list/search handlers embed users
+/// without an N+1 fetch.
+async fn resolve_member_users(
+    state: &AppState,
+    rows: &[MemberRow],
+    want: bool,
+) -> Result<HashMap<String, serde_json::Value>, AppError> {
+    if !want || rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids: Vec<String> = rows.iter().map(|r| r.user_id.clone()).collect();
+    let users = db::users::get_users_by_ids(&state.db, &ids).await?;
+    Ok(users
+        .into_iter()
+        .filter_map(|u| {
+            let id = u.id.clone();
+            serde_json::to_value(PublicUser::from(u))
+                .ok()
+                .map(|json| (id, json))
+        })
+        .collect())
 }
 
 pub async fn list_members(
@@ -50,10 +84,16 @@ pub async fn list_members(
         rows.truncate(limit as usize);
     }
 
+    let user_json = resolve_member_users(&state, &rows, params.with_user).await?;
+
     let mut members = Vec::new();
     for row in &rows {
         let role_ids = db::members::get_member_role_ids(&state.db, &space_id, &row.user_id).await?;
-        members.push(member_row_to_json(row, &role_ids));
+        let mut member = member_row_to_json(row, &role_ids);
+        if let Some(user) = user_json.get(&row.user_id) {
+            member["user"] = user.clone();
+        }
+        members.push(member);
     }
 
     let last_id = rows.last().map(|m| m.user_id.clone());
@@ -77,10 +117,16 @@ pub async fn search_members(
     let limit = params.limit.unwrap_or(25).min(100);
     let rows = db::members::search_members(&state.db, &space_id, &params.query, limit).await?;
 
+    let user_json = resolve_member_users(&state, &rows, params.with_user).await?;
+
     let mut members = Vec::new();
     for row in &rows {
         let role_ids = db::members::get_member_role_ids(&state.db, &space_id, &row.user_id).await?;
-        members.push(member_row_to_json(row, &role_ids));
+        let mut member = member_row_to_json(row, &role_ids);
+        if let Some(user) = user_json.get(&row.user_id) {
+            member["user"] = user.clone();
+        }
+        members.push(member);
     }
 
     Ok(Json(serde_json::json!({ "data": members })))

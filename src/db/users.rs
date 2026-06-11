@@ -36,6 +36,25 @@ pub async fn get_user(pool: &AnyPool, user_id: &str) -> Result<User, AppError> {
     Ok(row_to_user(row))
 }
 
+/// Batch-fetches users by id in a single query. Unknown ids are silently
+/// omitted, and the result order is unspecified — callers index by `id`. Used
+/// to embed member user objects in the member-list response without an N+1
+/// round-trip per member.
+pub async fn get_users_by_ids(pool: &AnyPool, ids: &[String]) -> Result<Vec<User>, AppError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+    let in_clause = placeholders.join(", ");
+    let sql = super::q(&format!("{SELECT_USERS} WHERE id IN ({in_clause})"));
+    let mut query = sqlx::query(&sql);
+    for id in ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+    Ok(rows.into_iter().map(row_to_user).collect())
+}
+
 pub async fn create_user(pool: &AnyPool, input: &CreateUser) -> Result<User, AppError> {
     let id = snowflake::generate();
     let display_name = input.display_name.as_deref().unwrap_or(&input.username);
