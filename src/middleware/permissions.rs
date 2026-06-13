@@ -351,6 +351,43 @@ pub async fn resolve_channel_permissions(
     Ok(perms)
 }
 
+/// Returns `true` if the given timeout timestamp is in the future, i.e. the
+/// member is currently timed out. Past or unparseable timestamps (and `None`)
+/// are treated as not-timed-out, so an expired timeout simply stops applying.
+pub fn is_timed_out(timed_out_until: Option<&str>) -> bool {
+    match timed_out_until {
+        Some(ts) => chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|t| t > chrono::Utc::now())
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Rejects with 403 if the member is currently under a moderation timeout in
+/// the given space. Used to gate message sending, reactions, typing, and voice
+/// connect for timed-out members. Instance admins are exempt.
+pub async fn require_not_timed_out(
+    pool: &AnyPool,
+    space_id: &str,
+    auth: &AuthUser,
+) -> Result<(), AppError> {
+    if auth.is_admin {
+        return Ok(());
+    }
+    let member = match db::members::get_member_row(pool, space_id, &auth.user_id).await {
+        Ok(m) => m,
+        // Not a member (or already removed): no timeout to enforce here.
+        Err(AppError::NotFound(_)) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if is_timed_out(member.timed_out_until.as_deref()) {
+        return Err(AppError::Forbidden(
+            "you are timed out in this space".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Check that a user is a participant in a DM channel.
 pub async fn require_dm_access(
     pool: &AnyPool,

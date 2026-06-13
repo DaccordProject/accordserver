@@ -2,11 +2,12 @@ use crate::models::voice::VoiceState;
 use crate::state::AppState;
 
 /// Join a voice channel. Returns the new VoiceState and the previous channel_id if the user moved.
+/// `space_id` is `None` for DM/group DM calls, which have no parent space.
 #[allow(clippy::too_many_arguments)]
 pub fn join_voice_channel(
     state: &AppState,
     user_id: &str,
-    space_id: &str,
+    space_id: Option<&str>,
     channel_id: &str,
     session_id: &str,
     self_mute: bool,
@@ -21,7 +22,7 @@ pub fn join_voice_channel(
 
     let voice_state = VoiceState {
         user_id: user_id.to_string(),
-        space_id: Some(space_id.to_string()),
+        space_id: space_id.map(|s| s.to_string()),
         channel_id: Some(channel_id.to_string()),
         session_id: session_id.to_string(),
         deaf: false,

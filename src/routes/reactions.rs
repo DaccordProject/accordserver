@@ -4,7 +4,9 @@ use axum::Json;
 use crate::error::AppError;
 use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::AuthUser;
-use crate::middleware::permissions::{require_channel_membership, require_channel_permission};
+use crate::middleware::permissions::{
+    require_channel_membership, require_channel_permission, require_not_timed_out,
+};
 use crate::state::AppState;
 
 /// Convert the space_id string returned by permission helpers into the
@@ -25,6 +27,10 @@ pub async fn add_reaction(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let space_id =
         require_channel_permission(&state.db, &channel_id, &auth, "add_reactions").await?;
+    // Block timed-out members from reacting in a space (DMs have no timeout).
+    if !space_id.is_empty() {
+        require_not_timed_out(&state.db, &space_id, &auth).await?;
+    }
     let sql = if state.db_is_postgres {
         "INSERT INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
     } else {

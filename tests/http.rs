@@ -1772,3 +1772,288 @@ async fn test_attachment_upload_url_resolves_with_special_filename() {
         "URL {url} returned by upload did not resolve via /cdn"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Member timeout (#33)
+// ---------------------------------------------------------------------------
+
+const FUTURE_TS: &str = "2999-01-01T00:00:00Z";
+const PAST_TS: &str = "2000-01-01T00:00:00Z";
+
+#[tokio::test]
+async fn test_member_timeout_persists_and_blocks_then_clears() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await; // owner
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // Owner sets a future timeout on bob.
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}/members/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "communication_disabled_until": FUTURE_TS }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(
+        body["data"]["timed_out_until"].as_str().is_some(),
+        "timeout should be persisted and returned"
+    );
+
+    // Bob is blocked from sending messages while timed out.
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &bob.auth_header(),
+        &serde_json::json!({ "content": "hello" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // Bob is also blocked from reactions.
+    // (Send a message as the owner first so there's something to react to.)
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "owner msg" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let msg_id = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let req = authenticated_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{channel_id}/messages/{msg_id}/reactions/%F0%9F%91%8D/@me"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // Clearing the timeout with an explicit null restores access.
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}/members/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "communication_disabled_until": serde_json::Value::Null }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(body["data"]["timed_out_until"].is_null());
+
+    // Bob can now send again.
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &bob.auth_header(),
+        &serde_json::json!({ "content": "back" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_member_timeout_requires_moderate_permission() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await; // owner
+    let bob = server.create_user_with_token("bob").await;
+    let carol = server.create_user_with_token("carol").await;
+    let space_id = server.create_space(&alice.user.id, "Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+    server.add_member(&space_id, &carol.user.id).await;
+
+    // Bob (a plain member without moderate_members) cannot time out carol.
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}/members/{}", carol.user.id),
+        &bob.auth_header(),
+        &serde_json::json!({ "communication_disabled_until": FUTURE_TS }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_member_timeout_expired_does_not_block() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await; // owner
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    // A timeout in the past is already expired and must not block.
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}/members/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "communication_disabled_until": PAST_TS }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &bob.auth_header(),
+        &serde_json::json!({ "content": "still works" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_member_timeout_rejects_invalid_timestamp() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Space").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}/members/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "communication_disabled_until": "not-a-date" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_member_timeout_blocks_voice_join() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await; // owner
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "Space").await;
+    let vc_id = server.create_voice_channel(&space_id, "voice").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/spaces/{space_id}/members/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "communication_disabled_until": FUTURE_TS }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{vc_id}/voice/join"),
+        &bob.auth_header(),
+        &serde_json::json!({}),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------------------
+// DM voice calls + signaling (#32)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_voice_join_dm_channel_success() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{dm_id}/voice/join"),
+        &alice.auth_header(),
+        &serde_json::json!({}),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    let data = &body["data"];
+    assert_eq!(data["backend"], "livekit");
+    assert_eq!(data["voice_state"]["channel_id"], dm_id);
+    assert!(data["voice_state"]["space_id"].is_null());
+    assert!(data["token"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_voice_join_dm_non_participant_rejected() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let carol = server.create_user_with_token("carol").await;
+    let dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{dm_id}/voice/join"),
+        &carol.auth_header(),
+        &serde_json::json!({}),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_call_ring_dm_success() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{dm_id}/call/ring"),
+        &alice.auth_header(),
+        &serde_json::json!({}),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_call_ring_non_dm_rejected() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/call/ring"),
+        &alice.auth_header(),
+        &serde_json::json!({}),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_call_decline_and_cancel_dm() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let req = authenticated_request(
+        Method::POST,
+        &format!("/api/v1/channels/{dm_id}/call/decline"),
+        &bob.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let req = authenticated_request(
+        Method::POST,
+        &format!("/api/v1/channels/{dm_id}/call/cancel"),
+        &alice.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
