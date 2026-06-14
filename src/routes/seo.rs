@@ -1063,13 +1063,8 @@ pub async fn space_snapshot(
 /// points crawlers at the sitemap.
 pub async fn robots(headers: HeaderMap) -> impl IntoResponse {
     let host = extract_host(&headers);
-    let body = format!(
-        "User-agent: *\nAllow: /s/\nSitemap: https://{host}/sitemap.xml\n",
-    );
-    (
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        body,
-    )
+    let body = format!("User-agent: *\nAllow: /s/\nSitemap: https://{host}/sitemap.xml\n",);
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body)
 }
 
 // -------------------------------------------------------------------------
@@ -1114,8 +1109,7 @@ pub async fn sitemap(
             push(format!("{base}/s/{space_seg}/{chan_seg}"), None);
 
             if ch.channel_type == "forum" {
-                let posts =
-                    db::messages::list_messages(&state.db, &ch.id, None, 200, None).await?;
+                let posts = db::messages::list_messages(&state.db, &ch.id, None, 200, None).await?;
                 for p in &posts {
                     let lastmod = lastmod_date(p.edited_at.as_deref().unwrap_or(&p.created_at));
                     push(
@@ -1315,7 +1309,10 @@ mod tests {
 
     #[test]
     fn xml_escape_covers_all_five_entities() {
-        assert_eq!(xml_escape(r#"<a href="x">&'"#), "&lt;a href=&quot;x&quot;&gt;&amp;&apos;");
+        assert_eq!(
+            xml_escape(r#"<a href="x">&'"#),
+            "&lt;a href=&quot;x&quot;&gt;&amp;&apos;"
+        );
     }
 
     #[test]
@@ -1346,7 +1343,11 @@ mod tests {
     #[test]
     fn url_unseg_is_the_inverse_of_url_seg() {
         for raw in ["self-hosting", "Dev Talk", "a/b?c#d", "héllo", "100%"] {
-            assert_eq!(url_unseg(&url_seg(raw)), raw, "round-trip failed for {raw:?}");
+            assert_eq!(
+                url_unseg(&url_seg(raw)),
+                raw,
+                "round-trip failed for {raw:?}"
+            );
         }
     }
 
@@ -1354,7 +1355,10 @@ mod tests {
     fn cdn_url_normalises_all_three_storage_conventions() {
         let base = "https://host";
         // Bare filename (legacy).
-        assert_eq!(cdn_url(base, "icons", "x.png"), "https://host/cdn/icons/x.png");
+        assert_eq!(
+            cdn_url(base, "icons", "x.png"),
+            "https://host/cdn/icons/x.png"
+        );
         // Root-relative path (current save_avatar_image output).
         assert_eq!(
             cdn_url(base, "icons", "/cdn/icons/x.png"),
