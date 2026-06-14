@@ -654,9 +654,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                         ).await.is_err() {
                                                             continue;
                                                         }
+                                                        // Timed-out members cannot connect to voice.
+                                                        if crate::middleware::permissions::require_not_timed_out(
+                                                            &state.db, &vsu.space_id, &auth_user,
+                                                        ).await.is_err() {
+                                                            continue;
+                                                        }
 
                                                         let (voice_state, prev) = crate::voice::state::join_voice_channel(
-                                                            &state, &user_id, &vsu.space_id, &channel_id,
+                                                            &state, &user_id, Some(&vsu.space_id), &channel_id,
                                                             &session_id, self_mute, self_deaf, self_video, self_stream,
                                                         );
 

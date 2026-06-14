@@ -7,7 +7,8 @@ use crate::db::messages::ReactionAggregate;
 use crate::error::AppError;
 use crate::middleware::auth::{AuthUser, OptionalAuthUser};
 use crate::middleware::permissions::{
-    require_channel_membership, require_channel_permission, resolve_channel_permissions,
+    require_channel_membership, require_channel_permission, require_not_timed_out,
+    resolve_channel_permissions,
 };
 use crate::models::attachment::Attachment;
 use crate::models::message::{BulkDeleteMessages, CreateMessage, MessageRow, UpdateMessage};
@@ -144,7 +145,12 @@ pub async fn create_message(
     auth: AuthUser,
     Json(input): Json<CreateMessage>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
+    let space_id =
+        require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
+    // Block timed-out members from sending in a space (DMs have no timeout).
+    if !space_id.is_empty() {
+        require_not_timed_out(&state.db, &space_id, &auth).await?;
+    }
 
     // Thread permission enforcement
     if input.thread_id.is_some() {
@@ -289,7 +295,11 @@ pub async fn create_message_multipart(
     auth: AuthUser,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
+    let space_id =
+        require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
+    if !space_id.is_empty() {
+        require_not_timed_out(&state.db, &space_id, &auth).await?;
+    }
 
     let settings = state.settings.load();
     let max_attachments = settings.max_attachments_per_message as usize;
@@ -567,7 +577,11 @@ pub async fn typing_indicator(
     auth: AuthUser,
     body: Option<Json<TypingIndicatorBody>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
+    let space_id =
+        require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
+    if !space_id.is_empty() {
+        require_not_timed_out(&state.db, &space_id, &auth).await?;
+    }
     let thread_id = body.and_then(|b| b.thread_id.clone());
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;

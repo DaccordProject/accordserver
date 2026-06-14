@@ -180,6 +180,29 @@ pub async fn update_member(
         require_permission(&state.db, &space_id, &auth, "deafen_members").await?;
     }
 
+    // Setting or clearing a moderation timeout requires moderate_members plus
+    // the hierarchy check, so you cannot time out someone ranked above you.
+    if let Some(timeout) = &input.communication_disabled_until {
+        require_permission(&state.db, &space_id, &auth, "moderate_members").await?;
+        require_hierarchy(&state.db, &space_id, &auth, &user_id).await?;
+        // Normalize a provided timestamp to a canonical RFC3339 form so stored
+        // values are consistent and lexicographically comparable. Reject input
+        // we cannot parse rather than silently storing garbage.
+        if let Some(ts) = timeout {
+            let parsed = chrono::DateTime::parse_from_rfc3339(ts).map_err(|_| {
+                AppError::BadRequest(
+                    "communication_disabled_until must be an RFC3339 timestamp".into(),
+                )
+            })?;
+            input.communication_disabled_until = Some(Some(
+                parsed
+                    .with_timezone(&chrono::Utc)
+                    .format("%Y-%m-%dT%H:%M:%S+00:00")
+                    .to_string(),
+            ));
+        }
+    }
+
     let max_avatar_size = state.settings.load().max_avatar_size as usize;
 
     // Process avatar data URI
@@ -358,6 +381,8 @@ pub async fn update_own_member(
         roles: None,
         mute: None,
         deaf: None,
+        // Members can never set their own timeout.
+        communication_disabled_until: None,
     };
     let row = db::members::update_member(&state.db, &space_id, &auth.user_id, &limited).await?;
     let role_ids = db::members::get_member_role_ids(&state.db, &space_id, &auth.user_id).await?;

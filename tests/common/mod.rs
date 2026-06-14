@@ -334,6 +334,19 @@ impl TestServer {
         channel.id
     }
 
+    /// Create a 1:1 DM channel between two users. Returns the channel ID.
+    pub async fn create_dm(&self, creator_id: &str, recipient_id: &str) -> String {
+        let channel = db::dm_participants::create_dm_channel(
+            self.pool(),
+            creator_id,
+            &[recipient_id.to_string()],
+            self.state.db_is_postgres,
+        )
+        .await
+        .expect("failed to create test DM channel");
+        channel.id
+    }
+
     /// Add a user as a member of a space.
     pub async fn add_member(&self, space_id: &str, user_id: &str) {
         db::members::add_member(self.pool(), space_id, user_id, self.state.db_is_postgres)

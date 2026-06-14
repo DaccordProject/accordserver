@@ -400,6 +400,16 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/channels/{channel_id}/voice/leave",
             delete(voice::leave_voice),
         )
+        // DM call signaling
+        .route("/channels/{channel_id}/call/ring", post(voice::ring_call))
+        .route(
+            "/channels/{channel_id}/call/decline",
+            post(voice::decline_call),
+        )
+        .route(
+            "/channels/{channel_id}/call/cancel",
+            post(voice::cancel_call),
+        )
         // Applications
         .route("/applications", post(applications::create_application))
         .route(

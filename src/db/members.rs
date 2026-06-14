@@ -281,6 +281,32 @@ pub async fn update_member(
         .await?;
     }
 
+    // Moderation timeout. `Some(Some(ts))` sets it, `Some(None)` clears it, and
+    // `None` leaves it untouched.
+    if let Some(timeout) = &input.communication_disabled_until {
+        match timeout {
+            Some(ts) => {
+                sqlx::query(&super::q(
+                    "UPDATE members SET timed_out_until = ? WHERE space_id = ? AND user_id = ?",
+                ))
+                .bind(ts)
+                .bind(space_id)
+                .bind(user_id)
+                .execute(pool)
+                .await?;
+            }
+            None => {
+                sqlx::query(&super::q(
+                    "UPDATE members SET timed_out_until = NULL WHERE space_id = ? AND user_id = ?",
+                ))
+                .bind(space_id)
+                .bind(user_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+    }
+
     // Handle role updates
     if let Some(ref roles) = input.roles {
         sqlx::query(&super::q(
