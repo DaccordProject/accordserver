@@ -547,7 +547,9 @@ async fn apply_emoji_upsert(
     )
     .await?;
 
-    let emoji = crate::db::emojis::get_emoji(&state.db, &payload.id).await.ok();
+    let emoji = crate::db::emojis::get_emoji(&state.db, &payload.id)
+        .await
+        .ok();
     let event_type = if created {
         "emoji.create"
     } else {

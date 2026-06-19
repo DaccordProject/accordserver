@@ -457,8 +457,13 @@ async fn serve_edit(
     }
     let existing = crate::db::messages::get_message_row(&state.db, &req.message_id).await?;
     // Authoritative author-or-manage check from our DB.
-    require_author_or_manage(state, &existing.channel_id, &existing.author_id, &req.actor.id)
-        .await?;
+    require_author_or_manage(
+        state,
+        &existing.channel_id,
+        &existing.author_id,
+        &req.actor.id,
+    )
+    .await?;
 
     let msg = crate::db::messages::update_message(
         &state.db,
@@ -553,8 +558,13 @@ async fn serve_delete(
 ) -> Result<(), AppError> {
     authority::require_homed_on(&req.actor.id, peer, "actor")?;
     let existing = crate::db::messages::get_message_row(&state.db, &req.message_id).await?;
-    require_author_or_manage(state, &existing.channel_id, &existing.author_id, &req.actor.id)
-        .await?;
+    require_author_or_manage(
+        state,
+        &existing.channel_id,
+        &existing.author_id,
+        &req.actor.id,
+    )
+    .await?;
 
     crate::db::messages::delete_message(&state.db, &req.message_id).await?;
 

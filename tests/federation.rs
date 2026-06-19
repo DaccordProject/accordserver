@@ -429,17 +429,41 @@ async fn cross_server_dm_round_trip() {
     let mut b = TestServer::new().await;
     b.enable_federation("b.test");
 
-    let a_pub = a.state.federation.as_ref().unwrap().identity.public_key_b64();
-    let b_pub = b.state.federation.as_ref().unwrap().identity.public_key_b64();
+    let a_pub = a
+        .state
+        .federation
+        .as_ref()
+        .unwrap()
+        .identity
+        .public_key_b64();
+    let b_pub = b
+        .state
+        .federation
+        .as_ref()
+        .unwrap()
+        .identity
+        .public_key_b64();
     let base_a = a.spawn().await;
     let base_b = b.spawn().await;
 
-    accordserver::db::federation::upsert_peer(a.pool(), "b.test", &b_pub, &format!("{base_b}{INBOX}"), "trusted")
-        .await
-        .unwrap();
-    accordserver::db::federation::upsert_peer(b.pool(), "a.test", &a_pub, &format!("{base_a}{INBOX}"), "trusted")
-        .await
-        .unwrap();
+    accordserver::db::federation::upsert_peer(
+        a.pool(),
+        "b.test",
+        &b_pub,
+        &format!("{base_b}{INBOX}"),
+        "trusted",
+    )
+    .await
+    .unwrap();
+    accordserver::db::federation::upsert_peer(
+        b.pool(),
+        "a.test",
+        &a_pub,
+        &format!("{base_a}{INBOX}"),
+        "trusted",
+    )
+    .await
+    .unwrap();
 
     let alice = a.create_user_with_token("alice").await;
     let bob = b.create_user_with_token("bob").await;
@@ -1070,7 +1094,14 @@ async fn replayed_forward_request_is_rejected() {
     });
     let body = serde_json::to_vec(&body_value).unwrap();
     // Sign once, then issue the same Date/Digest/Signature twice.
-    let signed = sign_request(&bob, "b.test", "POST", "/federation/v1/typing", "a.test", &body);
+    let signed = sign_request(
+        &bob,
+        "b.test",
+        "POST",
+        "/federation/v1/typing",
+        "a.test",
+        &body,
+    );
     let build = || {
         Request::builder()
             .method(Method::POST)

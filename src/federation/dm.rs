@@ -43,7 +43,10 @@ const MAX_CONTENT_CHARS: usize = 4000;
 /// Pick the deterministic home domain for a DM between two qualified user IDs.
 /// Both servers compute the same value, so the DM is created exactly once.
 fn home_domain_for(a_qualified: &str, b_qualified: &str) -> String {
-    let (a, b) = (a_qualified.to_ascii_lowercase(), b_qualified.to_ascii_lowercase());
+    let (a, b) = (
+        a_qualified.to_ascii_lowercase(),
+        b_qualified.to_ascii_lowercase(),
+    );
     let lower = if a <= b { &a } else { &b };
     mapping::domain_of(lower).unwrap_or(lower).to_string()
 }
@@ -131,7 +134,10 @@ async fn open_dm_as_home(
         home: our_domain.to_string(),
         channel_type: channel.channel_type.clone(),
         opener_id: mapping::qualify(&opener.id, our_domain),
-        owner_id: mapping::qualify(channel.owner_id.as_deref().unwrap_or(&opener.id), our_domain),
+        owner_id: mapping::qualify(
+            channel.owner_id.as_deref().unwrap_or(&opener.id),
+            our_domain,
+        ),
         participants: vec![
             actor_ref(our_domain, opener),
             RemoteUserRef {
@@ -269,10 +275,7 @@ async fn serve_open(
             channel.owner_id.as_deref().unwrap_or(&req.opener.id),
             our_domain,
         ),
-        participants: vec![
-            req.opener.clone(),
-            actor_ref(our_domain, &recipient),
-        ],
+        participants: vec![req.opener.clone(), actor_ref(our_domain, &recipient)],
     })
 }
 
@@ -418,7 +421,9 @@ async fn serve_send(
     if !is_dm(&channel.channel_type) {
         return Err(AppError::BadRequest("not a dm channel".to_string()));
     }
-    if !crate::db::dm_participants::is_participant(&state.db, &req.channel_id, &req.actor.id).await? {
+    if !crate::db::dm_participants::is_participant(&state.db, &req.channel_id, &req.actor.id)
+        .await?
+    {
         return Err(AppError::Forbidden(
             "actor is not a participant in this dm".to_string(),
         ));
@@ -454,8 +459,7 @@ async fn serve_send(
     // Qualified payload for the originating replica + peer fanout; bare-ID JSON
     // for our own local sessions (which know this DM by its bare home ID).
     let payload = crate::federation::outbound::message_payload(our_domain, &msg, &author);
-    let local_json =
-        crate::routes::messages::message_row_to_json_with_attachments(&msg, &[], None);
+    let local_json = crate::routes::messages::message_row_to_json_with_attachments(&msg, &[], None);
 
     broadcast_message(state, &req.channel_id, "message.create", local_json).await;
     fanout_dm_message(state, &channel, &payload).await?;
@@ -612,7 +616,8 @@ async fn remote_participant_domains(
     let mut out = Vec::new();
     for id in ids {
         if let Some(domain) = mapping::domain_of(&id) {
-            if !domain.eq_ignore_ascii_case(our_domain) && seen.insert(domain.to_ascii_lowercase()) {
+            if !domain.eq_ignore_ascii_case(our_domain) && seen.insert(domain.to_ascii_lowercase())
+            {
                 out.push(domain.to_string());
             }
         }

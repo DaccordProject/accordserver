@@ -228,7 +228,7 @@ async fn fanout_emoji_upsert(
             space_id,
             emoji,
         );
-        let _ =
-            crate::federation::outbound::fanout_to_space(state, space_id, event_type, payload).await;
+        let _ = crate::federation::outbound::fanout_to_space(state, space_id, event_type, payload)
+            .await;
     }
 }
