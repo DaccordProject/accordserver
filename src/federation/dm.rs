@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::AppError;
-use crate::federation::handshake::RemoteUserRef;
+use crate::federation::mapping::RemoteUserRef;
 use crate::federation::{authority, mapping, sender};
 use crate::models::channel::ChannelRow;
 use crate::models::message::CreateMessage;
@@ -39,10 +39,6 @@ pub const DM_ANNOUNCE_PATH: &str = "/federation/v1/dm/announce";
 pub const DM_SEND_PATH: &str = "/federation/v1/dm/send";
 
 const MAX_CONTENT_CHARS: usize = 4000;
-
-fn err(status: StatusCode, msg: &str) -> axum::response::Response {
-    (status, Json(json!({ "error": msg }))).into_response()
-}
 
 /// Pick the deterministic home domain for a DM between two qualified user IDs.
 /// Both servers compute the same value, so the DM is created exactly once.
@@ -140,7 +136,7 @@ async fn open_dm_as_home(
             actor_ref(our_domain, opener),
             RemoteUserRef {
                 id: recipient_id.to_string(),
-                username: recipient_id.to_string(),
+                username: Some(recipient_id.to_string()),
                 display_name: None,
                 avatar: None,
             },
@@ -208,26 +204,12 @@ pub async fn handle_open(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        DM_OPEN_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let req: DmOpenRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid dm open request"),
-    };
-    match serve_open(&state, &fed.domain, &peer.domain, &req).await {
+    let (our_domain, peer, req): (_, _, DmOpenRequest) =
+        match crate::federation::verify::prepare(&state, &headers, DM_OPEN_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    match serve_open(&state, &our_domain, &peer.domain, &req).await {
         Ok(snapshot) => (StatusCode::OK, Json(snapshot)).into_response(),
         Err(e) => e.into_response(),
     }
@@ -263,7 +245,7 @@ async fn serve_open(
         &state.db,
         &req.opener.id,
         peer,
-        &mapping::handle(&req.opener.username, peer),
+        &mapping::handle(req.opener.username_or_id(), peer),
         req.opener.display_name.as_deref(),
         req.opener.avatar.as_deref(),
     )
@@ -303,30 +285,16 @@ pub async fn handle_announce(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        DM_ANNOUNCE_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let snapshot: DmSnapshot = match serde_json::from_slice(&body) {
-        Ok(s) => s,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid dm announce"),
-    };
+    let (our_domain, peer, snapshot): (_, _, DmSnapshot) =
+        match crate::federation::verify::prepare(&state, &headers, DM_ANNOUNCE_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
     // Authority: the channel must be homed on the signing peer.
     if let Err(e) = authority::require_homed_on(&snapshot.channel_id, &peer.domain, "dm channel") {
         return e.into_response();
     }
-    match mirror_dm(&state, &fed.domain, &snapshot).await {
+    match mirror_dm(&state, &our_domain, &snapshot).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
         Err(e) => e.into_response(),
     }
@@ -356,7 +324,7 @@ async fn mirror_dm(state: &AppState, our_domain: &str, snap: &DmSnapshot) -> Res
                 &state.db,
                 &p.id,
                 domain,
-                &mapping::handle(&p.username, domain),
+                &mapping::handle(p.username_or_id(), domain),
                 p.display_name.as_deref(),
                 p.avatar.as_deref(),
             )
@@ -423,26 +391,12 @@ pub async fn handle_send(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        DM_SEND_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let req: DmSendRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid dm send request"),
-    };
-    match serve_send(&state, &fed.domain, &peer.domain, &req).await {
+    let (our_domain, peer, req): (_, _, DmSendRequest) =
+        match crate::federation::verify::prepare(&state, &headers, DM_SEND_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    match serve_send(&state, &our_domain, &peer.domain, &req).await {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
         Err(e) => e.into_response(),
     }
@@ -474,7 +428,7 @@ async fn serve_send(
         &state.db,
         &req.actor.id,
         peer,
-        &mapping::handle(&req.actor.username, peer),
+        &mapping::handle(req.actor.username_or_id(), peer),
         req.actor.display_name.as_deref(),
         req.actor.avatar.as_deref(),
     )
@@ -592,10 +546,7 @@ pub async fn apply_message_create(
     }
 
     let author_domain = mapping::domain_of(&payload.author.id).unwrap_or(peer);
-    let handle = match &payload.author.username {
-        Some(name) => mapping::handle(name, author_domain),
-        None => payload.author.id.clone(),
-    };
+    let handle = mapping::handle(payload.author.username_or_id(), author_domain);
     crate::db::users::upsert_remote_user(
         &state.db,
         &payload.author.id,
@@ -643,7 +594,7 @@ pub fn is_dm(channel_type: &str) -> bool {
 fn actor_ref(domain: &str, user: &User) -> RemoteUserRef {
     RemoteUserRef {
         id: mapping::qualify(&user.id, domain),
-        username: user.username.clone(),
+        username: Some(user.username.clone()),
         display_name: user.display_name.clone(),
         avatar: user.avatar.clone(),
     }

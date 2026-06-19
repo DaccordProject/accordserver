@@ -9,13 +9,18 @@
 use serde::Deserialize;
 
 use crate::error::AppError;
-use crate::federation::{authority, mapping::FederationEnvelope};
+use crate::federation::mirror_user;
+use crate::federation::{
+    authority, broadcast_space as rebroadcast, mapping::FederationEnvelope, mapping::RemoteUserRef,
+};
 use crate::state::AppState;
 
 /// Same caps as local message creation (`routes/messages.rs`).
 const MAX_CONTENT_CHARS: usize = 4000;
 const MAX_EMBEDS: usize = 10;
 const MAX_MENTIONS: usize = 100;
+const MAX_EMOJI_NAME_CHARS: usize = 64;
+const MAX_EMOJI_ROLES: usize = 100;
 
 /// Outcome of applying an event, mapped to an HTTP status by the inbox.
 pub enum Applied {
@@ -59,6 +64,18 @@ pub async fn apply_event(
             apply_member_leave(state, peer, env).await?;
             Ok(Applied::Ok)
         }
+        "m.emoji.create" => {
+            apply_emoji_upsert(state, peer, env, true).await?;
+            Ok(Applied::Ok)
+        }
+        "m.emoji.update" => {
+            apply_emoji_upsert(state, peer, env, false).await?;
+            Ok(Applied::Ok)
+        }
+        "m.emoji.delete" => {
+            apply_emoji_delete(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
         "m.typing" => {
             apply_typing(state, env).await;
             Ok(Applied::Ok)
@@ -69,32 +86,6 @@ pub async fn apply_event(
         }
         _ => Ok(Applied::Unsupported),
     }
-}
-
-/// Mirror a referenced remote user's profile.
-///
-/// A signing peer is authoritative for a user's profile only when it *is* that
-/// user's home server. When the referenced user is homed on the signing peer we
-/// refresh the cached profile; otherwise (a user homed on some third server) we
-/// only ensure the row exists, so a peer can never spoof or clobber another
-/// server's user (S2).
-async fn mirror_remote_user(
-    state: &AppState,
-    peer: &str,
-    id: &str,
-    domain: &str,
-    handle: &str,
-    display_name: Option<&str>,
-    avatar: Option<&str>,
-) -> Result<(), AppError> {
-    if domain.eq_ignore_ascii_case(peer) {
-        crate::db::users::upsert_remote_user(&state.db, id, domain, handle, display_name, avatar)
-            .await?;
-    } else {
-        crate::db::users::ensure_remote_user(&state.db, id, domain, handle, display_name, avatar)
-            .await?;
-    }
-    Ok(())
 }
 
 /// Ephemeral typing indicator: just rebroadcast to local sessions (no DB).
@@ -109,43 +100,13 @@ async fn apply_typing(state: &AppState, env: &FederationEnvelope) {
     .await;
 }
 
-/// Re-broadcast a relayed event to local gateway sessions for `space_id`.
-async fn rebroadcast(
-    state: &AppState,
-    space_id: Option<String>,
-    event_type: &str,
-    data: serde_json::Value,
-    intent: &str,
-) {
-    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
-        let event = serde_json::json!({ "op": 0, "type": event_type, "data": data });
-        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id,
-            target_user_ids: None,
-            event,
-            intent: intent.to_string(),
-        });
-    }
-}
-
-#[derive(Deserialize)]
-pub struct RemoteAuthor {
-    pub id: String,
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub avatar: Option<String>,
-}
-
 #[derive(Deserialize)]
 pub struct RemoteMessagePayload {
     pub id: String,
     pub channel_id: String,
     #[serde(default)]
     pub space_id: Option<String>,
-    pub author: RemoteAuthor,
+    pub author: RemoteUserRef,
     pub content: String,
     #[serde(default)]
     pub mentions: Vec<String>,
@@ -209,15 +170,11 @@ async fn apply_message_create(
 
     // Cache the remote author's profile under its own home domain. Only the
     // author's own home server may set/refresh that profile (S2).
-    let handle = match &payload.author.username {
-        Some(name) => crate::federation::mapping::handle(name, author_domain),
-        None => payload.author.id.clone(),
-    };
-    mirror_remote_user(
+    let handle = crate::federation::mapping::handle(payload.author.username_or_id(), author_domain);
+    mirror_user(
         state,
         peer,
         &payload.author.id,
-        author_domain,
         &handle,
         payload.author.display_name.as_deref(),
         payload.author.avatar.as_deref(),
@@ -362,7 +319,7 @@ async fn apply_message_delete(
 
 #[derive(Deserialize)]
 struct RemoteMemberJoin {
-    user: crate::federation::handshake::RemoteUserRef,
+    user: RemoteUserRef,
 }
 
 async fn apply_member_join(
@@ -390,12 +347,11 @@ async fn apply_member_join(
     // The joining member must be a qualified remote ID (never a bare local ID — S2).
     authority::require_remote_target(&payload.user.id)?;
     let domain = crate::federation::mapping::domain_of(&payload.user.id).unwrap_or(peer);
-    mirror_remote_user(
+    mirror_user(
         state,
         peer,
         &payload.user.id,
-        domain,
-        &crate::federation::mapping::handle(&payload.user.username, domain),
+        &crate::federation::mapping::handle(payload.user.username_or_id(), domain),
         payload.user.display_name.as_deref(),
         payload.user.avatar.as_deref(),
     )
@@ -531,6 +487,115 @@ async fn apply_reaction(
             "emoji": payload.emoji,
         }),
         "message_reactions",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteEmoji {
+    id: String,
+    space_id: String,
+    name: String,
+    #[serde(default)]
+    animated: bool,
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    role_ids: Vec<String>,
+}
+
+/// Mirror a remote space's custom emoji (`m.emoji.create` / `m.emoji.update`).
+/// The emoji and its space must be homed on the signing peer (S1); the image is
+/// referenced by the home server's absolute URL rather than mirrored.
+async fn apply_emoji_upsert(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+    created: bool,
+) -> Result<(), AppError> {
+    let payload: RemoteEmoji = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid emoji payload: {e}")))?;
+    authority::require_homed_on(&payload.id, peer, "emoji")?;
+    authority::require_homed_on(&payload.space_id, peer, "space")?;
+
+    // Input caps (S6): never trust remote-supplied sizes.
+    if payload.name.chars().count() > MAX_EMOJI_NAME_CHARS {
+        return Err(AppError::BadRequest("emoji name too long".to_string()));
+    }
+    if payload.role_ids.len() > MAX_EMOJI_ROLES {
+        return Err(AppError::BadRequest("too many emoji roles".to_string()));
+    }
+
+    // Only act if we mirror this space (one of our users joined it).
+    if crate::db::spaces::get_space_row(&state.db, &payload.space_id)
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    crate::db::emojis::upsert_remote_emoji(
+        &state.db,
+        &payload.id,
+        peer,
+        &payload.space_id,
+        &payload.name,
+        payload.animated,
+        payload.image_url.as_deref(),
+        &payload.role_ids,
+    )
+    .await?;
+
+    let emoji = crate::db::emojis::get_emoji(&state.db, &payload.id).await.ok();
+    let event_type = if created {
+        "emoji.create"
+    } else {
+        "emoji.update"
+    };
+    rebroadcast(
+        state,
+        Some(payload.space_id.clone()),
+        event_type,
+        serde_json::json!({ "space_id": payload.space_id, "emoji": emoji }),
+        "emojis",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteEmojiDelete {
+    id: String,
+    #[serde(default)]
+    space_id: Option<String>,
+}
+
+async fn apply_emoji_delete(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let payload: RemoteEmojiDelete = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid emoji delete payload: {e}")))?;
+    authority::require_homed_on(&payload.id, peer, "emoji")?;
+
+    // Only ever delete a replica row homed on this peer (S2).
+    if crate::db::emojis::emoji_origin(&state.db, &payload.id)
+        .await?
+        .as_deref()
+        != Some(peer)
+    {
+        return Ok(());
+    }
+    crate::db::emojis::delete_emoji(&state.db, &payload.id).await?;
+
+    rebroadcast(
+        state,
+        payload.space_id.clone(),
+        "emoji.delete",
+        serde_json::json!({ "space_id": payload.space_id, "emoji_id": payload.id }),
+        "emojis",
     )
     .await;
     Ok(())

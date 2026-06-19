@@ -15,10 +15,12 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::AppError;
+use crate::federation::err_response as err;
+use crate::federation::mapping::RemoteUserRef;
 use crate::federation::{authority, mapping};
 use crate::state::AppState;
 
@@ -28,26 +30,12 @@ pub const JOIN_PATH: &str = "/federation/v1/join";
 /// Recent messages included per channel in a join snapshot.
 const SNAPSHOT_MESSAGES_PER_CHANNEL: i64 = 50;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RemoteUserRef {
-    pub id: String,
-    pub username: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub avatar: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct JoinRequest {
     /// The joining user (homed on the requesting peer).
     pub user: RemoteUserRef,
     /// The home server's (bare) space ID to join.
     pub space_id: String,
-}
-
-fn err(status: StatusCode, msg: &str) -> axum::response::Response {
-    (status, Json(json!({ "error": msg }))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -59,27 +47,11 @@ pub async fn handle_join(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        JOIN_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-
-    let join: JoinRequest = match serde_json::from_slice(&body) {
-        Ok(j) => j,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid join request"),
-    };
+    let (our_domain, peer, join): (_, _, JoinRequest) =
+        match crate::federation::verify::prepare(&state, &headers, JOIN_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
 
     // Authority (S1): the joining user must be homed on the signing peer.
     if let Err(e) = authority::require_homed_on(&join.user.id, &peer.domain, "user") {
@@ -87,7 +59,7 @@ pub async fn handle_join(
         return err(StatusCode::FORBIDDEN, "authority check failed");
     }
 
-    match serve_join(&state, &fed.domain, &peer.domain, &join).await {
+    match serve_join(&state, &our_domain, &peer.domain, &join).await {
         Ok(snapshot) => (StatusCode::OK, Json(snapshot)).into_response(),
         Err(e) => e.into_response(),
     }
@@ -121,7 +93,7 @@ async fn serve_join(
         &state.db,
         &join.user.id,
         peer,
-        &mapping::handle(&join.user.username, peer),
+        &mapping::handle(join.user.username_or_id(), peer),
         join.user.display_name.as_deref(),
         join.user.avatar.as_deref(),
     )
@@ -170,6 +142,31 @@ async fn build_snapshot(
                 "name": r.name,
                 "position": r.position,
                 "permissions": r.permissions,
+            })
+        })
+        .collect();
+
+    // Custom emoji, with images referenced by an absolute home-server URL (the
+    // image bytes are not mirrored).
+    let public_url = state
+        .federation
+        .as_ref()
+        .map(|f| f.public_url.clone())
+        .unwrap_or_default();
+    let emojis = crate::db::emojis::list_emojis(&state.db, &space.id)
+        .await
+        .unwrap_or_default();
+    let emojis_json: Vec<serde_json::Value> = emojis
+        .iter()
+        .map(|e| {
+            json!({
+                "id": q(e.id.as_deref().unwrap_or_default()),
+                "space_id": q(&space.id),
+                "name": e.name,
+                "animated": e.animated,
+                "image_url": e.image_url.as_deref()
+                    .map(|p| crate::federation::outbound::absolute_cdn_url(&public_url, p)),
+                "role_ids": e.role_ids.iter().map(|r| q(r)).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -251,6 +248,7 @@ async fn build_snapshot(
         "roles": roles_json,
         "members": members_json,
         "messages": messages_json,
+        "emojis": emojis_json,
     }))
 }
 
@@ -290,23 +288,12 @@ struct SnapshotRole {
 }
 
 #[derive(Debug, Deserialize)]
-struct SnapshotMessageAuthor {
-    id: String,
-    #[serde(default)]
-    username: Option<String>,
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    avatar: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct SnapshotMessage {
     id: String,
     channel_id: String,
     #[serde(default)]
     space_id: Option<String>,
-    author: SnapshotMessageAuthor,
+    author: RemoteUserRef,
     content: String,
     #[serde(default)]
     mention_everyone: bool,
@@ -320,6 +307,18 @@ struct SnapshotMessage {
 }
 
 #[derive(Debug, Deserialize)]
+struct SnapshotEmoji {
+    id: String,
+    name: String,
+    #[serde(default)]
+    animated: bool,
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    role_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct Snapshot {
     space: SnapshotSpace,
     #[serde(default)]
@@ -330,6 +329,8 @@ struct Snapshot {
     members: Vec<RemoteUserRef>,
     #[serde(default)]
     messages: Vec<SnapshotMessage>,
+    #[serde(default)]
+    emojis: Vec<SnapshotEmoji>,
 }
 
 /// Apply a join snapshot received from `home_domain` as a local replica, and
@@ -354,7 +355,7 @@ pub async fn apply_snapshot(
     // else a minimal placeholder.
     authority::require_homed_on(&snap.space.owner_id, home_domain, "owner")?;
     let owner = owner_ref(&snap);
-    upsert_member_user(state, home_domain, &owner).await?;
+    mirror_snapshot_user(state, home_domain, &owner).await?;
 
     // Members. A space's membership can include users from several servers, so
     // members are not required to be homed on the home server — only the space's
@@ -363,16 +364,7 @@ pub async fn apply_snapshot(
         // Members may be homed anywhere, but must be qualified remote IDs so a
         // snapshot can never create or overwrite a local (bare-ID) user row (S2).
         authority::require_remote_target(&m.id)?;
-        let domain = mapping::domain_of(&m.id).unwrap_or(home_domain);
-        mirror_snapshot_user(
-            state,
-            home_domain,
-            &m.id,
-            &mapping::handle(&m.username, domain),
-            m.display_name.as_deref(),
-            m.avatar.as_deref(),
-        )
-        .await?;
+        mirror_snapshot_user(state, home_domain, m).await?;
     }
 
     // Space.
@@ -418,6 +410,25 @@ pub async fn apply_snapshot(
         let _ = &r.space_id;
     }
 
+    // Custom emoji. Homed on the home server (S1); role restrictions reference
+    // the roles mirrored just above. Applied after roles so the FK holds.
+    for e in &snap.emojis {
+        if authority::require_homed_on(&e.id, home_domain, "emoji").is_err() {
+            continue;
+        }
+        crate::db::emojis::upsert_remote_emoji(
+            &state.db,
+            &e.id,
+            home_domain,
+            &snap.space.id,
+            &e.name,
+            e.animated,
+            e.image_url.as_deref(),
+            &e.role_ids,
+        )
+        .await?;
+    }
+
     // Recent messages. The message itself must be homed on the home server (its
     // authoritative space); the author may be a member from another server.
     for m in &snap.messages {
@@ -429,11 +440,8 @@ pub async fn apply_snapshot(
             continue;
         }
         let domain = mapping::domain_of(&m.author.id).unwrap_or(home_domain);
-        let handle = match &m.author.username {
-            Some(u) => mapping::handle(u, domain),
-            None => m.author.id.clone(),
-        };
-        mirror_snapshot_user(
+        let handle = mapping::handle(m.author.username_or_id(), domain);
+        crate::federation::mirror_user(
             state,
             home_domain,
             &m.author.id,
@@ -480,49 +488,28 @@ fn owner_ref(snap: &Snapshot) -> RemoteUserRef {
         .cloned()
         .unwrap_or_else(|| RemoteUserRef {
             id: snap.space.owner_id.clone(),
-            username: snap.space.owner_id.clone(),
+            username: Some(snap.space.owner_id.clone()),
             display_name: None,
             avatar: None,
         })
 }
 
-/// Upsert a single member user, deriving its origin from its qualified ID.
-async fn upsert_member_user(
+/// Mirror a single member user from a snapshot, deriving its origin from its
+/// qualified ID. See [`crate::federation::mirror_user`] for the upsert-vs-ensure
+/// authority rule (S2).
+async fn mirror_snapshot_user(
     state: &AppState,
     home_domain: &str,
     user: &RemoteUserRef,
 ) -> Result<(), AppError> {
     let domain = mapping::domain_of(&user.id).unwrap_or(home_domain);
-    mirror_snapshot_user(
+    crate::federation::mirror_user(
         state,
         home_domain,
         &user.id,
-        &mapping::handle(&user.username, domain),
+        &mapping::handle(user.username_or_id(), domain),
         user.display_name.as_deref(),
         user.avatar.as_deref(),
     )
     .await
-}
-
-/// Mirror a user referenced by a join snapshot. The snapshot's home server is
-/// authoritative only for users actually homed on it; a member or author from a
-/// third server is ensured-only, so a snapshot can never overwrite that user's
-/// real profile (S2). New rows still take the snapshot-supplied profile.
-async fn mirror_snapshot_user(
-    state: &AppState,
-    home_domain: &str,
-    id: &str,
-    handle: &str,
-    display_name: Option<&str>,
-    avatar: Option<&str>,
-) -> Result<(), AppError> {
-    let domain = mapping::domain_of(id).unwrap_or(home_domain);
-    if domain.eq_ignore_ascii_case(home_domain) {
-        crate::db::users::upsert_remote_user(&state.db, id, domain, handle, display_name, avatar)
-            .await?;
-    } else {
-        crate::db::users::ensure_remote_user(&state.db, id, domain, handle, display_name, avatar)
-            .await?;
-    }
-    Ok(())
 }

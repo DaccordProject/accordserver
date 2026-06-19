@@ -5,16 +5,31 @@
 //! stay with each handler.
 
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::Json;
-use serde_json::json;
+use axum::response::Response;
+use serde::de::DeserializeOwned;
 
 use crate::db::federation::Peer;
+use crate::federation::err_response as err;
 use crate::federation::signatures;
 use crate::state::AppState;
 
-fn err(status: StatusCode, msg: &str) -> Response {
-    (status, Json(json!({ "error": msg }))).into_response()
+/// Common entry point for every signed S2S handler: reject if federation is
+/// disabled, verify the signature + resolve the trusted peer, and parse the
+/// request body. Returns `(our_domain, peer, parsed_body)` or an error response
+/// to return verbatim.
+pub async fn prepare<T: DeserializeOwned>(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    body: &[u8],
+) -> Result<(String, Peer, T), Response> {
+    let Some(fed) = state.federation.clone() else {
+        return Err(err(StatusCode::NOT_FOUND, "federation disabled"));
+    };
+    let peer = verify_signed(state, &fed.domain, headers, path, body).await?;
+    let req = serde_json::from_slice(body)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid request body"))?;
+    Ok((fed.domain.clone(), peer, req))
 }
 
 /// Verify a signed inbound request and return the trusted signing peer, or an

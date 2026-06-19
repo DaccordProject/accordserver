@@ -7,6 +7,7 @@
 
 use crate::error::AppError;
 use crate::federation::{mapping, mapping::FederationEnvelope, sender};
+use crate::models::emoji::Emoji;
 use crate::models::message::MessageRow;
 use crate::models::user::User;
 use crate::state::AppState;
@@ -108,6 +109,51 @@ pub fn reaction_payload(
         "message_id": q(message_id),
         "user_id": q(user_id),
         "emoji": emoji,
+    })
+}
+
+/// Resolve a stored CDN path (e.g. `/cdn/emojis/123/456.png`) to an absolute URL
+/// rooted at `public_url`. Already-absolute URLs (a value mirrored from another
+/// server) are returned unchanged so this is idempotent across hops. Replicas do
+/// not mirror the image bytes — they reference the home server's CDN directly.
+pub fn absolute_cdn_url(public_url: &str, path: &str) -> String {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        path.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            public_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
+    }
+}
+
+/// `m.emoji.create` / `m.emoji.update` payload: the emoji with its ID, space,
+/// and role restrictions qualified to `domain`, and its image referenced by an
+/// absolute `public_url` CDN link.
+pub fn emoji_payload(
+    domain: &str,
+    public_url: &str,
+    space_id: &str,
+    emoji: &Emoji,
+) -> serde_json::Value {
+    let q = |id: &str| mapping::qualify(id, domain);
+    let role_ids: Vec<String> = emoji.role_ids.iter().map(|r| q(r)).collect();
+    serde_json::json!({
+        "id": q(emoji.id.as_deref().unwrap_or_default()),
+        "space_id": q(space_id),
+        "name": emoji.name,
+        "animated": emoji.animated,
+        "image_url": emoji.image_url.as_deref().map(|p| absolute_cdn_url(public_url, p)),
+        "role_ids": role_ids,
+    })
+}
+
+/// `m.emoji.delete` payload, qualifying the emoji and its space to `domain`.
+pub fn emoji_delete_payload(domain: &str, space_id: &str, emoji_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": mapping::qualify(emoji_id, domain),
+        "space_id": mapping::qualify(space_id, domain),
     })
 }
 

@@ -84,6 +84,30 @@ impl FederationEnvelope {
     }
 }
 
+/// A reference to a federated user, exchanged in join snapshots, member/actor
+/// payloads, and as a message author. `id` is the user's qualified ID;
+/// `username` is its qualified handle, optional because message-author payloads
+/// may carry only an id. The other fields cache the user's profile.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemoteUserRef {
+    pub id: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
+impl RemoteUserRef {
+    /// Seed for this user's stored handle: the username when present, else the
+    /// id — which, for a remote user, is already a qualified `name@domain` and
+    /// so is itself a valid handle.
+    pub fn username_or_id(&self) -> &str {
+        self.username.as_deref().unwrap_or(&self.id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

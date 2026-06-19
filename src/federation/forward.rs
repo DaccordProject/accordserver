@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::AppError;
-use crate::federation::handshake::RemoteUserRef;
+use crate::federation::mapping::RemoteUserRef;
 use crate::federation::{authority, mapping, sender};
 use crate::middleware::auth::AuthUser;
 use crate::models::message::{CreateMessage, UpdateMessage};
@@ -46,8 +46,14 @@ pub struct SendRequest {
     pub reply_to: Option<String>,
 }
 
-fn err(status: StatusCode, msg: &str) -> axum::response::Response {
-    (status, Json(json!({ "error": msg }))).into_response()
+/// Some channel-permission helpers return an empty string for spaceless
+/// channels; map that to `None` for gateway/fanout space scoping.
+fn space_opt(space_id: &str) -> Option<String> {
+    if space_id.is_empty() {
+        None
+    } else {
+        Some(space_id.to_string())
+    }
 }
 
 /// Synthetic `AuthUser` for a remote actor so the existing permission helpers
@@ -62,6 +68,31 @@ fn remote_actor_auth(user_id: &str) -> AuthUser {
     }
 }
 
+/// Authoritative author-or-manage check for an edit/delete: the actor must be
+/// the message's author, or hold `manage_messages` in its channel. Re-derived
+/// from our own DB — never trusts the forwarded request.
+async fn require_author_or_manage(
+    state: &AppState,
+    channel_id: &str,
+    author_id: &str,
+    actor_id: &str,
+) -> Result<(), AppError> {
+    if author_id != actor_id {
+        let auth = remote_actor_auth(actor_id);
+        crate::middleware::permissions::require_channel_permission(
+            &state.db,
+            channel_id,
+            &auth,
+            "manage_messages",
+        )
+        .await?;
+    } else {
+        crate::middleware::permissions::require_channel_membership(&state.db, channel_id, actor_id)
+            .await?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Home side
 // ---------------------------------------------------------------------------
@@ -71,29 +102,12 @@ pub async fn handle_send(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        SEND_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-
-    let req: SendRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid send request"),
-    };
-
-    match serve_send(&state, &fed.domain, &peer.domain, &req).await {
+    let (our_domain, peer, req): (_, _, SendRequest) =
+        match crate::federation::verify::prepare(&state, &headers, SEND_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    match serve_send(&state, &our_domain, &peer.domain, &req).await {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
         Err(e) => e.into_response(),
     }
@@ -118,7 +132,7 @@ async fn serve_send(
         &state.db,
         &req.actor.id,
         peer,
-        &mapping::handle(&req.actor.username, peer),
+        &mapping::handle(req.actor.username_or_id(), peer),
         req.actor.display_name.as_deref(),
         req.actor.avatar.as_deref(),
     )
@@ -156,15 +170,14 @@ async fn serve_send(
     let payload = crate::federation::outbound::message_payload(our_domain, &msg, &author);
 
     // Broadcast to OUR local gateway sessions (they key on the bare space id).
-    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
-        let event = json!({ "op": 0, "type": "message.create", "data": payload });
-        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: Some(space_id.clone()),
-            target_user_ids: None,
-            event,
-            intent: "messages".to_string(),
-        });
-    }
+    crate::federation::broadcast_space(
+        state,
+        Some(space_id.clone()),
+        "message.create",
+        payload.clone(),
+        "messages",
+    )
+    .await;
 
     // Fan out to every interested peer (including the originator, which dedups).
     crate::federation::outbound::fanout_message_create(state, &msg).await?;
@@ -189,26 +202,12 @@ pub async fn handle_react(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        REACT_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let req: ReactRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid react request"),
-    };
-    match serve_react(&state, &fed.domain, &peer.domain, &req).await {
+    let (our_domain, peer, req): (_, _, ReactRequest) =
+        match crate::federation::verify::prepare(&state, &headers, REACT_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    match serve_react(&state, &our_domain, &peer.domain, &req).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
         Err(e) => e.into_response(),
     }
@@ -225,7 +224,7 @@ async fn serve_react(
         &state.db,
         &req.actor.id,
         peer,
-        &mapping::handle(&req.actor.username, peer),
+        &mapping::handle(req.actor.username_or_id(), peer),
         req.actor.display_name.as_deref(),
         req.actor.avatar.as_deref(),
     )
@@ -284,19 +283,14 @@ async fn serve_react(
     };
 
     // Broadcast to our local sessions and fan out to interested peers.
-    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
-        let event = json!({ "op": 0, "type": local_type, "data": payload });
-        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: if space_id.is_empty() {
-                None
-            } else {
-                Some(space_id.clone())
-            },
-            target_user_ids: None,
-            event,
-            intent: "message_reactions".to_string(),
-        });
-    }
+    crate::federation::broadcast_space(
+        state,
+        space_opt(&space_id),
+        local_type,
+        payload.clone(),
+        "message_reactions",
+    )
+    .await;
     if !space_id.is_empty() {
         crate::federation::outbound::fanout_to_space(state, &space_id, event_type, payload).await?;
     }
@@ -318,12 +312,7 @@ pub async fn forward_reaction(
         .as_ref()
         .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
     let body = serde_json::to_vec(&json!({
-        "actor": {
-            "id": mapping::qualify(&actor.id, &fed.domain),
-            "username": actor.username,
-            "display_name": actor.display_name,
-            "avatar": actor.avatar,
-        },
+        "actor": actor_ref(&fed.domain, actor),
         "channel_id": mapping::local_part(channel_id),
         "message_id": mapping::local_part(message_id),
         "emoji": emoji,
@@ -354,26 +343,12 @@ pub async fn handle_leave(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        LEAVE_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let req: LeaveRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid leave request"),
-    };
-    match serve_leave(&state, &fed.domain, &peer.domain, &req).await {
+    let (our_domain, peer, req): (_, _, LeaveRequest) =
+        match crate::federation::verify::prepare(&state, &headers, LEAVE_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    match serve_leave(&state, &our_domain, &peer.domain, &req).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
         Err(e) => e.into_response(),
     }
@@ -398,15 +373,14 @@ async fn serve_leave(
     crate::db::members::remove_member(&state.db, &req.space_id, &req.actor.id).await?;
 
     // Broadcast locally and fan the departure out to remaining interested peers.
-    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
-        let event = json!({ "op": 0, "type": "member.leave", "data": { "space_id": req.space_id, "user_id": req.actor.id } });
-        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: Some(req.space_id.clone()),
-            target_user_ids: None,
-            event,
-            intent: "members".to_string(),
-        });
-    }
+    crate::federation::broadcast_space(
+        state,
+        Some(req.space_id.clone()),
+        "member.leave",
+        json!({ "space_id": req.space_id, "user_id": req.actor.id }),
+        "members",
+    )
+    .await;
     let payload = crate::federation::outbound::member_leave_payload(our_domain, &req.actor.id);
     crate::federation::outbound::fanout_to_targets(
         state,
@@ -431,12 +405,7 @@ pub async fn forward_leave(
         .as_ref()
         .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
     let body = serde_json::to_vec(&json!({
-        "actor": {
-            "id": mapping::qualify(&actor.id, &fed.domain),
-            "username": actor.username,
-            "display_name": actor.display_name,
-            "avatar": actor.avatar,
-        },
+        "actor": actor_ref(&fed.domain, actor),
         "space_id": mapping::local_part(space_id),
     }))
     .map_err(|e| AppError::Internal(format!("serialize leave: {e}")))?;
@@ -465,26 +434,12 @@ pub async fn handle_edit(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        EDIT_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let req: EditRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid edit request"),
-    };
-    match serve_edit(&state, &fed.domain, &peer.domain, &req).await {
+    let (our_domain, peer, req): (_, _, EditRequest) =
+        match crate::federation::verify::prepare(&state, &headers, EDIT_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    match serve_edit(&state, &our_domain, &peer.domain, &req).await {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
         Err(e) => e.into_response(),
     }
@@ -502,23 +457,8 @@ async fn serve_edit(
     }
     let existing = crate::db::messages::get_message_row(&state.db, &req.message_id).await?;
     // Authoritative author-or-manage check from our DB.
-    if existing.author_id != req.actor.id {
-        let auth = remote_actor_auth(&req.actor.id);
-        crate::middleware::permissions::require_channel_permission(
-            &state.db,
-            &existing.channel_id,
-            &auth,
-            "manage_messages",
-        )
+    require_author_or_manage(state, &existing.channel_id, &existing.author_id, &req.actor.id)
         .await?;
-    } else {
-        crate::middleware::permissions::require_channel_membership(
-            &state.db,
-            &existing.channel_id,
-            &req.actor.id,
-        )
-        .await?;
-    }
 
     let msg = crate::db::messages::update_message(
         &state.db,
@@ -533,15 +473,14 @@ async fn serve_edit(
     .await?;
     let payload = crate::routes::messages::message_row_to_json_with_attachments(&msg, &[], None);
 
-    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
-        let event = json!({ "op": 0, "type": "message.update", "data": payload });
-        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: existing.space_id.clone(),
-            target_user_ids: None,
-            event,
-            intent: "messages".to_string(),
-        });
-    }
+    crate::federation::broadcast_space(
+        state,
+        existing.space_id.clone(),
+        "message.update",
+        payload.clone(),
+        "messages",
+    )
+    .await;
     if let Some(sid) = &existing.space_id {
         let fanout = json!({
             "id": mapping::qualify(&req.message_id, our_domain),
@@ -595,26 +534,12 @@ pub async fn handle_delete(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        DELETE_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let req: DeleteRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid delete request"),
-    };
-    match serve_delete(&state, &fed.domain, &peer.domain, &req).await {
+    let (our_domain, peer, req): (_, _, DeleteRequest) =
+        match crate::federation::verify::prepare(&state, &headers, DELETE_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    match serve_delete(&state, &our_domain, &peer.domain, &req).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
         Err(e) => e.into_response(),
     }
@@ -628,23 +553,8 @@ async fn serve_delete(
 ) -> Result<(), AppError> {
     authority::require_homed_on(&req.actor.id, peer, "actor")?;
     let existing = crate::db::messages::get_message_row(&state.db, &req.message_id).await?;
-    if existing.author_id != req.actor.id {
-        let auth = remote_actor_auth(&req.actor.id);
-        crate::middleware::permissions::require_channel_permission(
-            &state.db,
-            &existing.channel_id,
-            &auth,
-            "manage_messages",
-        )
+    require_author_or_manage(state, &existing.channel_id, &existing.author_id, &req.actor.id)
         .await?;
-    } else {
-        crate::middleware::permissions::require_channel_membership(
-            &state.db,
-            &existing.channel_id,
-            &req.actor.id,
-        )
-        .await?;
-    }
 
     crate::db::messages::delete_message(&state.db, &req.message_id).await?;
 
@@ -652,15 +562,14 @@ async fn serve_delete(
         "id": mapping::qualify(&req.message_id, our_domain),
         "channel_id": mapping::qualify(&existing.channel_id, our_domain),
     });
-    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
-        let event = json!({ "op": 0, "type": "message.delete", "data": data.clone() });
-        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: existing.space_id.clone(),
-            target_user_ids: None,
-            event,
-            intent: "messages".to_string(),
-        });
-    }
+    crate::federation::broadcast_space(
+        state,
+        existing.space_id.clone(),
+        "message.delete",
+        data.clone(),
+        "messages",
+    )
+    .await;
     if let Some(sid) = &existing.space_id {
         crate::federation::outbound::fanout_to_space(state, sid, "m.message.delete", data).await?;
     }
@@ -705,26 +614,12 @@ pub async fn handle_typing(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        TYPING_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let req: TypingRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid typing request"),
-    };
-    match serve_typing(&state, &fed.domain, &peer.domain, &req).await {
+    let (our_domain, peer, req): (_, _, TypingRequest) =
+        match crate::federation::verify::prepare(&state, &headers, TYPING_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
+    match serve_typing(&state, &our_domain, &peer.domain, &req).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
         Err(e) => e.into_response(),
     }
@@ -747,19 +642,14 @@ async fn serve_typing(
         "channel_id": mapping::qualify(&req.channel_id, our_domain),
         "user_id": req.actor.id,
     });
-    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
-        let event = json!({ "op": 0, "type": "typing.start", "data": data.clone() });
-        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: if space_id.is_empty() {
-                None
-            } else {
-                Some(space_id.clone())
-            },
-            target_user_ids: None,
-            event,
-            intent: "message_typing".to_string(),
-        });
-    }
+    crate::federation::broadcast_space(
+        state,
+        space_opt(&space_id),
+        "typing.start",
+        data.clone(),
+        "message_typing",
+    )
+    .await;
     if !space_id.is_empty() {
         crate::federation::outbound::fanout_to_space(state, &space_id, "m.typing", data).await?;
     }
@@ -818,12 +708,7 @@ pub async fn forward_message(
         .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
 
     let body = serde_json::to_vec(&json!({
-        "actor": {
-            "id": mapping::qualify(&author.id, &fed.domain),
-            "username": author.username,
-            "display_name": author.display_name,
-            "avatar": author.avatar,
-        },
+        "actor": actor_ref(&fed.domain, author),
         "channel_id": mapping::local_part(channel_id),
         "content": content,
         "reply_to": reply_to.map(mapping::local_part),
@@ -855,12 +740,7 @@ pub async fn initiate_join(
         .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
 
     let body = serde_json::to_vec(&json!({
-        "user": {
-            "id": mapping::qualify(&user.id, &fed.domain),
-            "username": user.username,
-            "display_name": user.display_name,
-            "avatar": user.avatar,
-        },
+        "user": actor_ref(&fed.domain, user),
         "space_id": home_space_id,
     }))
     .map_err(|e| AppError::Internal(format!("serialize join: {e}")))?;

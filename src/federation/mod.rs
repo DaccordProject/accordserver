@@ -24,11 +24,67 @@ pub mod wellknown;
 use std::path::Path;
 use std::sync::Arc;
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use dashmap::DashMap;
 use tokio::time::Instant;
 
 use crate::config::FederationConfig;
-use crate::state::RateLimitBucket;
+use crate::state::{AppState, RateLimitBucket};
+
+/// Shared JSON error response (`{ "error": msg }`) for the signed S2S endpoints.
+pub fn err_response(status: StatusCode, msg: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+/// Re-broadcast a federated event to local gateway sessions for `space_id`
+/// (or, when `None`, to all sessions filtered by `intent`). Delivery-only: it
+/// never enqueues outbound fanout (S7).
+pub(crate) async fn broadcast_space(
+    state: &AppState,
+    space_id: Option<String>,
+    event_type: &str,
+    data: serde_json::Value,
+    intent: &str,
+) {
+    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
+        let event = serde_json::json!({ "op": 0, "type": event_type, "data": data });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id,
+            target_user_ids: None,
+            event,
+            intent: intent.to_string(),
+        });
+    }
+}
+
+/// Mirror a referenced remote user's cached profile.
+///
+/// A server is authoritative for a user's profile only when it *is* that user's
+/// home. The user's home is taken from its own qualified ID (falling back to
+/// `authoritative_domain` for an unqualified id). When the user is homed on
+/// `authoritative_domain` we refresh the profile (`upsert`); otherwise we only
+/// ensure the row exists (`ensure`), so a peer can never spoof or clobber
+/// another server's user (S2).
+pub(crate) async fn mirror_user(
+    state: &AppState,
+    authoritative_domain: &str,
+    id: &str,
+    handle: &str,
+    display_name: Option<&str>,
+    avatar: Option<&str>,
+) -> Result<(), crate::error::AppError> {
+    let domain = mapping::domain_of(id).unwrap_or(authoritative_domain);
+    if domain.eq_ignore_ascii_case(authoritative_domain) {
+        crate::db::users::upsert_remote_user(&state.db, id, domain, handle, display_name, avatar)
+            .await?;
+    } else {
+        crate::db::users::ensure_remote_user(&state.db, id, domain, handle, display_name, avatar)
+            .await?;
+    }
+    Ok(())
+}
 
 /// Per-peer inbound request budget (token bucket): requests per window.
 const PEER_CAPACITY: u32 = 300;

@@ -1052,3 +1052,358 @@ async fn missing_signature_is_unauthorized() {
         .unwrap();
     assert_eq!(status_of(&server, req).await, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn replayed_forward_request_is_rejected() {
+    // The synchronous forward endpoints have no event-id dedup, so a verified
+    // signature may be used only once within its skew window. Resending the
+    // *identical* signed bytes must be rejected as a replay, even though the
+    // first attempt's own outcome is unrelated.
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+
+    let body_value = json!({
+        "actor": { "id": "carol@b.test", "username": "carol" },
+        "channel_id": "no-such-channel",
+    });
+    let body = serde_json::to_vec(&body_value).unwrap();
+    // Sign once, then issue the same Date/Digest/Signature twice.
+    let signed = sign_request(&bob, "b.test", "POST", "/federation/v1/typing", "a.test", &body);
+    let build = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/federation/v1/typing")
+            .header("Date", &signed.date)
+            .header("Digest", &signed.digest)
+            .header("Signature", &signed.signature)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+
+    // First use consumes the signature; its (failing) serve outcome is not 401.
+    let first = status_of(&server, build()).await;
+    assert_ne!(
+        first,
+        StatusCode::UNAUTHORIZED,
+        "first use must pass signature verification"
+    );
+    // Identical resend is a replay.
+    assert_eq!(status_of(&server, build()).await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn home_react_rejects_message_from_a_different_channel() {
+    // serve_react re-derives the target from our own DB: a forwarded reaction
+    // whose message_id belongs to a different channel than the (permission-
+    // scoped) channel_id must be rejected, never silently reattached.
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+
+    // A locally-homed space with two channels; a message lives in channel one.
+    let owner = server.create_user_with_token("owner").await;
+    let space_id = server.create_space(&owner.user.id, "Home").await;
+    let chan_one = server.create_channel(&space_id, "one").await;
+    let chan_two = server.create_channel(&space_id, "two").await;
+    let msg = accordserver::db::messages::create_message(
+        server.pool(),
+        &chan_one,
+        &owner.user.id,
+        Some(&space_id),
+        &accordserver::models::message::CreateMessage {
+            content: "hi".to_string(),
+            tts: None,
+            embeds: None,
+            reply_to: None,
+            thread_id: None,
+            title: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // A remote member (homed on the signing peer) of the space.
+    accordserver::db::users::upsert_remote_user(
+        server.pool(),
+        "carol@b.test",
+        "b.test",
+        "carol@b.test",
+        Some("Carol"),
+        None,
+    )
+    .await
+    .unwrap();
+    server.add_member(&space_id, "carol@b.test").await;
+
+    // Reaction scoped to channel two but targeting the channel-one message.
+    // (`remove` needs only membership, isolating the target-mismatch check from
+    // add_reactions permission defaults.)
+    let body = json!({
+        "actor": { "id": "carol@b.test", "username": "carol" },
+        "channel_id": chan_two,
+        "message_id": msg.id,
+        "emoji": "👍",
+        "remove": true,
+    });
+    let req = signed_request(&bob, "b.test", "a.test", "/federation/v1/react", &body);
+    assert_eq!(status_of(&server, req).await, StatusCode::NOT_FOUND);
+
+    // No reaction was recorded against the real message.
+    let count: i64 = sqlx::query_scalar(&accordserver::db::q(
+        "SELECT COUNT(*) FROM reactions WHERE message_id = ?",
+    ))
+    .bind(&msg.id)
+    .fetch_one(server.pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Emoji federation
+// ---------------------------------------------------------------------------
+
+/// A trusted peer's `m.emoji.create` is mirrored into a space we replicate, with
+/// the right origin and image URL, and broadcast to local gateway sessions.
+#[tokio::test]
+async fn inbound_emoji_create_is_mirrored_and_broadcast() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, _channel_id) = server.mirror_remote_space("b.test").await;
+
+    let mut rx = server
+        .state
+        .gateway_tx
+        .read()
+        .await
+        .as_ref()
+        .unwrap()
+        .subscribe();
+
+    let env = json!({
+        "event_id": "evt-emoji-1",
+        "origin": "b.test",
+        "space_id": space_id,
+        "type": "m.emoji.create",
+        "payload": {
+            "id": "emo1@b.test",
+            "space_id": space_id,
+            "name": "partyblob",
+            "animated": true,
+            "image_url": "https://b.test/cdn/emojis/space1/emo1.gif",
+            "role_ids": [],
+        }
+    });
+    let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+
+    let emoji = accordserver::db::emojis::get_emoji(server.pool(), "emo1@b.test")
+        .await
+        .unwrap();
+    assert_eq!(emoji.name, "partyblob");
+    assert!(emoji.animated);
+    assert_eq!(
+        emoji.image_url.as_deref(),
+        Some("https://b.test/cdn/emojis/space1/emo1.gif")
+    );
+    assert_eq!(
+        accordserver::db::emojis::emoji_origin(server.pool(), "emo1@b.test")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("b.test")
+    );
+
+    let broadcast = rx.try_recv().expect("expected a gateway broadcast");
+    assert_eq!(broadcast.event["type"], "emoji.create");
+    assert_eq!(broadcast.event["data"]["emoji"]["id"], "emo1@b.test");
+}
+
+/// An `m.emoji.delete` from the home peer removes the mirrored emoji.
+#[tokio::test]
+async fn inbound_emoji_delete_removes_mirror() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, _channel_id) = server.mirror_remote_space("b.test").await;
+
+    accordserver::db::emojis::upsert_remote_emoji(
+        server.pool(),
+        "emo1@b.test",
+        "b.test",
+        &space_id,
+        "blob",
+        false,
+        Some("https://b.test/cdn/emojis/space1/emo1.png"),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let env = json!({
+        "event_id": "evt-emoji-del",
+        "origin": "b.test",
+        "space_id": space_id,
+        "type": "m.emoji.delete",
+        "payload": { "id": "emo1@b.test", "space_id": space_id }
+    });
+    let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+
+    assert!(
+        accordserver::db::emojis::get_emoji(server.pool(), "emo1@b.test")
+            .await
+            .is_err(),
+        "emoji should have been deleted"
+    );
+}
+
+/// A bare-local emoji id in an inbound emoji event is rejected (S2): federation
+/// may never create or overwrite a local emoji row.
+#[tokio::test]
+async fn inbound_emoji_with_bare_local_id_is_rejected() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, _channel_id) = server.mirror_remote_space("b.test").await;
+
+    let env = json!({
+        "event_id": "evt-emoji-bad",
+        "origin": "b.test",
+        "space_id": space_id,
+        "type": "m.emoji.create",
+        "payload": {
+            "id": "999",
+            "space_id": space_id,
+            "name": "evil",
+            "image_url": "https://b.test/cdn/emojis/space1/x.png",
+            "role_ids": [],
+        }
+    });
+    let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
+    assert_eq!(status_of(&server, req).await, StatusCode::FORBIDDEN);
+}
+
+/// Creating an emoji in a locally-homed space fans it out to interested peers
+/// with qualified IDs and an absolute image URL.
+#[tokio::test]
+async fn local_emoji_create_fans_out_to_interested_peers() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+
+    let owner = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&owner.user.id, "Local Space").await;
+
+    accordserver::db::users::upsert_remote_user(
+        server.pool(),
+        "carol@b.test",
+        "b.test",
+        "carol@b.test",
+        Some("Carol"),
+        None,
+    )
+    .await
+    .unwrap();
+    accordserver::db::federation::add_member_with_origin(
+        server.pool(),
+        &space_id,
+        "carol@b.test",
+        Some("b.test"),
+    )
+    .await
+    .unwrap();
+
+    let emoji = accordserver::db::emojis::create_emoji(
+        server.pool(),
+        &space_id,
+        &owner.user.id,
+        &accordserver::models::emoji::CreateEmoji {
+            name: "blobwave".to_string(),
+            image: String::new(),
+        },
+        Some("/cdn/emojis/local/emo.png"),
+        Some("image/png"),
+        Some(10),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let payload = accordserver::federation::outbound::emoji_payload(
+        "a.test",
+        "https://a.test",
+        &space_id,
+        &emoji,
+    );
+    accordserver::federation::outbound::fanout_to_space(
+        &server.state,
+        &space_id,
+        "m.emoji.create",
+        payload,
+    )
+    .await
+    .unwrap();
+
+    let queued = accordserver::db::federation::outbox_claim_due(server.pool(), 10)
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1, "expected one queued delivery");
+    assert_eq!(queued[0].target_domain, "b.test");
+    let env: Value = serde_json::from_str(&queued[0].payload).unwrap();
+    assert_eq!(env["type"], "m.emoji.create");
+    let emoji_id = emoji.id.unwrap();
+    assert_eq!(env["payload"]["id"], format!("{emoji_id}@a.test"));
+    assert_eq!(
+        env["payload"]["image_url"],
+        "https://a.test/cdn/emojis/local/emo.png"
+    );
+}
+
+/// A join snapshot carrying emoji is applied as replica rows.
+#[tokio::test]
+async fn joiner_applies_snapshot_emoji() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let joiner = server.create_user_with_token("alice").await;
+
+    let snapshot = json!({
+        "space": { "id": "sp1@b.test", "name": "Remote", "slug": "remote-b", "owner_id": "owner@b.test" },
+        "channels": [],
+        "roles": [],
+        "members": [ { "id": "owner@b.test", "username": "owner" } ],
+        "messages": [],
+        "emojis": [ {
+            "id": "emo1@b.test", "space_id": "sp1@b.test", "name": "blob",
+            "animated": false, "image_url": "https://b.test/cdn/emojis/sp1/emo1.png", "role_ids": []
+        } ],
+    });
+
+    accordserver::federation::handshake::apply_snapshot(
+        &server.state,
+        "b.test",
+        &joiner.user.id,
+        snapshot,
+    )
+    .await
+    .unwrap();
+
+    let emoji = accordserver::db::emojis::get_emoji(server.pool(), "emo1@b.test")
+        .await
+        .unwrap();
+    assert_eq!(emoji.name, "blob");
+    assert_eq!(
+        accordserver::db::emojis::emoji_origin(server.pool(), "emo1@b.test")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("b.test")
+    );
+}

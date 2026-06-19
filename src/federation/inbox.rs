@@ -10,18 +10,13 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
-use serde_json::json;
 
+use crate::federation::err_response as err;
 use crate::federation::{authority, mapping};
 use crate::state::AppState;
 
 /// Path of this endpoint, also used as the signed `(request-target)`.
 pub const INBOX_PATH: &str = "/federation/v1/inbox";
-
-fn err(status: StatusCode, msg: &str) -> axum::response::Response {
-    (status, Json(json!({ "error": msg }))).into_response()
-}
 
 /// Undo the dedup record for an event whose apply step did not complete, so a
 /// redelivery is treated as new rather than a duplicate.
@@ -38,39 +33,18 @@ pub async fn handle_inbox(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(fed) = state.federation.clone() else {
-        return err(StatusCode::NOT_FOUND, "federation disabled");
-    };
-
-    // --- Verify signature + resolve trusted peer (shared) ---
-    let peer = match crate::federation::verify::verify_signed(
-        &state,
-        &fed.domain,
-        &headers,
-        INBOX_PATH,
-        &body,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-
-    // --- Parse envelope ---
-    let envelope: mapping::FederationEnvelope = match serde_json::from_slice(&body) {
-        Ok(e) => e,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid envelope"),
-    };
+    // --- Verify signature + resolve trusted peer, parse envelope (shared) ---
+    let (_our_domain, peer, envelope): (_, _, mapping::FederationEnvelope) =
+        match crate::federation::verify::prepare(&state, &headers, INBOX_PATH, &body).await {
+            Ok(t) => t,
+            Err(resp) => return resp,
+        };
 
     // --- Authority binding (S1) ---
+    // (The trust gate (S4) is already enforced by verify_signed above.)
     if let Err(e) = authority::check(&peer.domain, &envelope) {
         tracing::warn!("inbox authority check failed from {}: {e}", peer.domain);
         return err(StatusCode::FORBIDDEN, "authority check failed");
-    }
-
-    // --- Trust gate (S4): only trusted peers may exchange content ---
-    if !peer.is_trusted() {
-        return err(StatusCode::FORBIDDEN, "peer not trusted");
     }
 
     // --- Dedup (S3): idempotent at-least-once delivery ---
