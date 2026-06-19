@@ -13,7 +13,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::json;
 
-use crate::federation::{authority, mapping, signatures};
+use crate::federation::{authority, mapping};
 use crate::state::AppState;
 
 /// Path of this endpoint, also used as the signed `(request-target)`.
@@ -32,46 +32,19 @@ pub async fn handle_inbox(
         return err(StatusCode::NOT_FOUND, "federation disabled");
     };
 
-    // --- Signature header ---
-    let Some(sig_header) = headers.get("signature").and_then(|v| v.to_str().ok()) else {
-        return err(StatusCode::UNAUTHORIZED, "missing signature");
-    };
-    let Some(parsed) = signatures::parse_signature_header(sig_header) else {
-        return err(StatusCode::UNAUTHORIZED, "malformed signature header");
-    };
-
-    // --- Known peer? (key needed to verify) ---
-    let peer = match crate::db::federation::get_peer(&state.db, &parsed.key_id).await {
-        Ok(Some(p)) => p,
-        Ok(None) => return err(StatusCode::FORBIDDEN, "unknown peer"),
-        Err(e) => {
-            tracing::error!("inbox peer lookup failed: {e}");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "peer lookup failed");
-        }
-    };
-
-    // --- Verify signature over method/path/host/date/digest ---
-    let date = headers
-        .get("date")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let digest = headers
-        .get("digest")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if let Err(e) = signatures::verify_request(
-        &peer.public_key,
-        "POST",
-        INBOX_PATH,
+    // --- Verify signature + resolve trusted peer (shared) ---
+    let peer = match crate::federation::verify::verify_signed(
+        &state,
         &fed.domain,
-        date,
-        digest,
+        &headers,
+        INBOX_PATH,
         &body,
-        &parsed.signature_b64,
-    ) {
-        tracing::warn!("inbox signature rejected from {}: {:?}", peer.domain, e);
-        return err(StatusCode::UNAUTHORIZED, "signature verification failed");
-    }
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
 
     // --- Parse envelope ---
     let envelope: mapping::FederationEnvelope = match serde_json::from_slice(&body) {

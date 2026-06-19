@@ -244,6 +244,36 @@ pub async fn space_origin(pool: &AnyPool, space_id: &str) -> Result<Option<Strin
     Ok(row.and_then(|r| r.try_get::<String, _>("origin").ok()))
 }
 
+/// Whether a space has opted in to federation (S9). The home server refuses
+/// join handshakes for spaces with this off.
+pub async fn space_federation_enabled(pool: &AnyPool, space_id: &str) -> Result<bool, AppError> {
+    let row = sqlx::query(&crate::db::q(
+        "SELECT federation_enabled FROM spaces WHERE id = ?",
+    ))
+    .bind(space_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row
+        .map(|r| crate::db::get_bool(&r, "federation_enabled"))
+        .unwrap_or(false))
+}
+
+/// Enable/disable federation for a locally-homed space.
+pub async fn set_space_federation_enabled(
+    pool: &AnyPool,
+    space_id: &str,
+    enabled: bool,
+) -> Result<(), AppError> {
+    sqlx::query(&crate::db::q(
+        "UPDATE spaces SET federation_enabled = ? WHERE id = ?",
+    ))
+    .bind(if enabled { 1_i64 } else { 0_i64 })
+    .bind(space_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// The set of peer domains "interested" in a space: the distinct `origin`s of
 /// its members. Used to fan out events for a locally-homed space to exactly the
 /// servers that have a member there.

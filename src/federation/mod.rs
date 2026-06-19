@@ -8,6 +8,7 @@
 
 pub mod apply;
 pub mod authority;
+pub mod handshake;
 pub mod identity;
 pub mod inbox;
 pub mod mapping;
@@ -15,6 +16,7 @@ pub mod outbound;
 pub mod peers;
 pub mod sender;
 pub mod signatures;
+pub mod verify;
 pub mod wellknown;
 
 use std::path::Path;

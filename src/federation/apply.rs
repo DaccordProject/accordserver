@@ -115,7 +115,7 @@ async fn apply_message_create(
 
     // Cache the remote author's profile.
     let handle = match &payload.author.username {
-        Some(name) => format!("{name}@{peer}"),
+        Some(name) => crate::federation::mapping::handle(name, peer),
         None => payload.author.id.clone(),
     };
     crate::db::users::upsert_remote_user(

@@ -22,25 +22,36 @@ fn peer_identity(tag: &str) -> ServerIdentity {
     ServerIdentity::load_or_create(&dir.join(format!("{tag}-key"))).unwrap()
 }
 
-/// Build a signed inbox request. When `signer` differs from the peer whose key
+/// Build a signed POST to `path`. When `signer` differs from the peer whose key
 /// is registered, the signature will fail to verify.
-fn signed_inbox_request(
+fn signed_request(
     signer: &ServerIdentity,
     key_id: &str,
     target_domain: &str,
-    envelope: &Value,
+    path: &str,
+    body_value: &Value,
 ) -> Request<Body> {
-    let body = serde_json::to_vec(envelope).unwrap();
-    let signed = sign_request(signer, key_id, "POST", INBOX, target_domain, &body);
+    let body = serde_json::to_vec(body_value).unwrap();
+    let signed = sign_request(signer, key_id, "POST", path, target_domain, &body);
     Request::builder()
         .method(Method::POST)
-        .uri(INBOX)
+        .uri(path)
         .header("Date", signed.date)
         .header("Digest", signed.digest)
         .header("Signature", signed.signature)
         .header("Content-Type", "application/json")
         .body(Body::from(body))
         .unwrap()
+}
+
+/// Build a signed inbox request.
+fn signed_inbox_request(
+    signer: &ServerIdentity,
+    key_id: &str,
+    target_domain: &str,
+    envelope: &Value,
+) -> Request<Body> {
+    signed_request(signer, key_id, target_domain, INBOX, envelope)
 }
 
 fn ping(event_id: &str, origin: &str) -> Value {
@@ -397,6 +408,130 @@ async fn local_message_without_remote_members_does_not_fan_out() {
         .await
         .unwrap();
     assert!(queued.is_empty(), "no remote members -> no fanout");
+}
+
+const JOIN: &str = "/federation/v1/join";
+
+#[tokio::test]
+async fn home_serves_join_and_records_remote_member() {
+    let mut home = TestServer::new().await;
+    home.enable_federation("b.test");
+    let alice_srv = peer_identity("a"); // a.test is the requesting server
+    register_peer(&home, "a.test", &alice_srv, "trusted").await;
+
+    // A local, federation-enabled space on the home server.
+    let owner = home.create_user_with_token("owner").await;
+    let space_id = home.create_space(&owner.user.id, "Federated Space").await;
+    home.create_channel(&space_id, "general").await;
+    accordserver::db::federation::set_space_federation_enabled(home.pool(), &space_id, true)
+        .await
+        .unwrap();
+
+    let join = json!({
+        "user": { "id": "alice@a.test", "username": "alice", "display_name": "Alice" },
+        "space_id": space_id,
+    });
+    let req = signed_request(&alice_srv, "a.test", "b.test", JOIN, &join);
+    let resp = home.router().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Snapshot is qualified to the home domain.
+    let snap = common::parse_body(resp).await;
+    assert_eq!(snap["space"]["id"], format!("{space_id}@b.test"));
+    assert!(!snap["channels"].as_array().unwrap().is_empty());
+
+    // The remote user is now a member -> a.test is an interested server.
+    let interested = accordserver::db::federation::interested_servers(home.pool(), &space_id)
+        .await
+        .unwrap();
+    assert_eq!(interested, vec!["a.test".to_string()]);
+}
+
+#[tokio::test]
+async fn home_refuses_join_for_non_federated_space() {
+    let mut home = TestServer::new().await;
+    home.enable_federation("b.test");
+    let alice_srv = peer_identity("a");
+    register_peer(&home, "a.test", &alice_srv, "trusted").await;
+
+    let owner = home.create_user_with_token("owner").await;
+    let space_id = home.create_space(&owner.user.id, "Private Space").await;
+    // federation_enabled left at default (off).
+
+    let join = json!({
+        "user": { "id": "alice@a.test", "username": "alice" },
+        "space_id": space_id,
+    });
+    let req = signed_request(&alice_srv, "a.test", "b.test", JOIN, &join);
+    assert_eq!(status_of(&home, req).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn joiner_applies_snapshot_as_replica() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let joiner = server.create_user_with_token("alice").await;
+
+    let snapshot = json!({
+        "space": { "id": "sp1@b.test", "name": "Remote", "slug": "remote-b", "owner_id": "owner@b.test" },
+        "channels": [ { "id": "ch1@b.test", "space_id": "sp1@b.test", "name": "general", "type": "text", "position": 0 } ],
+        "roles": [ { "id": "r1@b.test", "space_id": "sp1@b.test", "name": "@everyone", "position": 0, "permissions": "[]" } ],
+        "members": [ { "id": "owner@b.test", "username": "owner", "display_name": "Owner" } ],
+        "messages": [ {
+            "id": "m1@b.test", "channel_id": "ch1@b.test", "space_id": "sp1@b.test",
+            "author": { "id": "owner@b.test", "username": "owner" },
+            "content": "welcome", "created_at": "2026-01-01 00:00:00"
+        } ],
+    });
+
+    let space_id = accordserver::federation::handshake::apply_snapshot(
+        &server.state,
+        "b.test",
+        &joiner.user.id,
+        snapshot,
+    )
+    .await
+    .unwrap();
+    assert_eq!(space_id, "sp1@b.test");
+
+    // Replica rows exist.
+    accordserver::db::spaces::get_space_row(server.pool(), "sp1@b.test")
+        .await
+        .unwrap();
+    accordserver::db::channels::get_channel_row(server.pool(), "ch1@b.test")
+        .await
+        .unwrap();
+    let msg = accordserver::db::messages::get_message_row(server.pool(), "m1@b.test")
+        .await
+        .unwrap();
+    assert_eq!(msg.origin.as_deref(), Some("b.test"));
+
+    // The local joiner is a member of the mirrored space.
+    let spaces = accordserver::db::spaces::list_space_ids_for_user(server.pool(), &joiner.user.id)
+        .await
+        .unwrap();
+    assert!(spaces.contains(&"sp1@b.test".to_string()));
+}
+
+#[tokio::test]
+async fn joiner_rejects_snapshot_targeting_local_space() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let joiner = server.create_user_with_token("alice").await;
+
+    // space.id is a bare/local id — must be rejected (S2).
+    let snapshot = json!({
+        "space": { "id": "999", "name": "Evil", "slug": "evil", "owner_id": "owner@b.test" },
+        "channels": [], "roles": [], "members": [], "messages": [],
+    });
+    let res = accordserver::federation::handshake::apply_snapshot(
+        &server.state,
+        "b.test",
+        &joiner.user.id,
+        snapshot,
+    )
+    .await;
+    assert!(res.is_err());
 }
 
 #[tokio::test]

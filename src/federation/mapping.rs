@@ -31,6 +31,16 @@ pub fn domain_of(id: &str) -> Option<&str> {
     id.split_once('@').map(|(_, domain)| domain)
 }
 
+/// The stored `username` for a remote user: the fully-qualified handle
+/// (`alice@b.example`). Idempotent if `username` is already qualified.
+pub fn handle(username: &str, domain: &str) -> String {
+    if username.contains('@') {
+        username.to_string()
+    } else {
+        format!("{username}@{domain}")
+    }
+}
+
 /// True when an ID belongs to `our_domain` (bare IDs are always local).
 pub fn is_local(id: &str, our_domain: &str) -> bool {
     match domain_of(id) {

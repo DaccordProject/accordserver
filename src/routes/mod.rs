@@ -74,6 +74,10 @@ pub fn router(state: AppState) -> Router {
             crate::federation::inbox::INBOX_PATH,
             post(crate::federation::inbox::handle_inbox),
         )
+        .route(
+            crate::federation::handshake::JOIN_PATH,
+            post(crate::federation::handshake::handle_join),
+        )
         .nest_service("/cdn", cdn_service)
         .nest("/s", seo)
         .nest("/api/v1", api);
