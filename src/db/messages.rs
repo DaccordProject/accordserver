@@ -382,6 +382,67 @@ pub async fn delete_message(pool: &AnyPool, message_id: &str) -> Result<(), AppE
     Ok(())
 }
 
+/// Apply an authoritative edit to a mirrored (replica) message. `content` and
+/// `edited_at` are taken verbatim from the home server when present.
+pub async fn edit_remote_message(
+    pool: &AnyPool,
+    message_id: &str,
+    content: Option<&str>,
+    edited_at: Option<&str>,
+) -> Result<(), AppError> {
+    if let Some(content) = content {
+        sqlx::query(&super::q("UPDATE messages SET content = ? WHERE id = ?"))
+            .bind(content)
+            .bind(message_id)
+            .execute(pool)
+            .await?;
+    }
+    if let Some(edited_at) = edited_at {
+        sqlx::query(&super::q("UPDATE messages SET edited_at = ? WHERE id = ?"))
+            .bind(edited_at)
+            .bind(message_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Insert a reaction (idempotent). Used by the federation applier and the home
+/// server when a remote user reacts.
+pub async fn add_reaction(
+    pool: &AnyPool,
+    message_id: &str,
+    user_id: &str,
+    emoji: &str,
+) -> Result<(), AppError> {
+    sqlx::query(&super::q(
+        "INSERT INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+    ))
+    .bind(message_id)
+    .bind(user_id)
+    .bind(emoji)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn remove_reaction(
+    pool: &AnyPool,
+    message_id: &str,
+    user_id: &str,
+    emoji: &str,
+) -> Result<(), AppError> {
+    sqlx::query(&super::q(
+        "DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?",
+    ))
+    .bind(message_id)
+    .bind(user_id)
+    .bind(emoji)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn bulk_delete_messages(
     pool: &AnyPool,
     channel_id: &str,

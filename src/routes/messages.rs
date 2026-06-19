@@ -491,11 +491,29 @@ pub async fn update_message(
             "data": json
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: channel.space_id,
+            space_id: channel.space_id.clone(),
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
         });
+    }
+
+    // Fan the edit out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        if let Some(ref sid) = channel.space_id {
+            let payload = serde_json::json!({
+                "id": crate::federation::mapping::qualify(&message_id, &fed.domain),
+                "content": msg.content,
+                "edited_at": msg.edited_at,
+            });
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                sid,
+                "m.message.update",
+                payload,
+            )
+            .await;
+        }
     }
 
     Ok(Json(serde_json::json!({ "data": json })))
@@ -541,6 +559,23 @@ pub async fn delete_message(
             event,
             intent: "messages".to_string(),
         });
+    }
+
+    // Fan the deletion out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        if let Some(ref sid) = channel.space_id {
+            let payload = serde_json::json!({
+                "id": crate::federation::mapping::qualify(&message_id, &fed.domain),
+                "channel_id": crate::federation::mapping::qualify(&channel_id, &fed.domain),
+            });
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                sid,
+                "m.message.delete",
+                payload,
+            )
+            .await;
+        }
     }
 
     Ok(Json(serde_json::json!({ "data": null })))

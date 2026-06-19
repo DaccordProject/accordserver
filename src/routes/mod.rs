@@ -82,6 +82,10 @@ pub fn router(state: AppState) -> Router {
             crate::federation::forward::SEND_PATH,
             post(crate::federation::forward::handle_send),
         )
+        .route(
+            crate::federation::forward::REACT_PATH,
+            post(crate::federation::forward::handle_react),
+        )
         .nest_service("/cdn", cdn_service)
         .nest("/s", seo)
         .nest("/api/v1", api);

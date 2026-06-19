@@ -35,7 +35,42 @@ pub async fn apply_event(
             apply_message_create(state, peer, env).await?;
             Ok(Applied::Ok)
         }
+        "m.message.update" => {
+            apply_message_update(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.message.delete" => {
+            apply_message_delete(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.reaction.add" => {
+            apply_reaction(state, peer, env, true).await?;
+            Ok(Applied::Ok)
+        }
+        "m.reaction.remove" => {
+            apply_reaction(state, peer, env, false).await?;
+            Ok(Applied::Ok)
+        }
         _ => Ok(Applied::Unsupported),
+    }
+}
+
+/// Re-broadcast a relayed event to local gateway sessions for `space_id`.
+async fn rebroadcast(
+    state: &AppState,
+    space_id: Option<String>,
+    event_type: &str,
+    data: serde_json::Value,
+    intent: &str,
+) {
+    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
+        let event = serde_json::json!({ "op": 0, "type": event_type, "data": data });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id,
+            target_user_ids: None,
+            event,
+            intent: intent.to_string(),
+        });
     }
 }
 
@@ -170,5 +205,174 @@ async fn apply_message_create(
         });
     }
 
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteMessageEdit {
+    id: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    edited_at: Option<String>,
+}
+
+async fn apply_message_update(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let payload: RemoteMessageEdit = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid update payload: {e}")))?;
+    authority::require_homed_on(&payload.id, peer, "message")?;
+
+    if let Some(content) = &payload.content {
+        if content.chars().count() > MAX_CONTENT_CHARS {
+            return Err(AppError::BadRequest(
+                "remote message content too long".to_string(),
+            ));
+        }
+    }
+    // Only touch a replica row homed on this peer (S2).
+    let Ok(existing) = crate::db::messages::get_message_row(&state.db, &payload.id).await else {
+        return Ok(());
+    };
+    if existing.origin.as_deref() != Some(peer) {
+        return Ok(());
+    }
+    crate::db::messages::edit_remote_message(
+        &state.db,
+        &payload.id,
+        payload.content.as_deref(),
+        payload.edited_at.as_deref(),
+    )
+    .await?;
+
+    if let Ok(row) = crate::db::messages::get_message_row(&state.db, &payload.id).await {
+        let json = crate::routes::messages::message_row_to_json_with_attachments(&row, &[], None);
+        rebroadcast(
+            state,
+            row.space_id.clone(),
+            "message.update",
+            json,
+            "messages",
+        )
+        .await;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteMessageDelete {
+    id: String,
+    #[serde(default)]
+    channel_id: Option<String>,
+}
+
+async fn apply_message_delete(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let payload: RemoteMessageDelete = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid delete payload: {e}")))?;
+    authority::require_homed_on(&payload.id, peer, "message")?;
+
+    let Ok(existing) = crate::db::messages::get_message_row(&state.db, &payload.id).await else {
+        return Ok(());
+    };
+    if existing.origin.as_deref() != Some(peer) {
+        return Ok(());
+    }
+    let channel_id = payload
+        .channel_id
+        .clone()
+        .unwrap_or(existing.channel_id.clone());
+    crate::db::messages::delete_message(&state.db, &payload.id).await?;
+
+    rebroadcast(
+        state,
+        existing.space_id.clone(),
+        "message.delete",
+        serde_json::json!({ "id": payload.id, "channel_id": channel_id }),
+        "messages",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteReaction {
+    channel_id: String,
+    message_id: String,
+    user_id: String,
+    emoji: String,
+}
+
+async fn apply_reaction(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+    add: bool,
+) -> Result<(), AppError> {
+    let payload: RemoteReaction = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid reaction payload: {e}")))?;
+    // The message/channel belong to the peer's space; the reactor may be remote.
+    authority::require_homed_on(&payload.message_id, peer, "message")?;
+    authority::require_homed_on(&payload.channel_id, peer, "channel")?;
+
+    // Must mirror the message; otherwise ignore.
+    let Ok(msg) = crate::db::messages::get_message_row(&state.db, &payload.message_id).await else {
+        return Ok(());
+    };
+
+    // Ensure the reactor exists locally (FK), under its own home domain.
+    let reactor_domain = crate::federation::mapping::domain_of(&payload.user_id).unwrap_or(peer);
+    crate::db::users::upsert_remote_user(
+        &state.db,
+        &payload.user_id,
+        reactor_domain,
+        &payload.user_id,
+        None,
+        None,
+    )
+    .await?;
+
+    if add {
+        crate::db::messages::add_reaction(
+            &state.db,
+            &payload.message_id,
+            &payload.user_id,
+            &payload.emoji,
+        )
+        .await?;
+    } else {
+        crate::db::messages::remove_reaction(
+            &state.db,
+            &payload.message_id,
+            &payload.user_id,
+            &payload.emoji,
+        )
+        .await?;
+    }
+
+    let event_type = if add {
+        "reaction.add"
+    } else {
+        "reaction.remove"
+    };
+    rebroadcast(
+        state,
+        msg.space_id.clone(),
+        event_type,
+        serde_json::json!({
+            "channel_id": payload.channel_id,
+            "message_id": payload.message_id,
+            "user_id": payload.user_id,
+            "emoji": payload.emoji,
+        }),
+        "message_reactions",
+    )
+    .await;
     Ok(())
 }

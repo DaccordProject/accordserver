@@ -24,6 +24,8 @@ use crate::state::AppState;
 
 /// Path of the message-forward endpoint.
 pub const SEND_PATH: &str = "/federation/v1/send";
+/// Path of the reaction-forward endpoint.
+pub const REACT_PATH: &str = "/federation/v1/react";
 
 #[derive(Debug, Deserialize)]
 pub struct SendRequest {
@@ -160,6 +162,167 @@ async fn serve_send(
     crate::federation::outbound::fanout_message_create(state, &msg).await?;
 
     Ok(payload)
+}
+
+// --- Reactions ---
+
+#[derive(Debug, Deserialize)]
+pub struct ReactRequest {
+    pub actor: RemoteUserRef,
+    pub channel_id: String,
+    pub message_id: String,
+    pub emoji: String,
+    #[serde(default)]
+    pub remove: bool,
+}
+
+pub async fn handle_react(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let Some(fed) = state.federation.clone() else {
+        return err(StatusCode::NOT_FOUND, "federation disabled");
+    };
+    let peer = match crate::federation::verify::verify_signed(
+        &state,
+        &fed.domain,
+        &headers,
+        REACT_PATH,
+        &body,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let req: ReactRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid react request"),
+    };
+    match serve_react(&state, &fed.domain, &peer.domain, &req).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn serve_react(
+    state: &AppState,
+    our_domain: &str,
+    peer: &str,
+    req: &ReactRequest,
+) -> Result<(), AppError> {
+    authority::require_homed_on(&req.actor.id, peer, "actor")?;
+    crate::db::users::upsert_remote_user(
+        &state.db,
+        &req.actor.id,
+        peer,
+        &mapping::handle(&req.actor.username, peer),
+        req.actor.display_name.as_deref(),
+        req.actor.avatar.as_deref(),
+    )
+    .await?;
+
+    let auth = remote_actor_auth(&req.actor.id);
+    // Authoritative permission check from our own DB.
+    let space_id = if req.remove {
+        crate::middleware::permissions::require_channel_membership(
+            &state.db,
+            &req.channel_id,
+            &req.actor.id,
+        )
+        .await?
+    } else {
+        crate::middleware::permissions::require_channel_permission(
+            &state.db,
+            &req.channel_id,
+            &auth,
+            "add_reactions",
+        )
+        .await?
+    };
+
+    if req.remove {
+        crate::db::messages::remove_reaction(&state.db, &req.message_id, &req.actor.id, &req.emoji)
+            .await?;
+    } else {
+        crate::db::messages::add_reaction(&state.db, &req.message_id, &req.actor.id, &req.emoji)
+            .await?;
+    }
+
+    let payload = crate::federation::outbound::reaction_payload(
+        our_domain,
+        &req.channel_id,
+        &req.message_id,
+        &req.actor.id,
+        &req.emoji,
+    );
+    let event_type = if req.remove {
+        "m.reaction.remove"
+    } else {
+        "m.reaction.add"
+    };
+    let local_type = if req.remove {
+        "reaction.remove"
+    } else {
+        "reaction.add"
+    };
+
+    // Broadcast to our local sessions and fan out to interested peers.
+    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
+        let event = json!({ "op": 0, "type": local_type, "data": payload });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id: if space_id.is_empty() {
+                None
+            } else {
+                Some(space_id.clone())
+            },
+            target_user_ids: None,
+            event,
+            intent: "message_reactions".to_string(),
+        });
+    }
+    if !space_id.is_empty() {
+        crate::federation::outbound::fanout_to_space(state, &space_id, event_type, payload).await?;
+    }
+    Ok(())
+}
+
+/// Forward a local user's reaction to the home server of a remote-homed space.
+pub async fn forward_reaction(
+    state: &AppState,
+    home_domain: &str,
+    channel_id: &str,
+    message_id: &str,
+    actor: &crate::models::user::User,
+    emoji: &str,
+    remove: bool,
+) -> Result<(), AppError> {
+    let fed = state
+        .federation
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
+    let body = serde_json::to_vec(&json!({
+        "actor": {
+            "id": mapping::qualify(&actor.id, &fed.domain),
+            "username": actor.username,
+            "display_name": actor.display_name,
+            "avatar": actor.avatar,
+        },
+        "channel_id": mapping::local_part(channel_id),
+        "message_id": mapping::local_part(message_id),
+        "emoji": emoji,
+        "remove": remove,
+    }))
+    .map_err(|e| AppError::Internal(format!("serialize react: {e}")))?;
+
+    let (status, _bytes) = sender::request_signed(state, home_domain, REACT_PATH, &body).await?;
+    if !status.is_success() {
+        return Err(AppError::BadRequest(format!(
+            "home server rejected reaction ({status})"
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -519,7 +519,98 @@ async fn two_server_message_round_trip() {
     assert_eq!(on_a.content, "hello from alice");
     assert_eq!(on_a.origin.as_deref(), Some("b.test"));
 
+    // --- Reaction round-trip ---
+    // alice reacts to her message in the remote-homed space -> forwarded to B.
+    accordserver::federation::forward::forward_reaction(
+        &a.state,
+        "b.test",
+        &mirrored_chan,
+        &on_a.id,
+        &alice.user,
+        "👍",
+        false,
+    )
+    .await
+    .unwrap();
+    let reactor = format!("{}@a.test", alice.user.id);
+    let on_b_react: i64 = sqlx::query_scalar(&accordserver::db::q(
+        "SELECT COUNT(*) FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?",
+    ))
+    .bind(msg_bare)
+    .bind(&reactor)
+    .bind("👍")
+    .fetch_one(b.pool())
+    .await
+    .unwrap();
+    assert_eq!(on_b_react, 1);
+
+    // B fans the reaction back to A.
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(&b.state).await,
+        1
+    );
+    let on_a_react: i64 = sqlx::query_scalar(&accordserver::db::q(
+        "SELECT COUNT(*) FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?",
+    ))
+    .bind(&msg_qualified)
+    .bind(&reactor)
+    .bind("👍")
+    .fetch_one(a.pool())
+    .await
+    .unwrap();
+    assert_eq!(on_a_react, 1);
+
     std::env::remove_var("ACCORD_FEDERATION_ALLOW_INSECURE");
+}
+
+#[tokio::test]
+async fn inbound_message_update_and_delete_applied() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, channel_id) = server.mirror_remote_space("b.test").await;
+
+    // Seed a replica message to edit/delete.
+    let env = message_event(
+        "evt-msg-1",
+        "b.test",
+        &space_id,
+        &channel_id,
+        "msg1@b.test",
+        "bob@b.test",
+        "bob",
+        "original",
+    );
+    let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+
+    // Edit.
+    let edit = json!({
+        "event_id": "evt-edit-1", "origin": "b.test", "space_id": space_id,
+        "type": "m.message.update",
+        "payload": { "id": "msg1@b.test", "content": "edited", "edited_at": "2026-01-02 00:00:00" }
+    });
+    let req = signed_request(&bob, "b.test", "a.test", INBOX, &edit);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+    let row = accordserver::db::messages::get_message_row(server.pool(), "msg1@b.test")
+        .await
+        .unwrap();
+    assert_eq!(row.content, "edited");
+
+    // Delete.
+    let del = json!({
+        "event_id": "evt-del-1", "origin": "b.test", "space_id": space_id,
+        "type": "m.message.delete",
+        "payload": { "id": "msg1@b.test", "channel_id": channel_id }
+    });
+    let req = signed_request(&bob, "b.test", "a.test", INBOX, &del);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+    assert!(
+        accordserver::db::messages::get_message_row(server.pool(), "msg1@b.test")
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

@@ -31,6 +31,26 @@ pub async fn add_reaction(
     if !space_id.is_empty() {
         require_not_timed_out(&state.db, &space_id, &auth).await?;
     }
+
+    // Remote-homed space: forward to the authoritative home server. The reaction
+    // returns to us via the home's fanout.
+    if !space_id.is_empty() {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, &space_id).await? {
+            let actor = crate::db::users::get_user(&state.db, &auth.user_id).await?;
+            crate::federation::forward::forward_reaction(
+                &state,
+                &home,
+                &channel_id,
+                &message_id,
+                &actor,
+                &emoji,
+                false,
+            )
+            .await?;
+            return Ok(Json(serde_json::json!({ "data": null })));
+        }
+    }
+
     let sql = if state.db_is_postgres {
         "INSERT INTO reactions (message_id, user_id, emoji_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
     } else {
@@ -56,11 +76,31 @@ pub async fn add_reaction(
             }
         });
         let _ = dispatcher.send(GatewayBroadcast {
-            space_id: space_id_opt(space_id),
+            space_id: space_id_opt(space_id.clone()),
             target_user_ids: None,
             event,
             intent: "message_reactions".to_string(),
         });
+    }
+
+    // Fan out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        if !space_id.is_empty() {
+            let payload = crate::federation::outbound::reaction_payload(
+                &fed.domain,
+                &channel_id,
+                &message_id,
+                &auth.user_id,
+                &emoji,
+            );
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                &space_id,
+                "m.reaction.add",
+                payload,
+            )
+            .await;
+        }
     }
 
     Ok(Json(serde_json::json!({ "data": null })))
@@ -72,6 +112,25 @@ pub async fn remove_own_reaction(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let space_id = require_channel_membership(&state.db, &channel_id, &auth.user_id).await?;
+
+    // Remote-homed space: forward the removal to the home authority.
+    if !space_id.is_empty() {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, &space_id).await? {
+            let actor = crate::db::users::get_user(&state.db, &auth.user_id).await?;
+            crate::federation::forward::forward_reaction(
+                &state,
+                &home,
+                &channel_id,
+                &message_id,
+                &actor,
+                &emoji,
+                true,
+            )
+            .await?;
+            return Ok(Json(serde_json::json!({ "data": null })));
+        }
+    }
+
     sqlx::query(&crate::db::q(
         "DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji_name = ?",
     ))
@@ -93,11 +152,30 @@ pub async fn remove_own_reaction(
             }
         });
         let _ = dispatcher.send(GatewayBroadcast {
-            space_id: space_id_opt(space_id),
+            space_id: space_id_opt(space_id.clone()),
             target_user_ids: None,
             event,
             intent: "message_reactions".to_string(),
         });
+    }
+
+    if let Some(fed) = state.federation.as_ref() {
+        if !space_id.is_empty() {
+            let payload = crate::federation::outbound::reaction_payload(
+                &fed.domain,
+                &channel_id,
+                &message_id,
+                &auth.user_id,
+                &emoji,
+            );
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                &space_id,
+                "m.reaction.remove",
+                payload,
+            )
+            .await;
+        }
     }
 
     Ok(Json(serde_json::json!({ "data": null })))
