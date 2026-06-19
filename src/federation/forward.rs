@@ -26,6 +26,8 @@ use crate::state::AppState;
 pub const SEND_PATH: &str = "/federation/v1/send";
 /// Path of the reaction-forward endpoint.
 pub const REACT_PATH: &str = "/federation/v1/react";
+/// Path of the leave-forward endpoint.
+pub const LEAVE_PATH: &str = "/federation/v1/leave";
 
 #[derive(Debug, Deserialize)]
 pub struct SendRequest {
@@ -320,6 +322,104 @@ pub async fn forward_reaction(
     if !status.is_success() {
         return Err(AppError::BadRequest(format!(
             "home server rejected reaction ({status})"
+        )));
+    }
+    Ok(())
+}
+
+// --- Member leave ---
+
+#[derive(Debug, Deserialize)]
+pub struct LeaveRequest {
+    pub actor: RemoteUserRef,
+    /// The home server's (bare) space ID to leave.
+    pub space_id: String,
+}
+
+pub async fn handle_leave(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let Some(fed) = state.federation.clone() else {
+        return err(StatusCode::NOT_FOUND, "federation disabled");
+    };
+    let peer = match crate::federation::verify::verify_signed(
+        &state,
+        &fed.domain,
+        &headers,
+        LEAVE_PATH,
+        &body,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let req: LeaveRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid leave request"),
+    };
+    match serve_leave(&state, &fed.domain, &peer.domain, &req).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn serve_leave(
+    state: &AppState,
+    our_domain: &str,
+    peer: &str,
+    req: &LeaveRequest,
+) -> Result<(), AppError> {
+    authority::require_homed_on(&req.actor.id, peer, "actor")?;
+    // The space must be homed here.
+    crate::db::spaces::get_space_row(&state.db, &req.space_id).await?;
+
+    crate::db::members::remove_member(&state.db, &req.space_id, &req.actor.id).await?;
+
+    // Broadcast locally and fan the departure out to remaining interested peers.
+    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
+        let event = json!({ "op": 0, "type": "member.leave", "data": { "space_id": req.space_id, "user_id": req.actor.id } });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id: Some(req.space_id.clone()),
+            target_user_ids: None,
+            event,
+            intent: "members".to_string(),
+        });
+    }
+    let payload = crate::federation::outbound::member_leave_payload(our_domain, &req.actor.id);
+    crate::federation::outbound::fanout_to_space(state, &req.space_id, "m.member.leave", payload)
+        .await?;
+    Ok(())
+}
+
+/// Forward a local user's departure from a remote-homed space to the home server.
+pub async fn forward_leave(
+    state: &AppState,
+    home_domain: &str,
+    space_id: &str,
+    actor: &crate::models::user::User,
+) -> Result<(), AppError> {
+    let fed = state
+        .federation
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
+    let body = serde_json::to_vec(&json!({
+        "actor": {
+            "id": mapping::qualify(&actor.id, &fed.domain),
+            "username": actor.username,
+            "display_name": actor.display_name,
+            "avatar": actor.avatar,
+        },
+        "space_id": mapping::local_part(space_id),
+    }))
+    .map_err(|e| AppError::Internal(format!("serialize leave: {e}")))?;
+
+    let (status, _bytes) = sender::request_signed(state, home_domain, LEAVE_PATH, &body).await?;
+    if !status.is_success() {
+        return Err(AppError::BadRequest(format!(
+            "home server rejected leave ({status})"
         )));
     }
     Ok(())

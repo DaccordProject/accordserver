@@ -51,6 +51,14 @@ pub async fn apply_event(
             apply_reaction(state, peer, env, false).await?;
             Ok(Applied::Ok)
         }
+        "m.member.join" => {
+            apply_member_join(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.member.leave" => {
+            apply_member_leave(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
         _ => Ok(Applied::Unsupported),
     }
 }
@@ -296,6 +304,99 @@ async fn apply_message_delete(
         "message.delete",
         serde_json::json!({ "id": payload.id, "channel_id": channel_id }),
         "messages",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteMemberJoin {
+    user: crate::federation::handshake::RemoteUserRef,
+}
+
+async fn apply_member_join(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let Some(space_id) = env.space_id.clone() else {
+        return Err(AppError::BadRequest(
+            "member event missing space_id".to_string(),
+        ));
+    };
+    let payload: RemoteMemberJoin = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid member.join payload: {e}")))?;
+
+    // Only act if we mirror this space (the envelope's space_id was already
+    // bound to the signing peer by authority::check).
+    if crate::db::spaces::get_space_row(&state.db, &space_id)
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    let domain = crate::federation::mapping::domain_of(&payload.user.id).unwrap_or(peer);
+    crate::db::users::upsert_remote_user(
+        &state.db,
+        &payload.user.id,
+        domain,
+        &crate::federation::mapping::handle(&payload.user.username, domain),
+        payload.user.display_name.as_deref(),
+        payload.user.avatar.as_deref(),
+    )
+    .await?;
+    crate::db::federation::add_member_with_origin(
+        &state.db,
+        &space_id,
+        &payload.user.id,
+        Some(domain),
+    )
+    .await?;
+
+    rebroadcast(
+        state,
+        Some(space_id.clone()),
+        "member.join",
+        serde_json::json!({ "space_id": space_id, "user_id": payload.user.id }),
+        "members",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteMemberLeave {
+    user_id: String,
+}
+
+async fn apply_member_leave(
+    state: &AppState,
+    _peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let Some(space_id) = env.space_id.clone() else {
+        return Err(AppError::BadRequest(
+            "member event missing space_id".to_string(),
+        ));
+    };
+    let payload: RemoteMemberLeave = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid member.leave payload: {e}")))?;
+
+    if crate::db::spaces::get_space_row(&state.db, &space_id)
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+    crate::db::members::remove_member(&state.db, &space_id, &payload.user_id).await?;
+
+    rebroadcast(
+        state,
+        Some(space_id.clone()),
+        "member.leave",
+        serde_json::json!({ "space_id": space_id, "user_id": payload.user_id }),
+        "members",
     )
     .await;
     Ok(())

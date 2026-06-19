@@ -60,6 +60,23 @@ pub async fn fanout_message_create(state: &AppState, msg: &MessageRow) -> Result
     fanout_to_space(state, space_id, "m.message.create", payload).await
 }
 
+/// `m.member.join` payload with the joining user's profile, qualified to `domain`.
+pub fn member_join_payload(domain: &str, user: &User) -> serde_json::Value {
+    serde_json::json!({
+        "user": {
+            "id": mapping::qualify(&user.id, domain),
+            "username": user.username,
+            "display_name": user.display_name,
+            "avatar": user.avatar,
+        }
+    })
+}
+
+/// `m.member.leave` payload, qualifying the leaving user's ID to `domain`.
+pub fn member_leave_payload(domain: &str, user_id: &str) -> serde_json::Value {
+    serde_json::json!({ "user_id": mapping::qualify(user_id, domain) })
+}
+
 /// Qualify a reaction payload to `domain` for fanout/forward.
 pub fn reaction_payload(
     domain: &str,

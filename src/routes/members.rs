@@ -281,6 +281,18 @@ pub async fn kick_member(
         });
     }
 
+    // Fan the kick out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        let payload = crate::federation::outbound::member_leave_payload(&fed.domain, &user_id);
+        let _ = crate::federation::outbound::fanout_to_space(
+            &state,
+            &space_id,
+            "m.member.leave",
+            payload,
+        )
+        .await;
+    }
+
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
@@ -309,6 +321,28 @@ pub async fn leave_space(
         ));
     }
 
+    // Remote-homed space: forward the departure to the authoritative home, then
+    // drop our local replica membership.
+    if let Some(home) = crate::db::federation::space_origin(&state.db, &space_id).await? {
+        let actor = db::users::get_user(&state.db, &auth.user_id).await?;
+        crate::federation::forward::forward_leave(&state, &home, &space_id, &actor).await?;
+        db::members::remove_member(&state.db, &space_id, &auth.user_id).await?;
+        if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+            let event = serde_json::json!({
+                "op": 0,
+                "type": "member.leave",
+                "data": { "space_id": space_id, "user_id": auth.user_id }
+            });
+            let _ = dispatcher.send(GatewayBroadcast {
+                space_id: Some(space_id.clone()),
+                target_user_ids: None,
+                event,
+                intent: "members".to_string(),
+            });
+        }
+        return Ok(Json(serde_json::json!({ "data": null })));
+    }
+
     if params.delete_data.unwrap_or(false) {
         db::members::remove_member_and_data(&state.db, &space_id, &auth.user_id).await?;
     } else {
@@ -326,11 +360,23 @@ pub async fn leave_space(
             }
         });
         let _ = dispatcher.send(GatewayBroadcast {
-            space_id: Some(space_id),
+            space_id: Some(space_id.clone()),
             target_user_ids: None,
             event,
             intent: "members".to_string(),
         });
+    }
+
+    // Fan the departure out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        let payload = crate::federation::outbound::member_leave_payload(&fed.domain, &auth.user_id);
+        let _ = crate::federation::outbound::fanout_to_space(
+            &state,
+            &space_id,
+            "m.member.leave",
+            payload,
+        )
+        .await;
     }
 
     Ok(Json(serde_json::json!({ "data": null })))

@@ -76,6 +76,18 @@ pub async fn accept_invite(
             });
         }
 
+        // Fan the new member out to interested peers for a locally-homed space.
+        if let Some(fed) = state.federation.as_ref() {
+            let payload = crate::federation::outbound::member_join_payload(&fed.domain, &user);
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                &invite.space_id,
+                "m.member.join",
+                payload,
+            )
+            .await;
+        }
+
         // Audit log: record invite acceptance
         if let Ok(entry) = db::audit_log::create_entry(
             &state.db,

@@ -560,7 +560,60 @@ async fn two_server_message_round_trip() {
     .unwrap();
     assert_eq!(on_a_react, 1);
 
+    // --- Leave round-trip ---
+    // alice leaves the remote-homed space -> forwarded to B, which drops her.
+    accordserver::federation::forward::forward_leave(&a.state, "b.test", &mirrored, &alice.user)
+        .await
+        .unwrap();
+    let interested = accordserver::db::federation::interested_servers(b.pool(), &space_b)
+        .await
+        .unwrap();
+    assert!(
+        !interested.contains(&"a.test".to_string()),
+        "a.test should no longer be interested after alice leaves"
+    );
+
     std::env::remove_var("ACCORD_FEDERATION_ALLOW_INSECURE");
+}
+
+async fn member_count(server: &TestServer, space_id: &str, user_id: &str) -> i64 {
+    sqlx::query_scalar(&accordserver::db::q(
+        "SELECT COUNT(*) FROM members WHERE space_id = ? AND user_id = ?",
+    ))
+    .bind(space_id)
+    .bind(user_id)
+    .fetch_one(server.pool())
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn inbound_member_join_and_leave_applied() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, _channel_id) = server.mirror_remote_space("b.test").await;
+
+    // A new member joins B's space.
+    let join = json!({
+        "event_id": "evt-join-1", "origin": "b.test", "space_id": space_id,
+        "type": "m.member.join",
+        "payload": { "user": { "id": "carol@b.test", "username": "carol", "display_name": "Carol" } }
+    });
+    let req = signed_request(&bob, "b.test", "a.test", INBOX, &join);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+    assert_eq!(member_count(&server, &space_id, "carol@b.test").await, 1);
+
+    // Then they leave.
+    let leave = json!({
+        "event_id": "evt-leave-1", "origin": "b.test", "space_id": space_id,
+        "type": "m.member.leave",
+        "payload": { "user_id": "carol@b.test" }
+    });
+    let req = signed_request(&bob, "b.test", "a.test", INBOX, &leave);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+    assert_eq!(member_count(&server, &space_id, "carol@b.test").await, 0);
 }
 
 #[tokio::test]

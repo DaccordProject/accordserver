@@ -418,6 +418,18 @@ pub async fn join_public_space(
             });
         }
 
+        // Fan the new member out to interested peers for a locally-homed space.
+        if let Some(fed) = state.federation.as_ref() {
+            let payload = crate::federation::outbound::member_join_payload(&fed.domain, &user);
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                &space.id,
+                "m.member.join",
+                payload,
+            )
+            .await;
+        }
+
         // Audit log: record public join
         if let Ok(entry) = db::audit_log::create_entry(
             &state.db,
