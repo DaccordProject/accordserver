@@ -19,7 +19,7 @@ use crate::error::AppError;
 use crate::federation::handshake::RemoteUserRef;
 use crate::federation::{authority, mapping, sender};
 use crate::middleware::auth::AuthUser;
-use crate::models::message::CreateMessage;
+use crate::models::message::{CreateMessage, UpdateMessage};
 use crate::state::AppState;
 
 /// Path of the message-forward endpoint.
@@ -28,6 +28,12 @@ pub const SEND_PATH: &str = "/federation/v1/send";
 pub const REACT_PATH: &str = "/federation/v1/react";
 /// Path of the leave-forward endpoint.
 pub const LEAVE_PATH: &str = "/federation/v1/leave";
+/// Path of the message-edit-forward endpoint.
+pub const EDIT_PATH: &str = "/federation/v1/edit";
+/// Path of the message-delete-forward endpoint.
+pub const DELETE_PATH: &str = "/federation/v1/delete";
+/// Path of the typing-forward endpoint.
+pub const TYPING_PATH: &str = "/federation/v1/typing";
 
 #[derive(Debug, Deserialize)]
 pub struct SendRequest {
@@ -423,6 +429,352 @@ pub async fn forward_leave(
         )));
     }
     Ok(())
+}
+
+// --- Message edit ---
+
+#[derive(Debug, Deserialize)]
+pub struct EditRequest {
+    pub actor: RemoteUserRef,
+    /// The home server's (bare) message ID to edit.
+    pub message_id: String,
+    pub content: String,
+}
+
+pub async fn handle_edit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let Some(fed) = state.federation.clone() else {
+        return err(StatusCode::NOT_FOUND, "federation disabled");
+    };
+    let peer = match crate::federation::verify::verify_signed(
+        &state,
+        &fed.domain,
+        &headers,
+        EDIT_PATH,
+        &body,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let req: EditRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid edit request"),
+    };
+    match serve_edit(&state, &fed.domain, &peer.domain, &req).await {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn serve_edit(
+    state: &AppState,
+    our_domain: &str,
+    peer: &str,
+    req: &EditRequest,
+) -> Result<serde_json::Value, AppError> {
+    authority::require_homed_on(&req.actor.id, peer, "actor")?;
+    if req.content.chars().count() > 4000 {
+        return Err(AppError::BadRequest("message content too long".to_string()));
+    }
+    let existing = crate::db::messages::get_message_row(&state.db, &req.message_id).await?;
+    // Authoritative author-or-manage check from our DB.
+    if existing.author_id != req.actor.id {
+        let auth = remote_actor_auth(&req.actor.id);
+        crate::middleware::permissions::require_channel_permission(
+            &state.db,
+            &existing.channel_id,
+            &auth,
+            "manage_messages",
+        )
+        .await?;
+    } else {
+        crate::middleware::permissions::require_channel_membership(
+            &state.db,
+            &existing.channel_id,
+            &req.actor.id,
+        )
+        .await?;
+    }
+
+    let msg = crate::db::messages::update_message(
+        &state.db,
+        &req.message_id,
+        &UpdateMessage {
+            content: Some(req.content.clone()),
+            embeds: None,
+            title: None,
+        },
+        state.db_is_postgres,
+    )
+    .await?;
+    let payload = crate::routes::messages::message_row_to_json_with_attachments(&msg, &[], None);
+
+    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
+        let event = json!({ "op": 0, "type": "message.update", "data": payload });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id: existing.space_id.clone(),
+            target_user_ids: None,
+            event,
+            intent: "messages".to_string(),
+        });
+    }
+    if let Some(sid) = &existing.space_id {
+        let fanout = json!({
+            "id": mapping::qualify(&req.message_id, our_domain),
+            "content": msg.content,
+            "edited_at": msg.edited_at,
+        });
+        crate::federation::outbound::fanout_to_space(state, sid, "m.message.update", fanout)
+            .await?;
+    }
+    Ok(payload)
+}
+
+/// Forward a local user's edit of their message in a remote-homed space.
+pub async fn forward_edit(
+    state: &AppState,
+    home_domain: &str,
+    message_id: &str,
+    actor: &crate::models::user::User,
+    content: &str,
+) -> Result<serde_json::Value, AppError> {
+    let fed = state
+        .federation
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
+    let body = serde_json::to_vec(&json!({
+        "actor": actor_ref(&fed.domain, actor),
+        "message_id": mapping::local_part(message_id),
+        "content": content,
+    }))
+    .map_err(|e| AppError::Internal(format!("serialize edit: {e}")))?;
+    let (status, bytes) = sender::request_signed(state, home_domain, EDIT_PATH, &body).await?;
+    if !status.is_success() {
+        return Err(AppError::BadRequest(format!(
+            "home server rejected edit ({status})"
+        )));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|e| AppError::Internal(format!("invalid home response: {e}")))
+}
+
+// --- Message delete ---
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteRequest {
+    pub actor: RemoteUserRef,
+    pub message_id: String,
+}
+
+pub async fn handle_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let Some(fed) = state.federation.clone() else {
+        return err(StatusCode::NOT_FOUND, "federation disabled");
+    };
+    let peer = match crate::federation::verify::verify_signed(
+        &state,
+        &fed.domain,
+        &headers,
+        DELETE_PATH,
+        &body,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let req: DeleteRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid delete request"),
+    };
+    match serve_delete(&state, &fed.domain, &peer.domain, &req).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn serve_delete(
+    state: &AppState,
+    our_domain: &str,
+    peer: &str,
+    req: &DeleteRequest,
+) -> Result<(), AppError> {
+    authority::require_homed_on(&req.actor.id, peer, "actor")?;
+    let existing = crate::db::messages::get_message_row(&state.db, &req.message_id).await?;
+    if existing.author_id != req.actor.id {
+        let auth = remote_actor_auth(&req.actor.id);
+        crate::middleware::permissions::require_channel_permission(
+            &state.db,
+            &existing.channel_id,
+            &auth,
+            "manage_messages",
+        )
+        .await?;
+    } else {
+        crate::middleware::permissions::require_channel_membership(
+            &state.db,
+            &existing.channel_id,
+            &req.actor.id,
+        )
+        .await?;
+    }
+
+    crate::db::messages::delete_message(&state.db, &req.message_id).await?;
+
+    let data = json!({
+        "id": mapping::qualify(&req.message_id, our_domain),
+        "channel_id": mapping::qualify(&existing.channel_id, our_domain),
+    });
+    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
+        let event = json!({ "op": 0, "type": "message.delete", "data": data.clone() });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id: existing.space_id.clone(),
+            target_user_ids: None,
+            event,
+            intent: "messages".to_string(),
+        });
+    }
+    if let Some(sid) = &existing.space_id {
+        crate::federation::outbound::fanout_to_space(state, sid, "m.message.delete", data).await?;
+    }
+    Ok(())
+}
+
+/// Forward a local user's deletion of their message in a remote-homed space.
+pub async fn forward_delete(
+    state: &AppState,
+    home_domain: &str,
+    message_id: &str,
+    actor: &crate::models::user::User,
+) -> Result<(), AppError> {
+    let fed = state
+        .federation
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
+    let body = serde_json::to_vec(&json!({
+        "actor": actor_ref(&fed.domain, actor),
+        "message_id": mapping::local_part(message_id),
+    }))
+    .map_err(|e| AppError::Internal(format!("serialize delete: {e}")))?;
+    let (status, _bytes) = sender::request_signed(state, home_domain, DELETE_PATH, &body).await?;
+    if !status.is_success() {
+        return Err(AppError::BadRequest(format!(
+            "home server rejected delete ({status})"
+        )));
+    }
+    Ok(())
+}
+
+// --- Typing ---
+
+#[derive(Debug, Deserialize)]
+pub struct TypingRequest {
+    pub actor: RemoteUserRef,
+    pub channel_id: String,
+}
+
+pub async fn handle_typing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let Some(fed) = state.federation.clone() else {
+        return err(StatusCode::NOT_FOUND, "federation disabled");
+    };
+    let peer = match crate::federation::verify::verify_signed(
+        &state,
+        &fed.domain,
+        &headers,
+        TYPING_PATH,
+        &body,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let req: TypingRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid typing request"),
+    };
+    match serve_typing(&state, &fed.domain, &peer.domain, &req).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn serve_typing(
+    state: &AppState,
+    our_domain: &str,
+    peer: &str,
+    req: &TypingRequest,
+) -> Result<(), AppError> {
+    authority::require_homed_on(&req.actor.id, peer, "actor")?;
+    let space_id = crate::middleware::permissions::require_channel_membership(
+        &state.db,
+        &req.channel_id,
+        &req.actor.id,
+    )
+    .await?;
+    let data = json!({
+        "channel_id": mapping::qualify(&req.channel_id, our_domain),
+        "user_id": req.actor.id,
+    });
+    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
+        let event = json!({ "op": 0, "type": "typing.start", "data": data.clone() });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id: if space_id.is_empty() {
+                None
+            } else {
+                Some(space_id.clone())
+            },
+            target_user_ids: None,
+            event,
+            intent: "message_typing".to_string(),
+        });
+    }
+    if !space_id.is_empty() {
+        crate::federation::outbound::fanout_to_space(state, &space_id, "m.typing", data).await?;
+    }
+    Ok(())
+}
+
+/// Forward a typing indicator for a remote-homed space (best-effort).
+pub async fn forward_typing(
+    state: &AppState,
+    home_domain: &str,
+    channel_id: &str,
+    actor: &crate::models::user::User,
+) -> Result<(), AppError> {
+    let fed = state
+        .federation
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
+    let body = serde_json::to_vec(&json!({
+        "actor": actor_ref(&fed.domain, actor),
+        "channel_id": mapping::local_part(channel_id),
+    }))
+    .map_err(|e| AppError::Internal(format!("serialize typing: {e}")))?;
+    let _ = sender::request_signed(state, home_domain, TYPING_PATH, &body).await?;
+    Ok(())
+}
+
+/// Build the qualified `actor` object sent in forward requests.
+fn actor_ref(domain: &str, user: &crate::models::user::User) -> serde_json::Value {
+    json!({
+        "id": mapping::qualify(&user.id, domain),
+        "username": user.username,
+        "display_name": user.display_name,
+        "avatar": user.avatar,
+    })
 }
 
 // ---------------------------------------------------------------------------

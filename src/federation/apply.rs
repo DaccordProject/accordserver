@@ -59,8 +59,24 @@ pub async fn apply_event(
             apply_member_leave(state, peer, env).await?;
             Ok(Applied::Ok)
         }
+        "m.typing" => {
+            apply_typing(state, env).await;
+            Ok(Applied::Ok)
+        }
         _ => Ok(Applied::Unsupported),
     }
+}
+
+/// Ephemeral typing indicator: just rebroadcast to local sessions (no DB).
+async fn apply_typing(state: &AppState, env: &FederationEnvelope) {
+    rebroadcast(
+        state,
+        env.space_id.clone(),
+        "typing.start",
+        env.payload.clone(),
+        "message_typing",
+    )
+    .await;
 }
 
 /// Re-broadcast a relayed event to local gateway sessions for `space_id`.

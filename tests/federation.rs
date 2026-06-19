@@ -560,6 +560,68 @@ async fn two_server_message_round_trip() {
     .unwrap();
     assert_eq!(on_a_react, 1);
 
+    // --- Edit round-trip ---
+    accordserver::federation::forward::forward_edit(
+        &a.state,
+        "b.test",
+        &on_a.id,
+        &alice.user,
+        "edited by alice",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        accordserver::db::messages::get_message_row(b.pool(), msg_bare)
+            .await
+            .unwrap()
+            .content,
+        "edited by alice"
+    );
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(&b.state).await,
+        1
+    );
+    assert_eq!(
+        accordserver::db::messages::get_message_row(a.pool(), &msg_qualified)
+            .await
+            .unwrap()
+            .content,
+        "edited by alice"
+    );
+
+    // --- Typing round-trip (ephemeral; assert the delivery path runs) ---
+    accordserver::federation::forward::forward_typing(
+        &a.state,
+        "b.test",
+        &mirrored_chan,
+        &alice.user,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(&b.state).await,
+        1
+    );
+
+    // --- Delete round-trip ---
+    accordserver::federation::forward::forward_delete(&a.state, "b.test", &on_a.id, &alice.user)
+        .await
+        .unwrap();
+    assert!(
+        accordserver::db::messages::get_message_row(b.pool(), msg_bare)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(&b.state).await,
+        1
+    );
+    assert!(
+        accordserver::db::messages::get_message_row(a.pool(), &msg_qualified)
+            .await
+            .is_err()
+    );
+
     // --- Leave round-trip ---
     // alice leaves the remote-homed space -> forwarded to B, which drops her.
     accordserver::federation::forward::forward_leave(&a.state, "b.test", &mirrored, &alice.user)

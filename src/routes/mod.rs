@@ -90,6 +90,18 @@ pub fn router(state: AppState) -> Router {
             crate::federation::forward::LEAVE_PATH,
             post(crate::federation::forward::handle_leave),
         )
+        .route(
+            crate::federation::forward::EDIT_PATH,
+            post(crate::federation::forward::handle_edit),
+        )
+        .route(
+            crate::federation::forward::DELETE_PATH,
+            post(crate::federation::forward::handle_delete),
+        )
+        .route(
+            crate::federation::forward::TYPING_PATH,
+            post(crate::federation::forward::handle_typing),
+        )
         .nest_service("/cdn", cdn_service)
         .nest("/s", seo)
         .nest("/api/v1", api);

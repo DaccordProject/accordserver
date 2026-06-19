@@ -464,6 +464,26 @@ pub async fn update_message(
     if existing.channel_id != channel_id {
         return Err(AppError::NotFound("unknown_message".to_string()));
     }
+
+    // Remote-homed space: forward the edit to the authoritative home server.
+    if let Some(ref sid) = existing.space_id {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, sid).await? {
+            let content = input.content.clone().ok_or_else(|| {
+                AppError::BadRequest("federated edits require content".to_string())
+            })?;
+            let actor = db::users::get_user(&state.db, &auth.user_id).await?;
+            let payload = crate::federation::forward::forward_edit(
+                &state,
+                &home,
+                &message_id,
+                &actor,
+                &content,
+            )
+            .await?;
+            return Ok(Json(serde_json::json!({ "data": payload })));
+        }
+    }
+
     // Author can always edit their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
         require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
@@ -528,6 +548,16 @@ pub async fn delete_message(
     if existing.channel_id != channel_id {
         return Err(AppError::NotFound("unknown_message".to_string()));
     }
+
+    // Remote-homed space: forward the deletion to the authoritative home server.
+    if let Some(ref sid) = existing.space_id {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, sid).await? {
+            let actor = db::users::get_user(&state.db, &auth.user_id).await?;
+            crate::federation::forward::forward_delete(&state, &home, &message_id, &actor).await?;
+            return Ok(Json(serde_json::json!({ "data": null })));
+        }
+    }
+
     // Author can always delete their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
         require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
@@ -644,6 +674,19 @@ pub async fn typing_indicator(
     if !space_id.is_empty() {
         require_not_timed_out(&state.db, &space_id, &auth).await?;
     }
+
+    // Remote-homed space: forward typing to the home authority (best-effort).
+    if !space_id.is_empty() {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, &space_id).await? {
+            if let Ok(actor) = db::users::get_user(&state.db, &auth.user_id).await {
+                let _ =
+                    crate::federation::forward::forward_typing(&state, &home, &channel_id, &actor)
+                        .await;
+            }
+            return Ok(Json(serde_json::json!({ "data": null })));
+        }
+    }
+
     let thread_id = body.and_then(|b| b.thread_id.clone());
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
@@ -667,6 +710,21 @@ pub async fn typing_indicator(
             intent: "message_typing".to_string(),
         });
     }
+
+    // Fan typing out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        if !space_id.is_empty() {
+            let payload = serde_json::json!({
+                "channel_id": crate::federation::mapping::qualify(&channel_id, &fed.domain),
+                "user_id": crate::federation::mapping::qualify(&auth.user_id, &fed.domain),
+            });
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state, &space_id, "m.typing", payload,
+            )
+            .await;
+        }
+    }
+
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
