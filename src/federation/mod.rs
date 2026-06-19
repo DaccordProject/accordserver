@@ -6,6 +6,7 @@
 //! (`<snowflake>@<domain>`). See `mapping`, `authority`, and the plan for the
 //! full model.
 
+pub mod apply;
 pub mod authority;
 pub mod identity;
 pub mod inbox;

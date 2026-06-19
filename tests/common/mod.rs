@@ -163,14 +163,56 @@ impl TestServer {
             public_url: format!("https://{domain}"),
             enabled: true,
         };
-        let ctx = accordserver::federation::FederationContext::build(&cfg, &self.state.storage_path)
-            .expect("failed to build federation context");
+        let ctx =
+            accordserver::federation::FederationContext::build(&cfg, &self.state.storage_path)
+                .expect("failed to build federation context");
         self.state.federation = Some(Arc::new(ctx));
     }
 
     /// Returns a reference to the underlying database pool.
     pub fn pool(&self) -> &AnyPool {
         &self.state.db
+    }
+
+    /// Mirror a minimal remote space + channel homed on `origin` so inbound
+    /// federated events for it can be applied. Returns (space_id, channel_id),
+    /// both qualified. Upserts the remote owner user first to satisfy FKs.
+    pub async fn mirror_remote_space(&self, origin: &str) -> (String, String) {
+        let owner_id = format!("owner@{origin}");
+        let space_id = format!("space1@{origin}");
+        let channel_id = format!("chan1@{origin}");
+        db::users::upsert_remote_user(
+            self.pool(),
+            &owner_id,
+            origin,
+            &format!("owner@{origin}"),
+            Some("Owner"),
+            None,
+        )
+        .await
+        .unwrap();
+        db::federation::upsert_remote_space(
+            self.pool(),
+            &space_id,
+            origin,
+            "Remote Space",
+            &format!("remote-{origin}"),
+            &owner_id,
+        )
+        .await
+        .unwrap();
+        db::federation::upsert_remote_channel(
+            self.pool(),
+            &channel_id,
+            origin,
+            &space_id,
+            "general",
+            "text",
+            0,
+        )
+        .await
+        .unwrap();
+        (space_id, channel_id)
     }
 
     /// Binds a TCP listener on port 0, spawns the server, and returns the base URL.

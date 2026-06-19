@@ -27,10 +27,11 @@ fn row_to_message(row: sqlx::any::AnyRow) -> MessageRow {
         webhook_id: row.get("webhook_id"),
         thread_id: row.get("thread_id"),
         title: row.get("title"),
+        origin: row.try_get("origin").ok().flatten(),
     }
 }
 
-const SELECT_MESSAGES: &str = "SELECT id, channel_id, space_id, author_id, content, type, created_at, edited_at, tts, pinned, mention_everyone, mentions, mention_roles, embeds, reply_to, flags, webhook_id, thread_id, title FROM messages";
+const SELECT_MESSAGES: &str = "SELECT id, channel_id, space_id, author_id, content, type, created_at, edited_at, tts, pinned, mention_everyone, mentions, mention_roles, embeds, reply_to, flags, webhook_id, thread_id, title, origin FROM messages";
 
 pub async fn get_message_row(pool: &AnyPool, message_id: &str) -> Result<MessageRow, AppError> {
     let row = sqlx::query(&super::q(&format!("{SELECT_MESSAGES} WHERE id = ?")))
@@ -231,6 +232,66 @@ pub async fn create_message(
     }
 
     get_message_row(pool, &id).await
+}
+
+/// Fields needed to mirror a remote message into the local replica.
+pub struct RemoteMessageInsert<'a> {
+    /// Qualified message ID (`<snowflake>@<domain>`), assigned by the home server.
+    pub id: &'a str,
+    pub channel_id: &'a str,
+    pub space_id: Option<&'a str>,
+    /// Qualified author ID (already upserted into `users`).
+    pub author_id: &'a str,
+    pub content: &'a str,
+    pub created_at: &'a str,
+    pub mention_everyone: bool,
+    /// JSON array of qualified mention user IDs.
+    pub mentions_json: &'a str,
+    /// JSON array of embeds.
+    pub embeds_json: &'a str,
+    pub reply_to: Option<&'a str>,
+    /// Home domain of the message (always set for replicas).
+    pub origin: &'a str,
+}
+
+/// Insert a mirrored copy of a remote message. Idempotent: a duplicate delivery
+/// (same qualified ID) is a no-op. Returns `None` when the message already
+/// existed (so callers can skip re-broadcasting), `Some(row)` when newly stored.
+pub async fn insert_remote_message(
+    pool: &AnyPool,
+    msg: &RemoteMessageInsert<'_>,
+) -> Result<Option<MessageRow>, AppError> {
+    let res = sqlx::query(&super::q(
+        "INSERT INTO messages (id, channel_id, space_id, author_id, content, mention_everyone, mentions, embeds, reply_to, created_at, origin) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+    ))
+    .bind(msg.id)
+    .bind(msg.channel_id)
+    .bind(msg.space_id)
+    .bind(msg.author_id)
+    .bind(msg.content)
+    .bind(msg.mention_everyone)
+    .bind(msg.mentions_json)
+    .bind(msg.embeds_json)
+    .bind(msg.reply_to)
+    .bind(msg.created_at)
+    .bind(msg.origin)
+    .execute(pool)
+    .await?;
+
+    if res.rows_affected() == 0 {
+        return Ok(None);
+    }
+
+    sqlx::query(&super::q(
+        "UPDATE channels SET last_message_id = ? WHERE id = ?",
+    ))
+    .bind(msg.id)
+    .bind(msg.channel_id)
+    .execute(pool)
+    .await?;
+
+    Ok(Some(get_message_row(pool, msg.id).await?))
 }
 
 /// Creates a system message with a custom type (e.g. "member_join", "member_leave").

@@ -38,7 +38,10 @@ pub fn generate() -> String {
 }
 
 pub fn timestamp_of(id: &str) -> Option<u64> {
-    let num: u64 = id.parse().ok()?;
+    // Tolerate federated qualified IDs (`<snowflake>@<domain>`) by reading only
+    // the local snowflake part.
+    let local = id.split_once('@').map(|(l, _)| l).unwrap_or(id);
+    let num: u64 = local.parse().ok()?;
     Some((num >> 22) + EPOCH)
 }
 

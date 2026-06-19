@@ -106,15 +106,26 @@ pub async fn handle_inbox(
     }
 
     // --- Apply ---
-    match envelope.event_type.as_str() {
-        "m.ping" => StatusCode::OK.into_response(),
-        other => {
-            // Content event types are wired up in later phases.
+    if envelope.event_type == "m.ping" {
+        return StatusCode::OK.into_response();
+    }
+    match crate::federation::apply::apply_event(&state, &peer.domain, &envelope).await {
+        Ok(crate::federation::apply::Applied::Ok) => StatusCode::OK.into_response(),
+        Ok(crate::federation::apply::Applied::Unsupported) => {
             tracing::debug!(
-                "inbox received unhandled event type `{other}` from {}",
+                "inbox received unhandled event type `{}` from {}",
+                envelope.event_type,
                 peer.domain
             );
             err(StatusCode::NOT_IMPLEMENTED, "event type not yet supported")
+        }
+        Err(e) => {
+            tracing::warn!(
+                "inbox failed to apply {} from {}: {e}",
+                envelope.event_type,
+                peer.domain
+            );
+            e.into_response()
         }
     }
 }

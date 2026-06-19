@@ -72,6 +72,40 @@ pub async fn create_user(pool: &AnyPool, input: &CreateUser) -> Result<User, App
     get_user(pool, &id).await
 }
 
+/// Insert or refresh a remote (federated) user's cached profile.
+///
+/// `id` is the fully-qualified user ID (`<snowflake>@<domain>`) and `origin` is
+/// the home domain. The fully-qualified `handle` (e.g. `alice@b.example`) is
+/// stored in the `username` column — inherently unique across servers, so it
+/// never collides with a local bare username and the existing global UNIQUE on
+/// `username` is preserved. Remote users never authenticate here, so
+/// `password_hash` stays NULL. Idempotent: re-receiving a profile updates the
+/// mutable fields.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_remote_user(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    handle: &str,
+    display_name: Option<&str>,
+    avatar: Option<&str>,
+) -> Result<User, AppError> {
+    sqlx::query(&super::q(
+        "INSERT INTO users (id, username, display_name, avatar, origin) VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT (id) DO UPDATE SET username = excluded.username, \
+         display_name = excluded.display_name, avatar = excluded.avatar, origin = excluded.origin",
+    ))
+    .bind(id)
+    .bind(handle)
+    .bind(display_name.unwrap_or(handle))
+    .bind(avatar)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+
+    get_user(pool, id).await
+}
+
 /// Returns the id of the singleton System user, creating it if absent.
 /// Used as the author/actor id for server-originated writes (MCP, automated
 /// moderation) so they satisfy the `users(id)` foreign keys.

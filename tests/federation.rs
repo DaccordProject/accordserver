@@ -47,13 +47,36 @@ fn ping(event_id: &str, origin: &str) -> Value {
     json!({ "event_id": event_id, "origin": origin, "type": "m.ping", "payload": {} })
 }
 
+/// Build an `m.message.create` envelope homed on `origin`.
+#[allow(clippy::too_many_arguments)]
+fn message_event(
+    event_id: &str,
+    origin: &str,
+    space_id: &str,
+    channel_id: &str,
+    msg_id: &str,
+    author_id: &str,
+    author_username: &str,
+    content: &str,
+) -> Value {
+    json!({
+        "event_id": event_id,
+        "origin": origin,
+        "space_id": space_id,
+        "type": "m.message.create",
+        "payload": {
+            "id": msg_id,
+            "channel_id": channel_id,
+            "space_id": space_id,
+            "author": { "id": author_id, "username": author_username },
+            "content": content,
+            "created_at": "2026-01-01 00:00:00",
+        }
+    })
+}
+
 /// Register peer `domain` on `server` with `identity`'s public key and trust.
-async fn register_peer(
-    server: &TestServer,
-    domain: &str,
-    identity: &ServerIdentity,
-    trust: &str,
-) {
+async fn register_peer(server: &TestServer, domain: &str, identity: &ServerIdentity, trust: &str) {
     accordserver::db::federation::upsert_peer(
         server.pool(),
         domain,
@@ -169,6 +192,108 @@ async fn duplicate_event_is_idempotent() {
     // Same event_id+origin again: deduped, still acknowledged.
     let second = signed_inbox_request(&alice, "a.test", "b.test", &ping("dup-1", "a.test"));
     assert_eq!(status_of(&server, second).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn inbound_message_is_stored_and_broadcast() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, channel_id) = server.mirror_remote_space("b.test").await;
+
+    // Subscribe to the gateway broadcast before delivering.
+    let mut rx = server
+        .state
+        .gateway_tx
+        .read()
+        .await
+        .as_ref()
+        .unwrap()
+        .subscribe();
+
+    let env = message_event(
+        "evt-msg-1",
+        "b.test",
+        &space_id,
+        &channel_id,
+        "msg1@b.test",
+        "bob@b.test",
+        "bob",
+        "hello from b",
+    );
+    let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+
+    // Stored as a replica with the correct origin.
+    let row = accordserver::db::messages::get_message_row(server.pool(), "msg1@b.test")
+        .await
+        .unwrap();
+    assert_eq!(row.content, "hello from b");
+    assert_eq!(row.origin.as_deref(), Some("b.test"));
+    assert_eq!(row.author_id, "bob@b.test");
+
+    // Injected into the gateway.
+    let broadcast = rx.try_recv().expect("expected a gateway broadcast");
+    assert_eq!(broadcast.event["type"], "message.create");
+    assert_eq!(broadcast.event["data"]["id"], "msg1@b.test");
+    assert_eq!(broadcast.space_id.as_deref(), Some(space_id.as_str()));
+}
+
+#[tokio::test]
+async fn inbound_message_with_spoofed_author_is_rejected() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, channel_id) = server.mirror_remote_space("b.test").await;
+
+    // b.test signs correctly but the author is homed on c.test (S1).
+    let env = message_event(
+        "evt-msg-1",
+        "b.test",
+        &space_id,
+        &channel_id,
+        "msg1@b.test",
+        "evil@c.test",
+        "evil",
+        "spoofed",
+    );
+    let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
+    assert_eq!(status_of(&server, req).await, StatusCode::FORBIDDEN);
+    assert!(
+        accordserver::db::messages::get_message_row(server.pool(), "msg1@b.test")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn inbound_message_for_unmirrored_channel_is_ignored() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    // No mirror_remote_space: we don't participate in this space.
+
+    let env = message_event(
+        "evt-msg-1",
+        "b.test",
+        "space1@b.test",
+        "chan1@b.test",
+        "msg1@b.test",
+        "bob@b.test",
+        "bob",
+        "unsolicited",
+    );
+    let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
+    // Acknowledged but not stored.
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+    assert!(
+        accordserver::db::messages::get_message_row(server.pool(), "msg1@b.test")
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

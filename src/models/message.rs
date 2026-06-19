@@ -65,6 +65,8 @@ pub struct MessageRow {
     pub webhook_id: Option<String>,
     pub thread_id: Option<String>,
     pub title: Option<String>,
+    /// Home domain for a federated (replica) message, or `None` when local.
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

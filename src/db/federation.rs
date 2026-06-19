@@ -133,6 +133,122 @@ pub async fn dedup_first_seen(
     Ok(res.rows_affected() > 0)
 }
 
+// ---------------------------------------------------------------------------
+// Replica upserts: mirror remote spaces/channels/roles/members into the local
+// tables using qualified IDs and `origin = <home domain>`. All are idempotent.
+// ---------------------------------------------------------------------------
+
+/// Mirror a remote space. `owner_id` (a qualified remote user ID) must already
+/// be upserted via [`crate::db::users::upsert_remote_user`] to satisfy the FK.
+pub async fn upsert_remote_space(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    name: &str,
+    slug: &str,
+    owner_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(&crate::db::q(
+        "INSERT INTO spaces (id, name, slug, description, owner_id, public, allow_guest_access, origin, federation_enabled) \
+         VALUES (?, ?, ?, '', ?, FALSE, FALSE, ?, 1) \
+         ON CONFLICT (id) DO UPDATE SET name = excluded.name, owner_id = excluded.owner_id, origin = excluded.origin",
+    ))
+    .bind(id)
+    .bind(name)
+    .bind(slug)
+    .bind(owner_id)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mirror a remote channel.
+pub async fn upsert_remote_channel(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    space_id: &str,
+    name: &str,
+    channel_type: &str,
+    position: i64,
+) -> Result<(), AppError> {
+    sqlx::query(&crate::db::q(
+        "INSERT INTO channels (id, name, type, space_id, position, origin) VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (id) DO UPDATE SET name = excluded.name, position = excluded.position, origin = excluded.origin",
+    ))
+    .bind(id)
+    .bind(name)
+    .bind(channel_type)
+    .bind(space_id)
+    .bind(position)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mirror a remote role.
+pub async fn upsert_remote_role(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    space_id: &str,
+    name: &str,
+    position: i64,
+    permissions_json: &str,
+) -> Result<(), AppError> {
+    sqlx::query(&crate::db::q(
+        "INSERT INTO roles (id, space_id, name, position, permissions, origin) VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (id) DO UPDATE SET name = excluded.name, position = excluded.position, permissions = excluded.permissions, origin = excluded.origin",
+    ))
+    .bind(id)
+    .bind(space_id)
+    .bind(name)
+    .bind(position)
+    .bind(permissions_json)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Add a member to a (possibly remote-homed) space, recording the member's
+/// `origin`. `origin = NULL` for a local user joining a remote space; the home
+/// domain for a remote user mirrored into a local space.
+pub async fn add_member_with_origin(
+    pool: &AnyPool,
+    space_id: &str,
+    user_id: &str,
+    origin: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query(&crate::db::q(
+        "INSERT INTO members (user_id, space_id, origin) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+    ))
+    .bind(user_id)
+    .bind(space_id)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The set of peer domains "interested" in a space: the distinct `origin`s of
+/// its members. Used to fan out events for a locally-homed space to exactly the
+/// servers that have a member there.
+pub async fn interested_servers(pool: &AnyPool, space_id: &str) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query(&crate::db::q(
+        "SELECT DISTINCT origin FROM members WHERE space_id = ? AND origin IS NOT NULL",
+    ))
+    .bind(space_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("origin").ok())
+        .collect())
+}
+
 /// A queued outbound delivery.
 #[derive(Debug, Clone)]
 pub struct OutboxItem {
