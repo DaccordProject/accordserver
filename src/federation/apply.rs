@@ -146,6 +146,9 @@ async fn apply_message_create(
     if let Some(sid) = &payload.space_id {
         authority::require_homed_on(sid, peer, "space")?;
     }
+    // The author may be homed on any server, but MUST be a qualified remote ID
+    // so it can never collide with / overwrite a local (bare-ID) user row (S2).
+    authority::require_remote_target(&payload.author.id)?;
     let author_domain = crate::federation::mapping::domain_of(&payload.author.id).unwrap_or(peer);
 
     // Input caps (S6): never trust remote-supplied sizes.
@@ -352,6 +355,8 @@ async fn apply_member_join(
         return Ok(());
     }
 
+    // The joining member must be a qualified remote ID (never a bare local ID — S2).
+    authority::require_remote_target(&payload.user.id)?;
     let domain = crate::federation::mapping::domain_of(&payload.user.id).unwrap_or(peer);
     crate::db::users::upsert_remote_user(
         &state.db,
@@ -434,9 +439,11 @@ async fn apply_reaction(
 ) -> Result<(), AppError> {
     let payload: RemoteReaction = serde_json::from_value(env.payload.clone())
         .map_err(|e| AppError::BadRequest(format!("invalid reaction payload: {e}")))?;
-    // The message/channel belong to the peer's space; the reactor may be remote.
+    // The message/channel belong to the peer's space; the reactor may be remote
+    // but MUST be a qualified remote ID (never a bare local ID — S2).
     authority::require_homed_on(&payload.message_id, peer, "message")?;
     authority::require_homed_on(&payload.channel_id, peer, "channel")?;
+    authority::require_remote_target(&payload.user_id)?;
 
     // Must mirror the message; otherwise ignore.
     let Ok(msg) = crate::db::messages::get_message_row(&state.db, &payload.message_id).await else {

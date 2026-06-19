@@ -650,6 +650,68 @@ async fn member_count(server: &TestServer, space_id: &str, user_id: &str) -> i64
 }
 
 #[tokio::test]
+async fn inbound_message_with_bare_local_author_is_rejected() {
+    // A trusted peer must not overwrite a LOCAL user row by claiming a bare
+    // (unqualified) author ID that collides with a local snowflake (S2).
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, channel_id) = server.mirror_remote_space("b.test").await;
+
+    // A local victim user with a bare snowflake ID.
+    let victim = server.create_user_with_token("victim").await;
+
+    let env = message_event(
+        "evt-attack-1",
+        "b.test",
+        &space_id,
+        &channel_id,
+        "msg-attack@b.test",
+        &victim.user.id, // bare local ID — the attack
+        "pwned",
+        "takeover",
+    );
+    let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
+    assert_eq!(status_of(&server, req).await, StatusCode::FORBIDDEN);
+
+    // The local user's row is untouched: username unchanged, still local.
+    let row = accordserver::db::users::get_user(server.pool(), &victim.user.id)
+        .await
+        .unwrap();
+    assert_eq!(row.username, "victim");
+    assert!(row.origin.is_none());
+}
+
+#[tokio::test]
+async fn inbound_reaction_with_bare_local_reactor_is_rejected() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, channel_id) = server.mirror_remote_space("b.test").await;
+    let victim = server.create_user_with_token("victim").await;
+
+    let env = json!({
+        "event_id": "evt-attack-2", "origin": "b.test", "space_id": space_id,
+        "type": "m.reaction.add",
+        "payload": {
+            "channel_id": channel_id,
+            "message_id": "msg1@b.test",
+            "user_id": victim.user.id, // bare local ID — the attack
+            "emoji": "👍"
+        }
+    });
+    let req = signed_request(&bob, "b.test", "a.test", INBOX, &env);
+    assert_eq!(status_of(&server, req).await, StatusCode::FORBIDDEN);
+    let row = accordserver::db::users::get_user(server.pool(), &victim.user.id)
+        .await
+        .unwrap();
+    assert_eq!(row.username, "victim");
+    assert!(row.origin.is_none());
+}
+
+#[tokio::test]
 async fn inbound_member_join_and_leave_applied() {
     let mut server = TestServer::new().await;
     server.enable_federation("a.test");

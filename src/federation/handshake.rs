@@ -360,6 +360,9 @@ pub async fn apply_snapshot(
     // members are not required to be homed on the home server — only the space's
     // own authoritative state (space/channels/roles/messages) is.
     for m in &snap.members {
+        // Members may be homed anywhere, but must be qualified remote IDs so a
+        // snapshot can never create or overwrite a local (bare-ID) user row (S2).
+        authority::require_remote_target(&m.id)?;
         let domain = mapping::domain_of(&m.id).unwrap_or(home_domain);
         crate::db::users::upsert_remote_user(
             &state.db,
@@ -418,7 +421,11 @@ pub async fn apply_snapshot(
     // Recent messages. The message itself must be homed on the home server (its
     // authoritative space); the author may be a member from another server.
     for m in &snap.messages {
-        if authority::require_homed_on(&m.id, home_domain, "message").is_err() {
+        // The message must be homed on the home server; the author may be remote
+        // but must be qualified (never a bare local ID — S2).
+        if authority::require_homed_on(&m.id, home_domain, "message").is_err()
+            || authority::require_remote_target(&m.author.id).is_err()
+        {
             continue;
         }
         let domain = mapping::domain_of(&m.author.id).unwrap_or(home_domain);
