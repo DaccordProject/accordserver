@@ -16,14 +16,32 @@ pub struct ServerIdentity {
 }
 
 impl ServerIdentity {
-    /// Load the keypair from `path`, generating and persisting a new one if the
-    /// file is missing or unreadable.
+    /// Load the keypair from `path`, generating and persisting a new one only
+    /// when the file does **not exist**.
+    ///
+    /// A file that exists but is unreadable (e.g. a permissions error) or
+    /// unparseable is treated as a hard error rather than silently overwritten:
+    /// regenerating the key would rotate this server's federation identity and
+    /// break every established peer's pinned trust.
     pub fn load_or_create(path: &Path) -> std::io::Result<Self> {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            if let Some(key) = parse_signing_key(contents.trim()) {
-                return Ok(Self { signing_key: key });
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                return parse_signing_key(contents.trim())
+                    .map(|key| Self { signing_key: key })
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "federation key at {path:?} is present but unparseable; \
+                                 refusing to overwrite (fix or remove it to regenerate)"
+                            ),
+                        )
+                    });
             }
-            tracing::warn!("federation key at {path:?} was unreadable; generating a new one");
+            // No key yet: fall through and generate one.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Exists but unreadable: do not clobber an existing identity.
+            Err(e) => return Err(e),
         }
 
         let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);

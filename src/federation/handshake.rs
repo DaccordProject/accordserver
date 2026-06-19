@@ -364,10 +364,10 @@ pub async fn apply_snapshot(
         // snapshot can never create or overwrite a local (bare-ID) user row (S2).
         authority::require_remote_target(&m.id)?;
         let domain = mapping::domain_of(&m.id).unwrap_or(home_domain);
-        crate::db::users::upsert_remote_user(
-            &state.db,
+        mirror_snapshot_user(
+            state,
+            home_domain,
             &m.id,
-            domain,
             &mapping::handle(&m.username, domain),
             m.display_name.as_deref(),
             m.avatar.as_deref(),
@@ -433,10 +433,10 @@ pub async fn apply_snapshot(
             Some(u) => mapping::handle(u, domain),
             None => m.author.id.clone(),
         };
-        crate::db::users::upsert_remote_user(
-            &state.db,
+        mirror_snapshot_user(
+            state,
+            home_domain,
             &m.author.id,
-            domain,
             &handle,
             m.author.display_name.as_deref(),
             m.author.avatar.as_deref(),
@@ -493,14 +493,36 @@ async fn upsert_member_user(
     user: &RemoteUserRef,
 ) -> Result<(), AppError> {
     let domain = mapping::domain_of(&user.id).unwrap_or(home_domain);
-    crate::db::users::upsert_remote_user(
-        &state.db,
+    mirror_snapshot_user(
+        state,
+        home_domain,
         &user.id,
-        domain,
         &mapping::handle(&user.username, domain),
         user.display_name.as_deref(),
         user.avatar.as_deref(),
     )
-    .await?;
+    .await
+}
+
+/// Mirror a user referenced by a join snapshot. The snapshot's home server is
+/// authoritative only for users actually homed on it; a member or author from a
+/// third server is ensured-only, so a snapshot can never overwrite that user's
+/// real profile (S2). New rows still take the snapshot-supplied profile.
+async fn mirror_snapshot_user(
+    state: &AppState,
+    home_domain: &str,
+    id: &str,
+    handle: &str,
+    display_name: Option<&str>,
+    avatar: Option<&str>,
+) -> Result<(), AppError> {
+    let domain = mapping::domain_of(id).unwrap_or(home_domain);
+    if domain.eq_ignore_ascii_case(home_domain) {
+        crate::db::users::upsert_remote_user(&state.db, id, domain, handle, display_name, avatar)
+            .await?;
+    } else {
+        crate::db::users::ensure_remote_user(&state.db, id, domain, handle, display_name, avatar)
+            .await?;
+    }
     Ok(())
 }

@@ -131,7 +131,10 @@ fn httpdate_now() -> String {
     chrono::Utc::now().to_rfc2822()
 }
 
-fn date_within_skew(date: &str) -> bool {
+/// Whether an HTTP `Date` header is within the allowed clock-skew window.
+/// Stateless and key-independent, so callers can cheaply reject stale or missing
+/// dates before doing any database work.
+pub fn date_within_skew(date: &str) -> bool {
     let Ok(parsed) = chrono::DateTime::parse_from_rfc2822(date) else {
         return false;
     };

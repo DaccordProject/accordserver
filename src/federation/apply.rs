@@ -71,6 +71,32 @@ pub async fn apply_event(
     }
 }
 
+/// Mirror a referenced remote user's profile.
+///
+/// A signing peer is authoritative for a user's profile only when it *is* that
+/// user's home server. When the referenced user is homed on the signing peer we
+/// refresh the cached profile; otherwise (a user homed on some third server) we
+/// only ensure the row exists, so a peer can never spoof or clobber another
+/// server's user (S2).
+async fn mirror_remote_user(
+    state: &AppState,
+    peer: &str,
+    id: &str,
+    domain: &str,
+    handle: &str,
+    display_name: Option<&str>,
+    avatar: Option<&str>,
+) -> Result<(), AppError> {
+    if domain.eq_ignore_ascii_case(peer) {
+        crate::db::users::upsert_remote_user(&state.db, id, domain, handle, display_name, avatar)
+            .await?;
+    } else {
+        crate::db::users::ensure_remote_user(&state.db, id, domain, handle, display_name, avatar)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Ephemeral typing indicator: just rebroadcast to local sessions (no DB).
 async fn apply_typing(state: &AppState, env: &FederationEnvelope) {
     rebroadcast(
@@ -181,13 +207,15 @@ async fn apply_message_create(
         return Ok(());
     }
 
-    // Cache the remote author's profile under its own home domain.
+    // Cache the remote author's profile under its own home domain. Only the
+    // author's own home server may set/refresh that profile (S2).
     let handle = match &payload.author.username {
         Some(name) => crate::federation::mapping::handle(name, author_domain),
         None => payload.author.id.clone(),
     };
-    crate::db::users::upsert_remote_user(
-        &state.db,
+    mirror_remote_user(
+        state,
+        peer,
         &payload.author.id,
         author_domain,
         &handle,
@@ -362,8 +390,9 @@ async fn apply_member_join(
     // The joining member must be a qualified remote ID (never a bare local ID — S2).
     authority::require_remote_target(&payload.user.id)?;
     let domain = crate::federation::mapping::domain_of(&payload.user.id).unwrap_or(peer);
-    crate::db::users::upsert_remote_user(
-        &state.db,
+    mirror_remote_user(
+        state,
+        peer,
         &payload.user.id,
         domain,
         &crate::federation::mapping::handle(&payload.user.username, domain),
@@ -454,9 +483,11 @@ async fn apply_reaction(
         return Ok(());
     };
 
-    // Ensure the reactor exists locally (FK), under its own home domain.
+    // Ensure the reactor exists locally (FK), under its own home domain. A
+    // reaction carries no profile, so never overwrite an existing user — that
+    // would wipe a cached display name/avatar set by the reactor's home (S2).
     let reactor_domain = crate::federation::mapping::domain_of(&payload.user_id).unwrap_or(peer);
-    crate::db::users::upsert_remote_user(
+    crate::db::users::ensure_remote_user(
         &state.db,
         &payload.user_id,
         reactor_domain,

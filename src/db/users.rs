@@ -106,6 +106,38 @@ pub async fn upsert_remote_user(
     get_user(pool, id).await
 }
 
+/// Ensure a remote user row exists (for FK integrity) WITHOUT overwriting an
+/// existing cached profile. A new row takes the supplied profile; an existing
+/// row is left untouched.
+///
+/// Use this instead of [`upsert_remote_user`] when the event's signing peer is
+/// not the user's home server (so it is not authoritative for that user's
+/// profile), or when the event carries no profile data. This prevents a peer
+/// from spoofing or clobbering another server's user (S2): only a user's own
+/// home may refresh its profile.
+#[allow(clippy::too_many_arguments)]
+pub async fn ensure_remote_user(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    handle: &str,
+    display_name: Option<&str>,
+    avatar: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query(&super::q(
+        "INSERT INTO users (id, username, display_name, avatar, origin) VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT (id) DO NOTHING",
+    ))
+    .bind(id)
+    .bind(handle)
+    .bind(display_name.unwrap_or(handle))
+    .bind(avatar)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Returns the id of the singleton System user, creating it if absent.
 /// Used as the author/actor id for server-originated writes (MCP, automated
 /// moderation) so they satisfy the `users(id)` foreign keys.

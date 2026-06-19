@@ -33,6 +33,22 @@ pub async fn verify_signed(
         return Err(err(StatusCode::UNAUTHORIZED, "malformed signature header"));
     };
 
+    let date = headers
+        .get("date")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let digest = headers
+        .get("digest")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // Cheap, stateless pre-checks before any DB work, so a flood of unsigned /
+    // stale-dated junk on these unauthenticated-by-IP endpoints cannot drive a
+    // peer lookup per request. The signature is still fully verified below.
+    if !signatures::date_within_skew(date) {
+        return Err(err(StatusCode::UNAUTHORIZED, "stale or missing date"));
+    }
+
     let peer = match crate::db::federation::get_peer(&state.db, &parsed.key_id).await {
         Ok(Some(p)) => p,
         Ok(None) => return Err(err(StatusCode::FORBIDDEN, "unknown peer")),
@@ -42,14 +58,6 @@ pub async fn verify_signed(
         }
     };
 
-    let date = headers
-        .get("date")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let digest = headers
-        .get("digest")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
     if let Err(e) = signatures::verify_request(
         &peer.public_key,
         "POST",

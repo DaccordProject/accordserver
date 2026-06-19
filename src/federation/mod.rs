@@ -72,7 +72,7 @@ impl FederationContext {
             domain: config.domain.clone(),
             public_url: config.public_url.clone(),
             identity,
-            client: reqwest::Client::new(),
+            client: build_client(),
             rate_limits: Arc::new(DashMap::new()),
             seen_signatures: Arc::new(DashMap::new()),
         })
@@ -143,6 +143,20 @@ impl FederationContext {
     }
 }
 
+/// Build the shared HTTP client for all outbound federation requests.
+///
+/// Redirects are disabled (S5): `validate_peer_url_resolved` checks the request
+/// URL before connecting, but a peer could otherwise 3xx-redirect us to an
+/// internal address that was never validated. A bounded total timeout caps how
+/// long a slow/hostile peer can tie up a delivery worker.
+fn build_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default()
+}
+
 /// Background task entry point: drains the outbound delivery queue.
 pub async fn run(state: crate::state::AppState) {
     sender::run(state).await;
@@ -159,7 +173,7 @@ mod tests {
             domain: "a.test".to_string(),
             public_url: "https://a.test".to_string(),
             identity: identity::ServerIdentity::load_or_create(&dir.join("k")).unwrap(),
-            client: reqwest::Client::new(),
+            client: build_client(),
             rate_limits: Arc::new(DashMap::new()),
             seen_signatures: Arc::new(DashMap::new()),
         }
