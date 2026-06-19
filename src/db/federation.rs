@@ -290,6 +290,21 @@ pub async fn interested_servers(pool: &AnyPool, space_id: &str) -> Result<Vec<St
         .collect())
 }
 
+/// Delete inbound dedup rows older than `older_than_secs` to bound table growth
+/// (S3). The retention window must comfortably exceed any peer's retry horizon.
+pub async fn cleanup_dedup(pool: &AnyPool, older_than_secs: i64) -> Result<u64, AppError> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(older_than_secs))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let res = sqlx::query(&crate::db::q(
+        "DELETE FROM federation_inbox_dedup WHERE received_at < ?",
+    ))
+    .bind(&cutoff)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// A queued outbound delivery.
 #[derive(Debug, Clone)]
 pub struct OutboxItem {

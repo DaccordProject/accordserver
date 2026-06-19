@@ -76,5 +76,13 @@ pub async fn verify_signed(
         return Err(err(StatusCode::FORBIDDEN, "peer not trusted"));
     }
 
+    // Per-peer rate limit (S7): bound an authenticated peer's request rate so a
+    // single peer cannot flood the inbox.
+    if let Some(fed) = state.federation.as_ref() {
+        if !fed.allow_request(&peer.domain) {
+            return Err(err(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+        }
+    }
+
     Ok(peer)
 }

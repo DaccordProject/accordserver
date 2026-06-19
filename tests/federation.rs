@@ -736,6 +736,37 @@ async fn joiner_rejects_snapshot_targeting_local_space() {
 }
 
 #[tokio::test]
+async fn dedup_cleanup_prunes_old_rows() {
+    let server = TestServer::new().await;
+
+    // An old dedup row (well beyond retention) and a fresh one.
+    sqlx::query(&accordserver::db::q(
+        "INSERT INTO federation_inbox_dedup (event_id, origin, received_at) VALUES (?, ?, ?)",
+    ))
+    .bind("old-evt")
+    .bind("b.test")
+    .bind("2000-01-01 00:00:00")
+    .execute(server.pool())
+    .await
+    .unwrap();
+    accordserver::db::federation::dedup_first_seen(server.pool(), "fresh-evt", "b.test")
+        .await
+        .unwrap();
+
+    let pruned = accordserver::db::federation::cleanup_dedup(server.pool(), 24 * 3600)
+        .await
+        .unwrap();
+    assert_eq!(pruned, 1);
+
+    // The fresh row survives (still deduped).
+    let still_dup =
+        !accordserver::db::federation::dedup_first_seen(server.pool(), "fresh-evt", "b.test")
+            .await
+            .unwrap();
+    assert!(still_dup);
+}
+
+#[tokio::test]
 async fn missing_signature_is_unauthorized() {
     let mut server = TestServer::new().await;
     server.enable_federation("b.test");

@@ -49,9 +49,23 @@ pub async fn run(state: AppState) {
     };
     tracing::info!("federation sender started for domain `{}`", fed.domain);
 
+    // Retention for the inbound dedup table, and how often to prune it.
+    const DEDUP_RETENTION_SECS: i64 = 24 * 3600;
+    let prune_every = (3600 / TICK.as_secs().max(1)).max(1); // ~hourly
+    let mut tick_count: u64 = 0;
+
     loop {
         tokio::time::sleep(TICK).await;
         let _ = deliver_due_once(&state).await;
+
+        tick_count = tick_count.wrapping_add(1);
+        if tick_count.is_multiple_of(prune_every) {
+            match crate::db::federation::cleanup_dedup(&state.db, DEDUP_RETENTION_SECS).await {
+                Ok(n) if n > 0 => tracing::debug!("pruned {n} federation dedup rows"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("federation dedup cleanup failed: {e}"),
+            }
+        }
     }
 }
 
