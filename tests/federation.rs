@@ -252,28 +252,30 @@ async fn inbound_message_is_stored_and_broadcast() {
 }
 
 #[tokio::test]
-async fn inbound_message_with_spoofed_author_is_rejected() {
+async fn inbound_message_for_foreign_space_is_rejected() {
     let mut server = TestServer::new().await;
     server.enable_federation("a.test");
     let bob = peer_identity("b");
     register_peer(&server, "b.test", &bob, "trusted").await;
-    let (space_id, channel_id) = server.mirror_remote_space("b.test").await;
+    let (_space_id, _channel_id) = server.mirror_remote_space("b.test").await;
 
-    // b.test signs correctly but the author is homed on c.test (S1).
+    // b.test signs but the message id/channel are homed on c.test — b.test is
+    // not authoritative for that space (S1). (envelope.space_id stays on b.test
+    // so authority::check passes; the per-field bind in the applier catches it.)
     let env = message_event(
         "evt-msg-1",
         "b.test",
-        &space_id,
-        &channel_id,
-        "msg1@b.test",
-        "evil@c.test",
-        "evil",
-        "spoofed",
+        "space1@b.test",
+        "chan1@c.test",
+        "msg1@c.test",
+        "bob@b.test",
+        "bob",
+        "foreign",
     );
     let req = signed_inbox_request(&bob, "b.test", "a.test", &env);
     assert_eq!(status_of(&server, req).await, StatusCode::FORBIDDEN);
     assert!(
-        accordserver::db::messages::get_message_row(server.pool(), "msg1@b.test")
+        accordserver::db::messages::get_message_row(server.pool(), "msg1@c.test")
             .await
             .is_err()
     );
@@ -411,6 +413,114 @@ async fn local_message_without_remote_members_does_not_fan_out() {
 }
 
 const JOIN: &str = "/federation/v1/join";
+
+/// Full two-server round-trip over real HTTP: A's user joins a space homed on
+/// B, posts into it (forwarded to B, the authority), and the message fans back
+/// to A. Exercises signing, SSRF-allow for loopback, join handshake, the
+/// remote-homed forward path, and outbound delivery end-to-end.
+#[tokio::test]
+async fn two_server_message_round_trip() {
+    // Permit loopback/http peers for this in-process two-node test only.
+    std::env::set_var("ACCORD_FEDERATION_ALLOW_INSECURE", "1");
+
+    let mut a = TestServer::new().await;
+    a.enable_federation("a.test");
+    let mut b = TestServer::new().await;
+    b.enable_federation("b.test");
+
+    let a_pub = a
+        .state
+        .federation
+        .as_ref()
+        .unwrap()
+        .identity
+        .public_key_b64();
+    let b_pub = b
+        .state
+        .federation
+        .as_ref()
+        .unwrap()
+        .identity
+        .public_key_b64();
+
+    let base_a = a.spawn().await;
+    let base_b = b.spawn().await;
+
+    // Cross-register peers: logical domain + real spawned inbox URL.
+    accordserver::db::federation::upsert_peer(
+        a.pool(),
+        "b.test",
+        &b_pub,
+        &format!("{base_b}{INBOX}"),
+        "trusted",
+    )
+    .await
+    .unwrap();
+    accordserver::db::federation::upsert_peer(
+        b.pool(),
+        "a.test",
+        &a_pub,
+        &format!("{base_a}{INBOX}"),
+        "trusted",
+    )
+    .await
+    .unwrap();
+
+    // B homes a federated space.
+    let owner = b.create_user_with_token("owner").await;
+    let space_b = b.create_space(&owner.user.id, "Federated").await;
+    let chan_b = b.create_channel(&space_b, "general").await;
+    accordserver::db::federation::set_space_federation_enabled(b.pool(), &space_b, true)
+        .await
+        .unwrap();
+
+    // A's local user joins B's space (live POST /federation/v1/join + snapshot).
+    let alice = a.create_user_with_token("alice").await;
+    let mirrored =
+        accordserver::federation::forward::initiate_join(&a.state, "b.test", &space_b, &alice.user)
+            .await
+            .unwrap();
+    assert_eq!(mirrored, format!("{space_b}@b.test"));
+    let joined = accordserver::db::spaces::list_space_ids_for_user(a.pool(), &alice.user.id)
+        .await
+        .unwrap();
+    assert!(joined.contains(&mirrored));
+
+    // alice (on A) posts into the remote-homed space -> forwarded to B.
+    let mirrored_chan = format!("{chan_b}@b.test");
+    let payload = accordserver::federation::forward::forward_message(
+        &a.state,
+        "b.test",
+        &mirrored_chan,
+        &alice.user,
+        "hello from alice",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(payload["content"], "hello from alice");
+    assert_eq!(payload["author"]["id"], format!("{}@a.test", alice.user.id));
+
+    // B persisted it authoritatively (bare ID on B).
+    let msg_qualified = payload["id"].as_str().unwrap().to_string();
+    let msg_bare = msg_qualified.split('@').next().unwrap();
+    let on_b = accordserver::db::messages::get_message_row(b.pool(), msg_bare)
+        .await
+        .unwrap();
+    assert_eq!(on_b.content, "hello from alice");
+    assert_eq!(on_b.author_id, format!("{}@a.test", alice.user.id));
+
+    // B fans the message back out to A; flush the outbox and assert A mirrored it.
+    let delivered = accordserver::federation::sender::deliver_due_once(&b.state).await;
+    assert_eq!(delivered, 1);
+    let on_a = accordserver::db::messages::get_message_row(a.pool(), &msg_qualified)
+        .await
+        .unwrap();
+    assert_eq!(on_a.content, "hello from alice");
+    assert_eq!(on_a.origin.as_deref(), Some("b.test"));
+
+    std::env::remove_var("ACCORD_FEDERATION_ALLOW_INSECURE");
+}
 
 #[tokio::test]
 async fn home_serves_join_and_records_remote_member() {

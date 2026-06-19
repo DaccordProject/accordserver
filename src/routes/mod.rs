@@ -78,6 +78,10 @@ pub fn router(state: AppState) -> Router {
             crate::federation::handshake::JOIN_PATH,
             post(crate::federation::handshake::handle_join),
         )
+        .route(
+            crate::federation::forward::SEND_PATH,
+            post(crate::federation::forward::handle_send),
+        )
         .nest_service("/cdn", cdn_service)
         .nest("/s", seo)
         .nest("/api/v1", api);
@@ -305,6 +309,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(invites::list_space_invites).post(invites::create_space_invite),
         )
         .route("/spaces/{space_id}/join", post(spaces::join_public_space))
+        .route(
+            "/federation/spaces/join",
+            post(spaces::join_federated_space),
+        )
         .route(
             "/spaces/{space_id}/anonymous-count",
             get(spaces::get_anonymous_count),

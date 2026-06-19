@@ -356,9 +356,10 @@ pub async fn apply_snapshot(
     let owner = owner_ref(&snap);
     upsert_member_user(state, home_domain, &owner).await?;
 
-    // Members.
+    // Members. A space's membership can include users from several servers, so
+    // members are not required to be homed on the home server — only the space's
+    // own authoritative state (space/channels/roles/messages) is.
     for m in &snap.members {
-        authority::require_homed_on(&m.id, home_domain, "member")?;
         let domain = mapping::domain_of(&m.id).unwrap_or(home_domain);
         crate::db::users::upsert_remote_user(
             &state.db,
@@ -414,11 +415,10 @@ pub async fn apply_snapshot(
         let _ = &r.space_id;
     }
 
-    // Recent messages.
+    // Recent messages. The message itself must be homed on the home server (its
+    // authoritative space); the author may be a member from another server.
     for m in &snap.messages {
-        if authority::require_homed_on(&m.id, home_domain, "message").is_err()
-            || authority::require_homed_on(&m.author.id, home_domain, "author").is_err()
-        {
+        if authority::require_homed_on(&m.id, home_domain, "message").is_err() {
             continue;
         }
         let domain = mapping::domain_of(&m.author.id).unwrap_or(home_domain);

@@ -77,15 +77,17 @@ async fn apply_message_create(
     let payload: RemoteMessagePayload = serde_json::from_value(env.payload.clone())
         .map_err(|e| AppError::BadRequest(format!("invalid message payload: {e}")))?;
 
-    // Authority (S1): the message, its author, and its channel must all be
-    // homed on the signing peer. (The envelope's space_id was already bound to
-    // the peer by `authority::check`.)
+    // Authority (S1): the message, its channel, and its space must be homed on
+    // the signing peer — the peer is authoritative for the space, so it owns the
+    // message stream. The *author* may be homed elsewhere (the home server
+    // relays messages from members on other servers), so its origin is taken
+    // from its own qualified ID rather than bound to the signer.
     authority::require_homed_on(&payload.id, peer, "message")?;
-    authority::require_homed_on(&payload.author.id, peer, "user")?;
     authority::require_homed_on(&payload.channel_id, peer, "channel")?;
     if let Some(sid) = &payload.space_id {
         authority::require_homed_on(sid, peer, "space")?;
     }
+    let author_domain = crate::federation::mapping::domain_of(&payload.author.id).unwrap_or(peer);
 
     // Input caps (S6): never trust remote-supplied sizes.
     if payload.content.chars().count() > MAX_CONTENT_CHARS {
@@ -113,15 +115,15 @@ async fn apply_message_create(
         return Ok(());
     }
 
-    // Cache the remote author's profile.
+    // Cache the remote author's profile under its own home domain.
     let handle = match &payload.author.username {
-        Some(name) => crate::federation::mapping::handle(name, peer),
+        Some(name) => crate::federation::mapping::handle(name, author_domain),
         None => payload.author.id.clone(),
     };
     crate::db::users::upsert_remote_user(
         &state.db,
         &payload.author.id,
-        peer,
+        author_domain,
         &handle,
         payload.author.display_name.as_deref(),
         payload.author.avatar.as_deref(),

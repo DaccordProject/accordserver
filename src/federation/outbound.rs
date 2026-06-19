@@ -43,20 +43,21 @@ pub async fn fanout_message_create(state: &AppState, msg: &MessageRow) -> Result
     sender::enqueue(state, &envelope, &targets).await
 }
 
-/// Construct an `m.message.create` envelope with all IDs qualified to `domain`.
-fn build_message_create(domain: &str, msg: &MessageRow, author: &User) -> FederationEnvelope {
+/// The `m.message.create` payload (message object) with all IDs qualified to
+/// `domain`. Shared by fanout and the remote-homed `/send` response so peers and
+/// the originating client see an identical, qualified message.
+pub fn message_payload(domain: &str, msg: &MessageRow, author: &User) -> serde_json::Value {
     let q = |id: &str| mapping::qualify(id, domain);
 
     let mentions: Vec<String> = serde_json::from_str(&msg.mentions).unwrap_or_default();
     let qualified_mentions: Vec<String> = mentions.iter().map(|m| q(m)).collect();
     let embeds: serde_json::Value =
         serde_json::from_str(&msg.embeds).unwrap_or(serde_json::Value::Array(vec![]));
-    let space_id = msg.space_id.as_deref().map(q);
 
-    let payload = serde_json::json!({
+    serde_json::json!({
         "id": q(&msg.id),
         "channel_id": q(&msg.channel_id),
-        "space_id": space_id,
+        "space_id": msg.space_id.as_deref().map(q),
         "author": {
             "id": q(&author.id),
             "username": author.username,
@@ -69,13 +70,17 @@ fn build_message_create(domain: &str, msg: &MessageRow, author: &User) -> Federa
         "embeds": embeds,
         "reply_to": msg.reply_to.as_deref().map(q),
         "created_at": msg.created_at,
-    });
+    })
+}
 
+/// Construct an `m.message.create` envelope with all IDs qualified to `domain`.
+fn build_message_create(domain: &str, msg: &MessageRow, author: &User) -> FederationEnvelope {
+    let q = |id: &str| mapping::qualify(id, domain);
     FederationEnvelope::new(
         q(&msg.id),
         domain.to_string(),
         msg.space_id.as_deref().map(q),
         "m.message.create",
-        payload,
+        message_payload(domain, msg, author),
     )
 }

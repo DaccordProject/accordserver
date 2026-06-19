@@ -180,6 +180,27 @@ pub async fn create_message(
     }
 
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+
+    // Remote-homed space: this server is only a replica. Forward the message to
+    // the authoritative home server and return its canonical result; the home
+    // server fans it back to us (and other peers) via our inbox. We deliberately
+    // do NOT persist locally here (the inbox does, with the canonical ID).
+    if let Some(ref sid) = channel.space_id {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, sid).await? {
+            let author = db::users::get_user(&state.db, &auth.user_id).await?;
+            let payload = crate::federation::forward::forward_message(
+                &state,
+                &home,
+                &channel_id,
+                &author,
+                &input.content,
+                input.reply_to.as_deref(),
+            )
+            .await?;
+            return Ok(Json(payload));
+        }
+    }
+
     let msg = db::messages::create_message(
         &state.db,
         &channel_id,

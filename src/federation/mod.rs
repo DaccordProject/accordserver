@@ -8,6 +8,7 @@
 
 pub mod apply;
 pub mod authority;
+pub mod forward;
 pub mod handshake;
 pub mod identity;
 pub mod inbox;

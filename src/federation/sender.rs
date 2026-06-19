@@ -51,43 +51,54 @@ pub async fn run(state: AppState) {
 
     loop {
         tokio::time::sleep(TICK).await;
+        let _ = deliver_due_once(&state).await;
+    }
+}
 
-        let due = match crate::db::federation::outbox_claim_due(&state.db, BATCH).await {
-            Ok(items) => items,
-            Err(e) => {
-                tracing::warn!("federation outbox query failed: {e}");
-                continue;
+/// Process one batch of due outbound deliveries, returning how many succeeded.
+/// Used by the background loop and directly in tests.
+pub async fn deliver_due_once(state: &AppState) -> usize {
+    let Some(fed) = state.federation.clone() else {
+        return 0;
+    };
+    let due = match crate::db::federation::outbox_claim_due(&state.db, BATCH).await {
+        Ok(items) => items,
+        Err(e) => {
+            tracing::warn!("federation outbox query failed: {e}");
+            return 0;
+        }
+    };
+
+    let mut delivered = 0;
+    for item in due {
+        match deliver(state, &fed, &item.target_domain, &item.payload).await {
+            Ok(()) => {
+                let _ = crate::db::federation::outbox_delete(&state.db, &item.id).await;
+                delivered += 1;
             }
-        };
-
-        for item in due {
-            match deliver(&state, &fed, &item.target_domain, &item.payload).await {
-                Ok(()) => {
+            Err(e) => {
+                let attempts = item.attempts + 1;
+                if attempts >= MAX_ATTEMPTS {
+                    tracing::warn!(
+                        "federation delivery to {} dead-lettered after {attempts} attempts: {e}",
+                        item.target_domain
+                    );
                     let _ = crate::db::federation::outbox_delete(&state.db, &item.id).await;
-                }
-                Err(e) => {
-                    let attempts = item.attempts + 1;
-                    if attempts >= MAX_ATTEMPTS {
-                        tracing::warn!(
-                            "federation delivery to {} dead-lettered after {attempts} attempts: {e}",
-                            item.target_domain
-                        );
-                        let _ = crate::db::federation::outbox_delete(&state.db, &item.id).await;
-                    } else {
-                        let backoff = backoff_secs(attempts);
-                        tracing::debug!(
-                            "federation delivery to {} failed (attempt {attempts}), retrying in {backoff}s: {e}",
-                            item.target_domain
-                        );
-                        let _ = crate::db::federation::outbox_reschedule(
-                            &state.db, &item.id, attempts, backoff,
-                        )
-                        .await;
-                    }
+                } else {
+                    let backoff = backoff_secs(attempts);
+                    tracing::debug!(
+                        "federation delivery to {} failed (attempt {attempts}), retrying in {backoff}s: {e}",
+                        item.target_domain
+                    );
+                    let _ = crate::db::federation::outbox_reschedule(
+                        &state.db, &item.id, attempts, backoff,
+                    )
+                    .await;
                 }
             }
         }
     }
+    delivered
 }
 
 fn backoff_secs(attempts: i64) -> i64 {
@@ -139,6 +150,63 @@ async fn deliver(
             resp.status()
         )))
     }
+}
+
+/// Synchronously sign and POST `body` to `path` on a trusted peer, returning
+/// the response status and body. Used by the request-path forwards (initiate
+/// join, post to a remote-homed space) where the caller needs the reply.
+pub async fn request_signed(
+    state: &AppState,
+    target_domain: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<(reqwest::StatusCode, Vec<u8>), AppError> {
+    let fed = state
+        .federation
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("federation disabled".to_string()))?;
+    let peer = crate::db::federation::get_peer(&state.db, target_domain)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("unknown peer {target_domain}")))?;
+    if !peer.is_trusted() {
+        return Err(AppError::Forbidden(format!(
+            "peer {target_domain} not trusted"
+        )));
+    }
+
+    // The peer's endpoints are siblings of its inbox URL.
+    let base = peer
+        .inbox_url
+        .strip_suffix(super::inbox::INBOX_PATH)
+        .unwrap_or(&peer.inbox_url);
+    let url = format!("{base}{path}");
+    peers::validate_peer_url(&url)?;
+
+    let signed = signatures::sign_request(
+        &fed.identity,
+        &fed.domain,
+        "POST",
+        path,
+        target_domain,
+        body,
+    );
+    let resp = fed
+        .client
+        .post(&url)
+        .header("Date", &signed.date)
+        .header("Digest", &signed.digest)
+        .header("Signature", &signed.signature)
+        .header("Content-Type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("post to {target_domain}: {e}")))?;
+    let status = resp.status();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("read response from {target_domain}: {e}")))?;
+    Ok((status, bytes.to_vec()))
 }
 
 /// Extract the path portion of an inbox URL for signing (must match what the
