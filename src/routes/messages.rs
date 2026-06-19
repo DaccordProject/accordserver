@@ -239,6 +239,12 @@ pub async fn create_message(
         }
     }
 
+    // Fan the message out to federated peers that have a member in this space.
+    // No-op unless federation is enabled and the space is locally homed.
+    if let Err(e) = crate::federation::outbound::fanout_message_create(&state, &msg).await {
+        tracing::warn!("federation fanout failed for message {}: {e}", msg.id);
+    }
+
     // Spawn URL unfurling in the background -- if the message has no embeds
     // already and its content contains URLs, fetch OpenGraph metadata and
     // update the message with generated embeds.

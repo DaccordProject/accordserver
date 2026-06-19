@@ -233,6 +233,17 @@ pub async fn add_member_with_origin(
     Ok(())
 }
 
+/// The home domain of a space, or `None` if it is locally homed (the common
+/// case). Used to decide whether we are authoritative for a write (local) or
+/// must forward it to the home server (remote).
+pub async fn space_origin(pool: &AnyPool, space_id: &str) -> Result<Option<String>, AppError> {
+    let row = sqlx::query(&crate::db::q("SELECT origin FROM spaces WHERE id = ?"))
+        .bind(space_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.try_get::<String, _>("origin").ok()))
+}
+
 /// The set of peer domains "interested" in a space: the distinct `origin`s of
 /// its members. Used to fan out events for a locally-homed space to exactly the
 /// servers that have a member there.

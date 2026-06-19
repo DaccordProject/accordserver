@@ -297,6 +297,109 @@ async fn inbound_message_for_unmirrored_channel_is_ignored() {
 }
 
 #[tokio::test]
+async fn local_message_fans_out_to_interested_peers() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+
+    // A local space with a local author and a remote member from b.test.
+    let owner = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&owner.user.id, "Local Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let remote_member = "carol@b.test";
+    accordserver::db::users::upsert_remote_user(
+        server.pool(),
+        remote_member,
+        "b.test",
+        "carol@b.test",
+        Some("Carol"),
+        None,
+    )
+    .await
+    .unwrap();
+    accordserver::db::federation::add_member_with_origin(
+        server.pool(),
+        &space_id,
+        remote_member,
+        Some("b.test"),
+    )
+    .await
+    .unwrap();
+
+    let msg = accordserver::db::messages::create_message(
+        server.pool(),
+        &channel_id,
+        &owner.user.id,
+        Some(&space_id),
+        &accordserver::models::message::CreateMessage {
+            content: "hi peers".into(),
+            tts: None,
+            embeds: None,
+            reply_to: None,
+            thread_id: None,
+            title: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    accordserver::federation::outbound::fanout_message_create(&server.state, &msg)
+        .await
+        .unwrap();
+
+    // An outbound delivery to b.test is queued, carrying a qualified message.
+    let queued = accordserver::db::federation::outbox_claim_due(server.pool(), 10)
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1, "expected one queued delivery");
+    assert_eq!(queued[0].target_domain, "b.test");
+    let env: Value = serde_json::from_str(&queued[0].payload).unwrap();
+    assert_eq!(env["type"], "m.message.create");
+    assert_eq!(env["origin"], "a.test");
+    assert_eq!(env["payload"]["id"], format!("{}@a.test", msg.id));
+    assert_eq!(
+        env["payload"]["author"]["id"],
+        format!("{}@a.test", owner.user.id)
+    );
+}
+
+#[tokio::test]
+async fn local_message_without_remote_members_does_not_fan_out() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+
+    let owner = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&owner.user.id, "Local Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let msg = accordserver::db::messages::create_message(
+        server.pool(),
+        &channel_id,
+        &owner.user.id,
+        Some(&space_id),
+        &accordserver::models::message::CreateMessage {
+            content: "nobody remote here".into(),
+            tts: None,
+            embeds: None,
+            reply_to: None,
+            thread_id: None,
+            title: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    accordserver::federation::outbound::fanout_message_create(&server.state, &msg)
+        .await
+        .unwrap();
+
+    let queued = accordserver::db::federation::outbox_claim_due(server.pool(), 10)
+        .await
+        .unwrap();
+    assert!(queued.is_empty(), "no remote members -> no fanout");
+}
+
+#[tokio::test]
 async fn missing_signature_is_unauthorized() {
     let mut server = TestServer::new().await;
     server.enable_federation("b.test");

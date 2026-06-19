@@ -11,6 +11,7 @@ pub mod authority;
 pub mod identity;
 pub mod inbox;
 pub mod mapping;
+pub mod outbound;
 pub mod peers;
 pub mod sender;
 pub mod signatures;
