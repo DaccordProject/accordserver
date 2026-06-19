@@ -8,6 +8,7 @@
 
 pub mod apply;
 pub mod authority;
+pub mod dm;
 pub mod forward;
 pub mod handshake;
 pub mod identity;
@@ -33,6 +34,10 @@ use crate::state::RateLimitBucket;
 const PEER_CAPACITY: u32 = 300;
 /// Window over which a peer's budget fully refills.
 const PEER_WINDOW_SECS: u64 = 60;
+/// How long a seen signature is remembered for replay rejection. Must cover the
+/// signature `Date` skew window (after which the date check rejects replays on
+/// its own), so 5 minutes mirrors `signatures::MAX_SKEW_SECS`.
+const SIGNATURE_REPLAY_WINDOW_SECS: u64 = 300;
 
 /// Shared, process-wide federation state held in [`crate::state::AppState`].
 #[derive(Clone)]
@@ -47,6 +52,10 @@ pub struct FederationContext {
     pub client: reqwest::Client,
     /// Per-peer inbound rate-limit buckets (S7), keyed by peer domain.
     pub rate_limits: Arc<DashMap<String, RateLimitBucket>>,
+    /// Recently-seen request signatures, for replay rejection across all signed
+    /// S2S endpoints (the inbox additionally dedups by event id). Keyed by the
+    /// base64 signature; values are when it was first seen.
+    pub seen_signatures: Arc<DashMap<String, Instant>>,
 }
 
 impl FederationContext {
@@ -65,6 +74,7 @@ impl FederationContext {
             identity,
             client: reqwest::Client::new(),
             rate_limits: Arc::new(DashMap::new()),
+            seen_signatures: Arc::new(DashMap::new()),
         })
     }
 
@@ -97,6 +107,32 @@ impl FederationContext {
         }
     }
 
+    /// Record a request signature and report whether it is fresh. Returns
+    /// `false` if the same signature was already seen within the replay window
+    /// (i.e. this is a replay and the request should be rejected). The signature
+    /// covers the `Date` header, so an attacker cannot refresh the window by
+    /// re-dating without re-signing.
+    pub fn note_signature(&self, signature_b64: &str) -> bool {
+        let now = Instant::now();
+        let window = std::time::Duration::from_secs(SIGNATURE_REPLAY_WINDOW_SECS);
+        if let Some(seen) = self.seen_signatures.get(signature_b64) {
+            if now.duration_since(*seen) < window {
+                return false;
+            }
+        }
+        self.seen_signatures.insert(signature_b64.to_string(), now);
+        true
+    }
+
+    /// Drop replay-cache entries older than the window. Called periodically by
+    /// the sender loop so the map cannot grow without bound.
+    pub fn prune_signatures(&self) {
+        let now = Instant::now();
+        let window = std::time::Duration::from_secs(SIGNATURE_REPLAY_WINDOW_SECS);
+        self.seen_signatures
+            .retain(|_, seen| now.duration_since(*seen) < window);
+    }
+
     /// The fully-qualified inbox URL advertised to peers.
     pub fn inbox_url(&self) -> String {
         format!(
@@ -125,7 +161,18 @@ mod tests {
             identity: identity::ServerIdentity::load_or_create(&dir.join("k")).unwrap(),
             client: reqwest::Client::new(),
             rate_limits: Arc::new(DashMap::new()),
+            seen_signatures: Arc::new(DashMap::new()),
         }
+    }
+
+    #[test]
+    fn signature_replay_is_rejected_once_seen() {
+        let ctx = test_context();
+        // First sighting is fresh; an immediate repeat is a replay.
+        assert!(ctx.note_signature("sig-abc"));
+        assert!(!ctx.note_signature("sig-abc"));
+        // A different signature is independent.
+        assert!(ctx.note_signature("sig-xyz"));
     }
 
     #[test]

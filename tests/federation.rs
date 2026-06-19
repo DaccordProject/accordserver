@@ -12,6 +12,7 @@ use axum::body::Body;
 use common::TestServer;
 use http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
+use serial_test::serial;
 use tower::ServiceExt;
 
 const INBOX: &str = "/federation/v1/inbox";
@@ -419,6 +420,100 @@ const JOIN: &str = "/federation/v1/join";
 /// to A. Exercises signing, SSRF-allow for loopback, join handshake, the
 /// remote-homed forward path, and outbound delivery end-to-end.
 #[tokio::test]
+#[serial]
+async fn cross_server_dm_round_trip() {
+    std::env::set_var("ACCORD_FEDERATION_ALLOW_INSECURE", "1");
+
+    let mut a = TestServer::new().await;
+    a.enable_federation("a.test");
+    let mut b = TestServer::new().await;
+    b.enable_federation("b.test");
+
+    let a_pub = a.state.federation.as_ref().unwrap().identity.public_key_b64();
+    let b_pub = b.state.federation.as_ref().unwrap().identity.public_key_b64();
+    let base_a = a.spawn().await;
+    let base_b = b.spawn().await;
+
+    accordserver::db::federation::upsert_peer(a.pool(), "b.test", &b_pub, &format!("{base_b}{INBOX}"), "trusted")
+        .await
+        .unwrap();
+    accordserver::db::federation::upsert_peer(b.pool(), "a.test", &a_pub, &format!("{base_a}{INBOX}"), "trusted")
+        .await
+        .unwrap();
+
+    let alice = a.create_user_with_token("alice").await;
+    let bob = b.create_user_with_token("bob").await;
+    let bob_q = format!("{}@b.test", bob.user.id);
+
+    // alice (on A) opens a DM with bob (on B). The DM is anchored on whichever
+    // server holds the lexicographically smaller qualified user id.
+    let chan_a = accordserver::federation::dm::open_dm(&a.state, &alice.user, &bob_q)
+        .await
+        .unwrap();
+
+    let origin_a = accordserver::db::federation::channel_origin(a.pool(), &chan_a.id)
+        .await
+        .unwrap();
+    let home_domain = origin_a.clone().unwrap_or_else(|| "a.test".to_string());
+    let dm_bare = chan_a.id.split('@').next().unwrap().to_string();
+    let id_on_a = chan_a.id.clone();
+    let id_on_b = if home_domain == "b.test" {
+        dm_bare.clone()
+    } else {
+        format!("{dm_bare}@a.test")
+    };
+
+    // Both servers mirror the DM with both participants.
+    assert_eq!(
+        accordserver::db::dm_participants::count_participants(a.pool(), &id_on_a)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        accordserver::db::dm_participants::count_participants(b.pool(), &id_on_b)
+            .await
+            .unwrap(),
+        2
+    );
+
+    // Send a message from the replica side; the home persists and fans it back.
+    let (replica_state, home_state, replica_pool, replica_channel, replica_user) =
+        if home_domain == "a.test" {
+            (&b.state, &a.state, b.pool(), id_on_b.clone(), &bob.user)
+        } else {
+            (&a.state, &b.state, a.pool(), id_on_a.clone(), &alice.user)
+        };
+
+    let payload = accordserver::federation::dm::forward_dm_message(
+        replica_state,
+        &home_domain,
+        &replica_channel,
+        replica_user,
+        "hello over a federated dm",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(payload["content"], "hello over a federated dm");
+
+    // Home fans the message back to the replica's server.
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(home_state).await,
+        1
+    );
+    let msg_id = payload["id"].as_str().unwrap();
+    let on_replica = accordserver::db::messages::get_message_row(replica_pool, msg_id)
+        .await
+        .unwrap();
+    assert_eq!(on_replica.content, "hello over a federated dm");
+    assert_eq!(on_replica.origin.as_deref(), Some(home_domain.as_str()));
+
+    std::env::remove_var("ACCORD_FEDERATION_ALLOW_INSECURE");
+}
+
+#[tokio::test]
+#[serial]
 async fn two_server_message_round_trip() {
     // Permit loopback/http peers for this in-process two-node test only.
     std::env::set_var("ACCORD_FEDERATION_ALLOW_INSECURE", "1");

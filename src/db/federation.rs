@@ -133,6 +133,21 @@ pub async fn dedup_first_seen(
     Ok(res.rows_affected() > 0)
 }
 
+/// Remove a dedup record so a failed-then-retried delivery can be re-applied.
+/// Called when an inbound event passed dedup but its apply step failed: without
+/// this the retry would be silently acknowledged as a duplicate and the event
+/// lost.
+pub async fn dedup_remove(pool: &AnyPool, event_id: &str, origin: &str) -> Result<(), AppError> {
+    sqlx::query(&crate::db::q(
+        "DELETE FROM federation_inbox_dedup WHERE event_id = ? AND origin = ?",
+    ))
+    .bind(event_id)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Replica upserts: mirror remote spaces/channels/roles/members into the local
 // tables using qualified IDs and `origin = <home domain>`. All are idempotent.
@@ -242,6 +257,40 @@ pub async fn space_origin(pool: &AnyPool, space_id: &str) -> Result<Option<Strin
         .fetch_optional(pool)
         .await?;
     Ok(row.and_then(|r| r.try_get::<String, _>("origin").ok()))
+}
+
+/// The home domain of a channel, or `None` if it is locally homed. The DM
+/// analogue of [`space_origin`]: DM channels have no space, so federation
+/// routing for them keys on the channel's own `origin`.
+pub async fn channel_origin(pool: &AnyPool, channel_id: &str) -> Result<Option<String>, AppError> {
+    let row = sqlx::query(&crate::db::q("SELECT origin FROM channels WHERE id = ?"))
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.try_get::<String, _>("origin").ok()))
+}
+
+/// Mirror a remote DM channel (`origin = <home domain>`). Idempotent on the
+/// qualified channel ID. `owner_id` must already be upserted to satisfy the FK.
+pub async fn upsert_remote_dm_channel(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    channel_type: &str,
+    owner_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(&crate::db::q(
+        "INSERT INTO channels (id, name, type, owner_id, position, nsfw, rate_limit, archived, origin) \
+         VALUES (?, '', ?, ?, 0, FALSE, 0, FALSE, ?) \
+         ON CONFLICT (id) DO UPDATE SET origin = excluded.origin",
+    ))
+    .bind(id)
+    .bind(channel_type)
+    .bind(owner_id)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Whether a space has opted in to federation (S9). The home server refuses

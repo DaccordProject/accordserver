@@ -250,6 +250,13 @@ async fn serve_react(
         .await?
     };
 
+    // The target message must exist and live in the channel the permission check
+    // was scoped to — never trust the forwarded message_id/channel_id pairing.
+    let message = crate::db::messages::get_message_row(&state.db, &req.message_id).await?;
+    if message.channel_id != req.channel_id {
+        return Err(AppError::NotFound("unknown_message".to_string()));
+    }
+
     if req.remove {
         crate::db::messages::remove_reaction(&state.db, &req.message_id, &req.actor.id, &req.emoji)
             .await?;
@@ -382,6 +389,12 @@ async fn serve_leave(
     // The space must be homed here.
     crate::db::spaces::get_space_row(&state.db, &req.space_id).await?;
 
+    // Capture interested peers before removal so the departing user's own home
+    // server is still notified even if they were its last member here.
+    let fanout_targets = crate::db::federation::interested_servers(&state.db, &req.space_id)
+        .await
+        .unwrap_or_default();
+
     crate::db::members::remove_member(&state.db, &req.space_id, &req.actor.id).await?;
 
     // Broadcast locally and fan the departure out to remaining interested peers.
@@ -395,8 +408,14 @@ async fn serve_leave(
         });
     }
     let payload = crate::federation::outbound::member_leave_payload(our_domain, &req.actor.id);
-    crate::federation::outbound::fanout_to_space(state, &req.space_id, "m.member.leave", payload)
-        .await?;
+    crate::federation::outbound::fanout_to_targets(
+        state,
+        &req.space_id,
+        "m.member.leave",
+        payload,
+        &fanout_targets,
+    )
+    .await?;
     Ok(())
 }
 

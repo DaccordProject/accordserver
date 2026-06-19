@@ -58,6 +58,10 @@ pub async fn run(state: AppState) {
         tokio::time::sleep(TICK).await;
         let _ = deliver_due_once(&state).await;
 
+        // Prune the in-memory signature replay cache every tick; entries live
+        // for only a few minutes so this keeps the map small under load.
+        fed.prune_signatures();
+
         tick_count = tick_count.wrapping_add(1);
         if tick_count.is_multiple_of(prune_every) {
             match crate::db::federation::cleanup_dedup(&state.db, DEDUP_RETENTION_SECS).await {
@@ -132,14 +136,16 @@ async fn deliver(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("peer {target_domain} not found")))?;
 
-    peers::validate_peer_url(&peer.inbox_url)?;
+    peers::validate_peer_url_resolved(&peer.inbox_url).await?;
 
-    let path = inbox_path(&peer.inbox_url);
+    // Sign the path the receiver verifies against — its own INBOX_PATH constant —
+    // rather than whatever path the configured inbox URL happens to carry, so a
+    // peer whose inbox lives under a prefix still verifies successfully.
     let signed = signatures::sign_request(
         &fed.identity,
         &fed.domain,
         "POST",
-        &path,
+        super::inbox::INBOX_PATH,
         target_domain,
         payload.as_bytes(),
     );
@@ -194,7 +200,7 @@ pub async fn request_signed(
         .strip_suffix(super::inbox::INBOX_PATH)
         .unwrap_or(&peer.inbox_url);
     let url = format!("{base}{path}");
-    peers::validate_peer_url(&url)?;
+    peers::validate_peer_url_resolved(&url).await?;
 
     let signed = signatures::sign_request(
         &fed.identity,
@@ -221,12 +227,4 @@ pub async fn request_signed(
         .await
         .map_err(|e| AppError::Internal(format!("read response from {target_domain}: {e}")))?;
     Ok((status, bytes.to_vec()))
-}
-
-/// Extract the path portion of an inbox URL for signing (must match what the
-/// receiver verifies against).
-fn inbox_path(inbox_url: &str) -> String {
-    reqwest::Url::parse(inbox_url)
-        .map(|u| u.path().to_string())
-        .unwrap_or_else(|_| super::inbox::INBOX_PATH.to_string())
 }

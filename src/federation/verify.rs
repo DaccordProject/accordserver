@@ -71,6 +71,20 @@ pub async fn verify_signed(
         ));
     }
 
+    // Replay rejection for the synchronous forward endpoints, which (unlike the
+    // inbox) have no event-id dedup of their own: a verified signature may only
+    // be used once within its skew window. The inbox is intentionally excluded —
+    // it is idempotent via `(event_id, origin)` dedup, and at-least-once
+    // redelivery legitimately re-presents the same event.
+    if path != crate::federation::inbox::INBOX_PATH {
+        if let Some(fed) = state.federation.as_ref() {
+            if !fed.note_signature(&parsed.signature_b64) {
+                tracing::warn!("federation replayed signature from {}", peer.domain);
+                return Err(err(StatusCode::UNAUTHORIZED, "replayed request"));
+            }
+        }
+    }
+
     // Trust gate (S4): only trusted peers may exchange content.
     if !peer.is_trusted() {
         return Err(err(StatusCode::FORBIDDEN, "peer not trusted"));

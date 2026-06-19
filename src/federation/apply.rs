@@ -63,6 +63,10 @@ pub async fn apply_event(
             apply_typing(state, env).await;
             Ok(Applied::Ok)
         }
+        "m.dm.message.create" => {
+            crate::federation::dm::apply_message_create(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
         _ => Ok(Applied::Unsupported),
     }
 }
@@ -99,33 +103,33 @@ async fn rebroadcast(
 }
 
 #[derive(Deserialize)]
-struct RemoteAuthor {
-    id: String,
+pub struct RemoteAuthor {
+    pub id: String,
     #[serde(default)]
-    username: Option<String>,
+    pub username: Option<String>,
     #[serde(default)]
-    display_name: Option<String>,
+    pub display_name: Option<String>,
     #[serde(default)]
-    avatar: Option<String>,
+    pub avatar: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct RemoteMessagePayload {
-    id: String,
-    channel_id: String,
+pub struct RemoteMessagePayload {
+    pub id: String,
+    pub channel_id: String,
     #[serde(default)]
-    space_id: Option<String>,
-    author: RemoteAuthor,
-    content: String,
+    pub space_id: Option<String>,
+    pub author: RemoteAuthor,
+    pub content: String,
     #[serde(default)]
-    mentions: Vec<String>,
+    pub mentions: Vec<String>,
     #[serde(default)]
-    mention_everyone: bool,
+    pub mention_everyone: bool,
     #[serde(default)]
-    embeds: Vec<serde_json::Value>,
+    pub embeds: Vec<serde_json::Value>,
     #[serde(default)]
-    reply_to: Option<String>,
-    created_at: String,
+    pub reply_to: Option<String>,
+    pub created_at: String,
 }
 
 async fn apply_message_create(

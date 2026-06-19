@@ -222,6 +222,22 @@ pub async fn create_dm_channel(
         ));
     }
 
+    // Cross-server DM: a single recipient on another federated server is opened
+    // through the federation handshake (Phase 1 supports 1:1 remote DMs only).
+    if recipient_ids.len() == 1 {
+        if let Some(fed) = state.federation.as_ref() {
+            if let Some(domain) = crate::federation::mapping::domain_of(&recipient_ids[0]) {
+                if !domain.eq_ignore_ascii_case(&fed.domain) {
+                    let opener = db::users::get_user(&state.db, &auth.user_id).await?;
+                    let channel =
+                        crate::federation::dm::open_dm(&state, &opener, &recipient_ids[0]).await?;
+                    let json = super::spaces::channel_row_to_json_pub(&state.db, &channel).await;
+                    return Ok(Json(serde_json::json!({ "data": json })));
+                }
+            }
+        }
+    }
+
     // Validate all recipient IDs exist and enforce block relationships
     for rid in &recipient_ids {
         db::users::get_user(&state.db, rid).await?;

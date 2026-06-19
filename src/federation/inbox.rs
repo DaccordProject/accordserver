@@ -23,6 +23,16 @@ fn err(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
+/// Undo the dedup record for an event whose apply step did not complete, so a
+/// redelivery is treated as new rather than a duplicate.
+async fn rollback_dedup(state: &AppState, envelope: &mapping::FederationEnvelope) {
+    if let Err(e) =
+        crate::db::federation::dedup_remove(&state.db, &envelope.event_id, &envelope.origin).await
+    {
+        tracing::warn!("inbox dedup rollback failed for {}: {e}", envelope.event_id);
+    }
+}
+
 pub async fn handle_inbox(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -85,6 +95,9 @@ pub async fn handle_inbox(
     match crate::federation::apply::apply_event(&state, &peer.domain, &envelope).await {
         Ok(crate::federation::apply::Applied::Ok) => StatusCode::OK.into_response(),
         Ok(crate::federation::apply::Applied::Unsupported) => {
+            // Roll back dedup: we may add support later, and the peer should be
+            // free to redeliver once we do.
+            rollback_dedup(&state, &envelope).await;
             tracing::debug!(
                 "inbox received unhandled event type `{}` from {}",
                 envelope.event_type,
@@ -93,6 +106,10 @@ pub async fn handle_inbox(
             err(StatusCode::NOT_IMPLEMENTED, "event type not yet supported")
         }
         Err(e) => {
+            // The event passed dedup but failed to apply (possibly transiently).
+            // Roll back the dedup record so the peer's retry can re-apply rather
+            // than being acknowledged as a duplicate and dropped.
+            rollback_dedup(&state, &envelope).await;
             tracing::warn!(
                 "inbox failed to apply {} from {}: {e}",
                 envelope.event_type,

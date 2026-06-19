@@ -31,9 +31,11 @@ pub fn allow_insecure() -> bool {
 
 /// Guard outbound federation requests against SSRF (S5 in the plan): require
 /// https and reject hosts that are private/loopback/link-local IP literals or
-/// `localhost`. Hostnames that resolve to internal addresses are not fully
-/// covered here — a hardening follow-up should pin a resolver — but IP-literal
-/// targets (the common SSRF vector) are blocked.
+/// `localhost`. This is the synchronous half (scheme + IP-literal checks);
+/// [`validate_peer_url_resolved`] additionally resolves hostnames and rejects
+/// those that map to internal addresses. A determined attacker controlling DNS
+/// could still rebind between validation and connect (TOCTOU); fully closing
+/// that requires pinning the resolved IP into the HTTP client.
 pub fn validate_peer_url(url: &str) -> Result<(), AppError> {
     if allow_insecure() {
         return Ok(());
@@ -56,6 +58,43 @@ pub fn validate_peer_url(url: &str) -> Result<(), AppError> {
             return Err(AppError::BadRequest(
                 "peer host resolves to a private address".to_string(),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Full SSRF guard: the synchronous checks plus DNS resolution of the host,
+/// rejecting any name that resolves to a private/loopback/link-local address.
+/// Use this before every outbound federation request.
+pub async fn validate_peer_url_resolved(url: &str) -> Result<(), AppError> {
+    validate_peer_url(url)?;
+    if allow_insecure() {
+        return Ok(());
+    }
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| AppError::BadRequest("invalid peer url".to_string()))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::BadRequest("peer url has no host".to_string()))?;
+    // IP literals were already validated synchronously.
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let mut resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| AppError::BadRequest(format!("could not resolve peer host {host}: {e}")))?
+        .peekable();
+    if resolved.peek().is_none() {
+        return Err(AppError::BadRequest(format!(
+            "peer host {host} did not resolve"
+        )));
+    }
+    for addr in resolved {
+        if is_private(&addr.ip()) {
+            return Err(AppError::BadRequest(format!(
+                "peer host {host} resolves to a private address"
+            )));
         }
     }
     Ok(())
@@ -86,7 +125,7 @@ pub async fn fetch_well_known(
     domain: &str,
 ) -> Result<WellKnown, AppError> {
     let url = format!("{}://{}{}", peer_scheme(), domain, WELL_KNOWN_PATH);
-    validate_peer_url(&url)?;
+    validate_peer_url_resolved(&url).await?;
 
     let resp = client
         .get(&url)
@@ -110,6 +149,6 @@ pub async fn fetch_well_known(
             wk.domain
         )));
     }
-    validate_peer_url(&wk.inbox_url)?;
+    validate_peer_url_resolved(&wk.inbox_url).await?;
     Ok(wk)
 }

@@ -102,6 +102,18 @@ pub fn router(state: AppState) -> Router {
             crate::federation::forward::TYPING_PATH,
             post(crate::federation::forward::handle_typing),
         )
+        .route(
+            crate::federation::dm::DM_OPEN_PATH,
+            post(crate::federation::dm::handle_open),
+        )
+        .route(
+            crate::federation::dm::DM_ANNOUNCE_PATH,
+            post(crate::federation::dm::handle_announce),
+        )
+        .route(
+            crate::federation::dm::DM_SEND_PATH,
+            post(crate::federation::dm::handle_send),
+        )
         .nest_service("/cdn", cdn_service)
         .nest("/s", seo)
         .nest("/api/v1", api);

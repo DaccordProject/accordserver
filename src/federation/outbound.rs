@@ -24,17 +24,34 @@ pub async fn fanout_to_space(
     event_type: &str,
     payload: serde_json::Value,
 ) -> Result<(), AppError> {
+    let targets = crate::db::federation::interested_servers(&state.db, local_space_id).await?;
+    fanout_to_targets(state, local_space_id, event_type, payload, &targets).await
+}
+
+/// Like [`fanout_to_space`] but with a precomputed target set. Use this when the
+/// membership that determines interest is about to change — e.g. member leave or
+/// kick removes the row *before* fanout, so the departing member's home server
+/// must be captured via [`crate::db::federation::interested_servers`] first or it
+/// would be dropped from the target set and never learn of the departure.
+pub async fn fanout_to_targets(
+    state: &AppState,
+    local_space_id: &str,
+    event_type: &str,
+    payload: serde_json::Value,
+    targets: &[String],
+) -> Result<(), AppError> {
     let Some(fed) = state.federation.as_ref() else {
         return Ok(());
     };
+    if targets.is_empty() {
+        return Ok(());
+    }
+    // Only the home server is authoritative for fanout; remote-homed spaces are
+    // handled by the forward path instead.
     if crate::db::federation::space_origin(&state.db, local_space_id)
         .await?
         .is_some()
     {
-        return Ok(());
-    }
-    let targets = crate::db::federation::interested_servers(&state.db, local_space_id).await?;
-    if targets.is_empty() {
         return Ok(());
     }
     let envelope = FederationEnvelope::new(
@@ -44,7 +61,7 @@ pub async fn fanout_to_space(
         event_type,
         payload,
     );
-    sender::enqueue(state, &envelope, &targets).await
+    sender::enqueue(state, &envelope, targets).await
 }
 
 /// Fan a locally-created message out to interested peers.

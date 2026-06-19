@@ -201,6 +201,25 @@ pub async fn create_message(
         }
     }
 
+    // Remote-homed DM: we are only a replica. Forward to the home server, which
+    // persists the canonical message and fans it back to us via the inbox.
+    let is_dm = channel.space_id.is_none() && crate::federation::dm::is_dm(&channel.channel_type);
+    if is_dm {
+        if let Some(home) = crate::db::federation::channel_origin(&state.db, &channel_id).await? {
+            let author = db::users::get_user(&state.db, &auth.user_id).await?;
+            let payload = crate::federation::dm::forward_dm_message(
+                &state,
+                &home,
+                &channel_id,
+                &author,
+                &input.content,
+                input.reply_to.as_deref(),
+            )
+            .await?;
+            return Ok(Json(payload));
+        }
+    }
+
     let msg = db::messages::create_message(
         &state.db,
         &channel_id,
@@ -214,6 +233,18 @@ pub async fn create_message(
 
     let json = message_row_to_json_with_attachments(&msg, &[], None);
 
+    // DMs have no space, so gateway delivery targets the participant user IDs
+    // directly rather than space membership.
+    let dm_targets = if is_dm {
+        Some(
+            db::dm_participants::list_participant_ids(&state.db, &channel_id)
+                .await
+                .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
+
     // Broadcast to gateway
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
@@ -223,7 +254,7 @@ pub async fn create_message(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id.clone(),
-            target_user_ids: None,
+            target_user_ids: dm_targets.clone(),
             event,
             intent: "messages".to_string(),
         });
@@ -264,6 +295,21 @@ pub async fn create_message(
     // No-op unless federation is enabled and the space is locally homed.
     if let Err(e) = crate::federation::outbound::fanout_message_create(&state, &msg).await {
         tracing::warn!("federation fanout failed for message {}: {e}", msg.id);
+    }
+
+    // Fan a locally-homed DM message out to its remote participants' servers.
+    if is_dm {
+        if let Some(fed) = state.federation.as_ref() {
+            if let Ok(author) = db::users::get_user(&state.db, &auth.user_id).await {
+                let qualified =
+                    crate::federation::outbound::message_payload(&fed.domain, &msg, &author);
+                if let Err(e) =
+                    crate::federation::dm::fanout_dm_message(&state, &channel, &qualified).await
+                {
+                    tracing::warn!("dm fanout failed for message {}: {e}", msg.id);
+                }
+            }
+        }
     }
 
     // Spawn URL unfurling in the background -- if the message has no embeds
