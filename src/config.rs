@@ -10,6 +10,19 @@ pub struct MasterServerConfig {
     pub heartbeat_interval: u64,
 }
 
+/// Peer-to-peer federation configuration. Present only when `FEDERATION_DOMAIN`
+/// is set.
+#[derive(Debug, Clone)]
+pub struct FederationConfig {
+    /// This server's domain, used to qualify local IDs (`<snowflake>@<domain>`)
+    /// and as the signing key id in outbound requests.
+    pub domain: String,
+    /// Public base URL where this server's federation endpoints are reachable.
+    pub public_url: String,
+    /// Whether the outbound sender + inbox are active.
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveKitConfig {
     pub internal_url: String,
@@ -58,6 +71,7 @@ pub struct Config {
     pub test_mode: bool,
     pub livekit: Option<LiveKitConfig>,
     pub master_server: Option<MasterServerConfig>,
+    pub federation: Option<FederationConfig>,
     pub storage_path: std::path::PathBuf,
     /// AES-256-GCM key for encrypting TOTP secrets at rest.
     /// Derived from TOTP_ENCRYPTION_KEY env var via SHA-256.
@@ -154,6 +168,23 @@ impl Config {
                     .unwrap_or(60),
             });
 
+        let federation = std::env::var("FEDERATION_DOMAIN")
+            .ok()
+            .filter(|d| !d.is_empty())
+            .map(|domain| {
+                let public_url = std::env::var("FEDERATION_PUBLIC_URL")
+                    .or_else(|_| std::env::var("MASTER_SERVER_PUBLIC_URL"))
+                    .unwrap_or_else(|_| format!("https://{domain}"));
+                let enabled = std::env::var("FEDERATION_ENABLED")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(true);
+                FederationConfig {
+                    domain,
+                    public_url,
+                    enabled,
+                }
+            });
+
         let totp_key = std::env::var("TOTP_ENCRYPTION_KEY").ok().map(|key| {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
@@ -190,6 +221,7 @@ impl Config {
                 .unwrap_or(false),
             livekit,
             master_server,
+            federation,
             storage_path,
             totp_key,
             mcp_api_key,
@@ -219,6 +251,9 @@ mod tests {
         std::env::remove_var("MASTER_SERVER_PUBLIC_URL");
         std::env::remove_var("MASTER_HEARTBEAT_INTERVAL");
         std::env::remove_var("MCP_API_KEY");
+        std::env::remove_var("FEDERATION_DOMAIN");
+        std::env::remove_var("FEDERATION_PUBLIC_URL");
+        std::env::remove_var("FEDERATION_ENABLED");
     }
 
     #[test]

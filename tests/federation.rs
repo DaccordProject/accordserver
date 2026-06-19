@@ -1,0 +1,187 @@
+//! Phase 0 federation tests: the signed-inbox security envelope.
+//!
+//! These exercise the inbound `POST /federation/v1/inbox` pipeline end-to-end
+//! through the real router (via `oneshot`), proving signature verification,
+//! authority binding, the trust gate, and dedup — without needing real ports.
+
+mod common;
+
+use accordserver::federation::identity::ServerIdentity;
+use accordserver::federation::signatures::sign_request;
+use axum::body::Body;
+use common::TestServer;
+use http::{Method, Request, StatusCode};
+use serde_json::{json, Value};
+use tower::ServiceExt;
+
+const INBOX: &str = "/federation/v1/inbox";
+
+/// A throwaway signing identity for a peer "server" in a test.
+fn peer_identity(tag: &str) -> ServerIdentity {
+    let dir = accordserver::storage::temp_storage_path();
+    ServerIdentity::load_or_create(&dir.join(format!("{tag}-key"))).unwrap()
+}
+
+/// Build a signed inbox request. When `signer` differs from the peer whose key
+/// is registered, the signature will fail to verify.
+fn signed_inbox_request(
+    signer: &ServerIdentity,
+    key_id: &str,
+    target_domain: &str,
+    envelope: &Value,
+) -> Request<Body> {
+    let body = serde_json::to_vec(envelope).unwrap();
+    let signed = sign_request(signer, key_id, "POST", INBOX, target_domain, &body);
+    Request::builder()
+        .method(Method::POST)
+        .uri(INBOX)
+        .header("Date", signed.date)
+        .header("Digest", signed.digest)
+        .header("Signature", signed.signature)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn ping(event_id: &str, origin: &str) -> Value {
+    json!({ "event_id": event_id, "origin": origin, "type": "m.ping", "payload": {} })
+}
+
+/// Register peer `domain` on `server` with `identity`'s public key and trust.
+async fn register_peer(
+    server: &TestServer,
+    domain: &str,
+    identity: &ServerIdentity,
+    trust: &str,
+) {
+    accordserver::db::federation::upsert_peer(
+        server.pool(),
+        domain,
+        &identity.public_key_b64(),
+        &format!("https://{domain}{INBOX}"),
+        trust,
+    )
+    .await
+    .unwrap();
+}
+
+async fn status_of(server: &TestServer, req: Request<Body>) -> StatusCode {
+    server.router().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn well_known_is_served_when_federated() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("b.test");
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/.well-known/accord-federation")
+        .body(Body::empty())
+        .unwrap();
+    let resp = server.router().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = common::parse_body(resp).await;
+    assert_eq!(body["domain"], "b.test");
+    assert!(body["public_key"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(body["inbox_url"], "https://b.test/federation/v1/inbox");
+}
+
+#[tokio::test]
+async fn well_known_404_without_federation() {
+    let server = TestServer::new().await;
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/.well-known/accord-federation")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(&server, req).await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn signed_ping_from_trusted_peer_is_accepted() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("b.test");
+    let alice = peer_identity("a");
+    register_peer(&server, "a.test", &alice, "trusted").await;
+
+    let req = signed_inbox_request(&alice, "a.test", "b.test", &ping("evt-1", "a.test"));
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn unknown_peer_is_rejected() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("b.test");
+    let alice = peer_identity("a");
+    // Not registered.
+    let req = signed_inbox_request(&alice, "a.test", "b.test", &ping("evt-1", "a.test"));
+    assert_eq!(status_of(&server, req).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn pending_peer_cannot_exchange_content() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("b.test");
+    let alice = peer_identity("a");
+    register_peer(&server, "a.test", &alice, "pending").await;
+
+    let req = signed_inbox_request(&alice, "a.test", "b.test", &ping("evt-1", "a.test"));
+    // Signature is valid, but the trust gate rejects a pending peer (S4).
+    assert_eq!(status_of(&server, req).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn bad_signature_is_rejected() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("b.test");
+    let alice = peer_identity("a");
+    register_peer(&server, "a.test", &alice, "trusted").await;
+
+    // Sign with a *different* key while claiming to be a.test.
+    let impostor = peer_identity("impostor");
+    let req = signed_inbox_request(&impostor, "a.test", "b.test", &ping("evt-1", "a.test"));
+    assert_eq!(status_of(&server, req).await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn origin_spoofing_is_rejected() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("b.test");
+    let alice = peer_identity("a");
+    register_peer(&server, "a.test", &alice, "trusted").await;
+
+    // a.test signs correctly but claims the event originated on c.test (S1).
+    let req = signed_inbox_request(&alice, "a.test", "b.test", &ping("evt-1", "c.test"));
+    assert_eq!(status_of(&server, req).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn duplicate_event_is_idempotent() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("b.test");
+    let alice = peer_identity("a");
+    register_peer(&server, "a.test", &alice, "trusted").await;
+
+    let first = signed_inbox_request(&alice, "a.test", "b.test", &ping("dup-1", "a.test"));
+    assert_eq!(status_of(&server, first).await, StatusCode::OK);
+
+    // Same event_id+origin again: deduped, still acknowledged.
+    let second = signed_inbox_request(&alice, "a.test", "b.test", &ping("dup-1", "a.test"));
+    assert_eq!(status_of(&server, second).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn missing_signature_is_unauthorized() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("b.test");
+
+    let body = serde_json::to_vec(&ping("evt-1", "a.test")).unwrap();
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(INBOX)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(status_of(&server, req).await, StatusCode::UNAUTHORIZED);
+}

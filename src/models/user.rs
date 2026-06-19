@@ -17,6 +17,11 @@ pub struct User {
     pub flags: i64,
     pub public_flags: i64,
     pub created_at: String,
+    /// Home domain for a federated (remote) user, or `None` when the user is
+    /// local to this server. Local users keep bare snowflake IDs; remote users
+    /// have qualified IDs (`<snowflake>@<domain>`) and the domain here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// Public-facing subset of `User` returned when looking up another user's profile.
@@ -34,6 +39,8 @@ pub struct PublicUser {
     pub system: bool,
     pub public_flags: i64,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 impl From<User> for PublicUser {
@@ -50,6 +57,7 @@ impl From<User> for PublicUser {
             system: u.system,
             public_flags: u.public_flags,
             created_at: u.created_at,
+            origin: u.origin,
         }
     }
 }

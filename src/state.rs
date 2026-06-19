@@ -75,6 +75,9 @@ pub struct AppState {
     pub settings: Arc<ArcSwap<ServerSettings>>,
     pub master_config: Option<MasterServerConfig>,
     pub master_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Peer-to-peer federation context (signing identity, domain, HTTP client).
+    /// `None` when federation is disabled, leaving non-federated deploys unaffected.
+    pub federation: Option<Arc<crate::federation::FederationContext>>,
     /// ticket_hash -> MfaTicket; short-lived tickets for 2FA login flow
     pub mfa_tickets: Arc<DashMap<String, MfaTicket>>,
     /// user_id -> TotpAttemptTracker; brute-force protection for TOTP verification

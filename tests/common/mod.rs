@@ -136,6 +136,7 @@ impl TestServer {
             settings: Arc::new(ArcSwap::from_pointee(settings)),
             master_config: None,
             master_task: Arc::new(Mutex::new(None)),
+            federation: None,
             mfa_tickets: Arc::new(DashMap::new()),
             totp_attempts: Arc::new(DashMap::new()),
             totp_key: None,
@@ -152,6 +153,19 @@ impl TestServer {
     /// Returns an Axum Router wired to this server's state for `oneshot()` calls.
     pub fn router(&self) -> axum::Router {
         routes::router(self.state.clone())
+    }
+
+    /// Enable peer-to-peer federation on this server with the given domain.
+    /// Generates an Ed25519 identity under the server's temp storage path.
+    pub fn enable_federation(&mut self, domain: &str) {
+        let cfg = accordserver::config::FederationConfig {
+            domain: domain.to_string(),
+            public_url: format!("https://{domain}"),
+            enabled: true,
+        };
+        let ctx = accordserver::federation::FederationContext::build(&cfg, &self.state.storage_path)
+            .expect("failed to build federation context");
+        self.state.federation = Some(Arc::new(ctx));
     }
 
     /// Returns a reference to the underlying database pool.

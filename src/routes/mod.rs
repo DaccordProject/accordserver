@@ -64,6 +64,16 @@ pub fn router(state: AppState) -> Router {
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/mcp", post(crate::mcp::handle_mcp))
         .route("/invite/{code}", get(invite_page::invite_page))
+        // Federation: signature-authed (not bearer/rate-limited), so wired here
+        // rather than under /api/v1.
+        .route(
+            crate::federation::peers::WELL_KNOWN_PATH,
+            get(crate::federation::wellknown::handle_well_known),
+        )
+        .route(
+            crate::federation::inbox::INBOX_PATH,
+            post(crate::federation::inbox::handle_inbox),
+        )
         .nest_service("/cdn", cdn_service)
         .nest("/s", seo)
         .nest("/api/v1", api);
@@ -444,6 +454,15 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/admin/users/{user_id}/reset-password",
             post(admin::reset_user_password),
+        )
+        // Admin: federation peer management
+        .route(
+            "/admin/federation/peers",
+            get(admin::list_federation_peers).post(admin::add_federation_peer),
+        )
+        .route(
+            "/admin/federation/peers/{domain}",
+            patch(admin::update_federation_peer).delete(admin::delete_federation_peer),
         )
         // Admin settings (GET + PATCH, admin-only)
         .route(

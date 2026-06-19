@@ -6,6 +6,7 @@ pub mod bans;
 pub mod channels;
 pub mod dm_participants;
 pub mod emojis;
+pub mod federation;
 pub mod invites;
 pub mod members;
 pub mod messages;

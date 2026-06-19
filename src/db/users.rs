@@ -21,10 +21,11 @@ fn row_to_user(row: sqlx::any::AnyRow) -> User {
         flags: row.get("flags"),
         public_flags: row.get("public_flags"),
         created_at: row.get("created_at"),
+        origin: row.try_get("origin").ok().flatten(),
     }
 }
 
-const SELECT_USERS: &str = "SELECT id, username, display_name, avatar, banner, accent_color, bio, bot, system, is_admin, totp_enabled, disabled, flags, public_flags, created_at FROM users";
+const SELECT_USERS: &str = "SELECT id, username, display_name, avatar, banner, accent_color, bio, bot, system, is_admin, totp_enabled, disabled, flags, public_flags, created_at, origin FROM users";
 
 pub async fn get_user(pool: &AnyPool, user_id: &str) -> Result<User, AppError> {
     let row = sqlx::query(&super::q(&format!("{SELECT_USERS} WHERE id = ?")))

@@ -268,3 +268,140 @@ pub async fn reset_user_password(
         }
     })))
 }
+
+// =========================================================================
+// Federation peers
+// =========================================================================
+
+#[derive(Deserialize)]
+pub struct AddPeerInput {
+    /// Domain of the peer to add (e.g. "b.example"). Its `.well-known`
+    /// document is fetched to discover the public key and inbox URL.
+    pub domain: String,
+    /// When true, mark the peer `trusted` immediately so content can be
+    /// exchanged. Otherwise it starts `pending` (key pinned only).
+    #[serde(default)]
+    pub trusted: bool,
+}
+
+#[derive(Deserialize)]
+pub struct UpdatePeerInput {
+    /// Set/clear the trusted flag.
+    pub trusted: Option<bool>,
+    /// Re-fetch the peer's `.well-known` to refresh its key and inbox URL.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+fn peer_json(peer: &db::federation::Peer) -> serde_json::Value {
+    serde_json::json!({
+        "domain": peer.domain,
+        "inbox_url": peer.inbox_url,
+        "trust_state": peer.trust_state,
+        "public_key": peer.public_key,
+    })
+}
+
+/// A reqwest client for fetching peer metadata (reuses the federation client
+/// when available).
+fn fed_client(state: &AppState) -> reqwest::Client {
+    state
+        .federation
+        .as_ref()
+        .map(|f| f.client.clone())
+        .unwrap_or_default()
+}
+
+pub async fn list_federation_peers(
+    state: State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+    let peers = db::federation::list_peers(&state.db).await?;
+    let data: Vec<_> = peers.iter().map(peer_json).collect();
+    Ok(Json(serde_json::json!({ "data": data })))
+}
+
+pub async fn add_federation_peer(
+    state: State<AppState>,
+    auth: AuthUser,
+    Json(input): Json<AddPeerInput>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+
+    let domain = input.domain.trim().to_ascii_lowercase();
+    if domain.is_empty() {
+        return Err(AppError::BadRequest("domain is required".to_string()));
+    }
+
+    // Discover the peer's public key and inbox by fetching its well-known.
+    let client = fed_client(&state);
+    let wk = crate::federation::peers::fetch_well_known(&client, &domain).await?;
+
+    let trust_state = if input.trusted { "trusted" } else { "pending" };
+    db::federation::upsert_peer(
+        &state.db,
+        &domain,
+        &wk.public_key,
+        &wk.inbox_url,
+        trust_state,
+    )
+    .await?;
+    // upsert_peer preserves an existing peer's trust; apply an explicit change.
+    if input.trusted {
+        db::federation::set_peer_trust(&state.db, &domain, "trusted").await?;
+    }
+
+    let peer = db::federation::get_peer(&state.db, &domain)
+        .await?
+        .ok_or_else(|| AppError::Internal("peer vanished after upsert".to_string()))?;
+    Ok(Json(serde_json::json!({ "data": peer_json(&peer) })))
+}
+
+pub async fn update_federation_peer(
+    state: State<AppState>,
+    Path(domain): Path<String>,
+    auth: AuthUser,
+    Json(input): Json<UpdatePeerInput>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+    let domain = domain.to_ascii_lowercase();
+
+    db::federation::get_peer(&state.db, &domain)
+        .await?
+        .ok_or_else(|| AppError::NotFound("unknown_peer".to_string()))?;
+
+    if input.refresh {
+        let client = fed_client(&state);
+        let wk = crate::federation::peers::fetch_well_known(&client, &domain).await?;
+        // Preserve trust; only the key/inbox are refreshed.
+        let existing = db::federation::get_peer(&state.db, &domain).await?;
+        let trust = existing
+            .as_ref()
+            .map(|p| p.trust_state.clone())
+            .unwrap_or_else(|| "pending".to_string());
+        db::federation::upsert_peer(&state.db, &domain, &wk.public_key, &wk.inbox_url, &trust)
+            .await?;
+    }
+
+    if let Some(trusted) = input.trusted {
+        let state_str = if trusted { "trusted" } else { "pending" };
+        db::federation::set_peer_trust(&state.db, &domain, state_str).await?;
+    }
+
+    let peer = db::federation::get_peer(&state.db, &domain)
+        .await?
+        .ok_or_else(|| AppError::NotFound("unknown_peer".to_string()))?;
+    Ok(Json(serde_json::json!({ "data": peer_json(&peer) })))
+}
+
+pub async fn delete_federation_peer(
+    state: State<AppState>,
+    Path(domain): Path<String>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+    let domain = domain.to_ascii_lowercase();
+    db::federation::delete_peer(&state.db, &domain).await?;
+    Ok(Json(serde_json::json!({ "data": { "deleted": true } })))
+}
