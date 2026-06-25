@@ -151,6 +151,14 @@ pub async fn emoji_origin(pool: &AnyPool, emoji_id: &str) -> Result<Option<Strin
     Ok(row.and_then(|r| r.try_get::<String, _>("origin").ok()))
 }
 
+pub async fn emoji_space_id(pool: &AnyPool, emoji_id: &str) -> Result<Option<String>, AppError> {
+    let row = sqlx::query(&super::q("SELECT space_id FROM emojis WHERE id = ?"))
+        .bind(emoji_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.try_get::<String, _>("space_id").ok()))
+}
+
 /// Mirror a remote space's emoji (`origin = <home domain>`). Idempotent on the
 /// qualified emoji ID. `image_url` is an absolute home-server URL (the image is
 /// not mirrored). Role restrictions are replaced wholesale, but only for roles

@@ -157,16 +157,19 @@ async fn apply_message_create(
 
     // We must already mirror this channel (i.e. one of our users joined the
     // space). If not, we are not a participant — acknowledge and ignore.
-    if crate::db::channels::get_channel_row(&state.db, &payload.channel_id)
-        .await
-        .is_err()
-    {
+    let Ok(channel) = crate::db::channels::get_channel_row(&state.db, &payload.channel_id).await
+    else {
         tracing::debug!(
             "ignoring federated message for unmirrored channel {}",
             payload.channel_id
         );
         return Ok(());
-    }
+    };
+    // Route storage and delivery on the channel's *own* space, never the
+    // peer-supplied `payload.space_id`: a trusted peer could otherwise set an
+    // arbitrary space_id and have the message broadcast to (or stored against)
+    // a space the channel does not belong to (gateway scoping bypass).
+    let channel_space_id = channel.space_id.as_deref();
 
     // Cache the remote author's profile under its own home domain. Only the
     // author's own home server may set/refresh that profile (S2).
@@ -188,7 +191,7 @@ async fn apply_message_create(
     let insert = crate::db::messages::RemoteMessageInsert {
         id: &payload.id,
         channel_id: &payload.channel_id,
-        space_id: payload.space_id.as_deref(),
+        space_id: channel_space_id,
         author_id: &payload.author.id,
         content: &payload.content,
         created_at: &payload.created_at,
@@ -214,7 +217,7 @@ async fn apply_message_create(
             "data": json,
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: payload.space_id.clone(),
+            space_id: channel_space_id.map(str::to_string),
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
@@ -569,8 +572,6 @@ async fn apply_emoji_upsert(
 #[derive(Deserialize)]
 struct RemoteEmojiDelete {
     id: String,
-    #[serde(default)]
-    space_id: Option<String>,
 }
 
 async fn apply_emoji_delete(
@@ -590,13 +591,17 @@ async fn apply_emoji_delete(
     {
         return Ok(());
     }
+    // Route delivery on the emoji's *own* space (read before deletion), never the
+    // peer-supplied `payload.space_id`: a peer could otherwise misroute the
+    // broadcast to an unrelated space's subscribers (gateway scoping bypass).
+    let emoji_space_id = crate::db::emojis::emoji_space_id(&state.db, &payload.id).await?;
     crate::db::emojis::delete_emoji(&state.db, &payload.id).await?;
 
     rebroadcast(
         state,
-        payload.space_id.clone(),
+        emoji_space_id.clone(),
         "emoji.delete",
-        serde_json::json!({ "space_id": payload.space_id, "emoji_id": payload.id }),
+        serde_json::json!({ "space_id": emoji_space_id, "emoji_id": payload.id }),
         "emojis",
     )
     .await;
