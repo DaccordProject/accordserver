@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     target_id TEXT,
     target_type TEXT,
     reason TEXT,
-    changes JSONB,
+    changes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

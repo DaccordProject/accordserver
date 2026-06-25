@@ -163,6 +163,13 @@ pub async fn upsert_remote_space(
     slug: &str,
     owner_id: &str,
 ) -> Result<(), AppError> {
+    // `idx_spaces_slug` is globally unique, but a remote space's slug is only
+    // unique within its home server — it can collide with a local space (or a
+    // space mirrored from another peer) that happens to share the slug. Qualify
+    // the mirrored slug with the home domain so it stays globally unique. Local
+    // slugs are restricted to `[a-z0-9-]` (never `@`), so this can never clash
+    // with a bare local slug.
+    let qualified_slug = format!("{slug}@{origin}");
     sqlx::query(&crate::db::q(
         "INSERT INTO spaces (id, name, slug, description, owner_id, public, allow_guest_access, origin, federation_enabled) \
          VALUES (?, ?, ?, '', ?, FALSE, FALSE, ?, 1) \
@@ -170,7 +177,7 @@ pub async fn upsert_remote_space(
     ))
     .bind(id)
     .bind(name)
-    .bind(slug)
+    .bind(&qualified_slug)
     .bind(owner_id)
     .bind(origin)
     .execute(pool)
