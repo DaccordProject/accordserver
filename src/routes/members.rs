@@ -261,6 +261,14 @@ pub async fn kick_member(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "kick_members").await?;
     require_hierarchy(&state.db, &space_id, &auth, &user_id).await?;
+
+    // Capture interested peers BEFORE removal: once the kicked member's row is
+    // gone, their home server may no longer appear in the interested set and
+    // would never learn of the departure.
+    let fanout_targets = crate::db::federation::interested_servers(&state.db, &space_id)
+        .await
+        .unwrap_or_default();
+
     db::members::remove_member(&state.db, &space_id, &user_id).await?;
 
     // Broadcast member.leave to the space
@@ -279,6 +287,19 @@ pub async fn kick_member(
             event,
             intent: "members".to_string(),
         });
+    }
+
+    // Fan the kick out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        let payload = crate::federation::outbound::member_leave_payload(&fed.domain, &user_id);
+        let _ = crate::federation::outbound::fanout_to_targets(
+            &state,
+            &space_id,
+            "m.member.leave",
+            payload,
+            &fanout_targets,
+        )
+        .await;
     }
 
     Ok(Json(serde_json::json!({ "data": null })))
@@ -309,6 +330,34 @@ pub async fn leave_space(
         ));
     }
 
+    // Remote-homed space: forward the departure to the authoritative home, then
+    // drop our local replica membership.
+    if let Some(home) = crate::db::federation::space_origin(&state.db, &space_id).await? {
+        let actor = db::users::get_user(&state.db, &auth.user_id).await?;
+        crate::federation::forward::forward_leave(&state, &home, &space_id, &actor).await?;
+        db::members::remove_member(&state.db, &space_id, &auth.user_id).await?;
+        if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+            let event = serde_json::json!({
+                "op": 0,
+                "type": "member.leave",
+                "data": { "space_id": space_id, "user_id": auth.user_id }
+            });
+            let _ = dispatcher.send(GatewayBroadcast {
+                space_id: Some(space_id.clone()),
+                target_user_ids: None,
+                event,
+                intent: "members".to_string(),
+            });
+        }
+        return Ok(Json(serde_json::json!({ "data": null })));
+    }
+
+    // Capture interested peers BEFORE removal so the leaving member's home
+    // server is still in the target set (see kick_member).
+    let fanout_targets = crate::db::federation::interested_servers(&state.db, &space_id)
+        .await
+        .unwrap_or_default();
+
     if params.delete_data.unwrap_or(false) {
         db::members::remove_member_and_data(&state.db, &space_id, &auth.user_id).await?;
     } else {
@@ -326,11 +375,24 @@ pub async fn leave_space(
             }
         });
         let _ = dispatcher.send(GatewayBroadcast {
-            space_id: Some(space_id),
+            space_id: Some(space_id.clone()),
             target_user_ids: None,
             event,
             intent: "members".to_string(),
         });
+    }
+
+    // Fan the departure out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        let payload = crate::federation::outbound::member_leave_payload(&fed.domain, &auth.user_id);
+        let _ = crate::federation::outbound::fanout_to_targets(
+            &state,
+            &space_id,
+            "m.member.leave",
+            payload,
+            &fanout_targets,
+        )
+        .await;
     }
 
     Ok(Json(serde_json::json!({ "data": null })))

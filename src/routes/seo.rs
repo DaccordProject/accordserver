@@ -1267,6 +1267,7 @@ mod tests {
             webhook_id: None,
             thread_id: None,
             title: None,
+            origin: None,
         }
     }
 

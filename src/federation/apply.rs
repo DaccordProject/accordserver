@@ -1,0 +1,659 @@
+//! Applies inbound federation content events to the local replica and injects
+//! them into the gateway.
+//!
+//! Loop prevention (S7): appliers inject into the local gateway **only** and
+//! never enqueue outbound fanout — events ping-pong otherwise. Every applier
+//! re-checks authority (S1) and input caps (S6) before any write, and only ever
+//! writes rows marked `origin = <peer>` (S2).
+
+use serde::Deserialize;
+
+use crate::error::AppError;
+use crate::federation::mirror_user;
+use crate::federation::{
+    authority, broadcast_space as rebroadcast, mapping::FederationEnvelope, mapping::RemoteUserRef,
+};
+use crate::state::AppState;
+
+/// Same caps as local message creation (`routes/messages.rs`).
+const MAX_CONTENT_CHARS: usize = 4000;
+const MAX_EMBEDS: usize = 10;
+const MAX_MENTIONS: usize = 100;
+const MAX_EMOJI_NAME_CHARS: usize = 64;
+const MAX_EMOJI_ROLES: usize = 100;
+/// Serialized embed payload byte cap: bounds storage amplification when a peer
+/// sends a small *number* of embeds that are each enormous.
+const MAX_EMBEDS_BYTES: usize = 16 * 1024;
+/// A reaction emoji is either a unicode grapheme or a `name:id` custom ref; cap
+/// it so a peer can't store a multi-megabyte "emoji".
+const MAX_REACTION_EMOJI_CHARS: usize = 128;
+/// Cap on a remote-supplied display name before it is cached locally (S6).
+const MAX_DISPLAY_NAME_CHARS: usize = 256;
+/// Cap on any remote-supplied URL (avatar, emoji image) before caching (S6).
+const MAX_URL_CHARS: usize = 2048;
+
+/// Validate a remote-supplied URL before it is cached and later served to local
+/// clients. Rejects non-`http(s)` schemes (a `javascript:`/`data:` URL stored
+/// here would be a stored-XSS vector in the client) and over-long URLs (S6).
+fn validate_remote_url(url: &str, what: &str) -> Result<(), AppError> {
+    if url.chars().count() > MAX_URL_CHARS {
+        return Err(AppError::BadRequest(format!("remote {what} url too long")));
+    }
+    match reqwest::Url::parse(url) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") => Ok(()),
+        _ => Err(AppError::BadRequest(format!("invalid remote {what} url"))),
+    }
+}
+
+/// Reject an over-long remote-supplied display name (S6).
+fn validate_display_name(name: Option<&str>) -> Result<(), AppError> {
+    if let Some(n) = name {
+        if n.chars().count() > MAX_DISPLAY_NAME_CHARS {
+            return Err(AppError::BadRequest(
+                "remote display name too long".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Outcome of applying an event, mapped to an HTTP status by the inbox.
+pub enum Applied {
+    /// Applied (or a harmless duplicate / not-participating no-op): ack 200.
+    Ok,
+    /// Event type not handled yet: 501.
+    Unsupported,
+}
+
+pub async fn apply_event(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<Applied, AppError> {
+    match env.event_type.as_str() {
+        "m.message.create" => {
+            apply_message_create(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.message.update" => {
+            apply_message_update(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.message.delete" => {
+            apply_message_delete(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.reaction.add" => {
+            apply_reaction(state, peer, env, true).await?;
+            Ok(Applied::Ok)
+        }
+        "m.reaction.remove" => {
+            apply_reaction(state, peer, env, false).await?;
+            Ok(Applied::Ok)
+        }
+        "m.member.join" => {
+            apply_member_join(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.member.leave" => {
+            apply_member_leave(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.emoji.create" => {
+            apply_emoji_upsert(state, peer, env, true).await?;
+            Ok(Applied::Ok)
+        }
+        "m.emoji.update" => {
+            apply_emoji_upsert(state, peer, env, false).await?;
+            Ok(Applied::Ok)
+        }
+        "m.emoji.delete" => {
+            apply_emoji_delete(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        "m.typing" => {
+            apply_typing(state, env).await;
+            Ok(Applied::Ok)
+        }
+        "m.dm.message.create" => {
+            crate::federation::dm::apply_message_create(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
+        _ => Ok(Applied::Unsupported),
+    }
+}
+
+/// Ephemeral typing indicator: just rebroadcast to local sessions (no DB).
+async fn apply_typing(state: &AppState, env: &FederationEnvelope) {
+    rebroadcast(
+        state,
+        env.space_id.clone(),
+        "typing.start",
+        env.payload.clone(),
+        "message_typing",
+    )
+    .await;
+}
+
+#[derive(Deserialize)]
+pub struct RemoteMessagePayload {
+    pub id: String,
+    pub channel_id: String,
+    #[serde(default)]
+    pub space_id: Option<String>,
+    pub author: RemoteUserRef,
+    pub content: String,
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    #[serde(default)]
+    pub mention_everyone: bool,
+    #[serde(default)]
+    pub embeds: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    pub created_at: String,
+}
+
+async fn apply_message_create(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let payload: RemoteMessagePayload = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid message payload: {e}")))?;
+
+    // Authority (S1): the message, its channel, and its space must be homed on
+    // the signing peer — the peer is authoritative for the space, so it owns the
+    // message stream. The *author* may be homed elsewhere (the home server
+    // relays messages from members on other servers), so its origin is taken
+    // from its own qualified ID rather than bound to the signer.
+    authority::require_homed_on(&payload.id, peer, "message")?;
+    authority::require_homed_on(&payload.channel_id, peer, "channel")?;
+    if let Some(sid) = &payload.space_id {
+        authority::require_homed_on(sid, peer, "space")?;
+    }
+    // The author may be homed on any server, but MUST be a qualified remote ID
+    // so it can never collide with / overwrite a local (bare-ID) user row (S2).
+    authority::require_remote_target(&payload.author.id)?;
+    let author_domain = crate::federation::mapping::domain_of(&payload.author.id).unwrap_or(peer);
+
+    // Input caps (S6): never trust remote-supplied sizes.
+    if payload.content.chars().count() > MAX_CONTENT_CHARS {
+        return Err(AppError::BadRequest(
+            "remote message content too long".to_string(),
+        ));
+    }
+    if payload.embeds.len() > MAX_EMBEDS {
+        return Err(AppError::BadRequest("too many embeds".to_string()));
+    }
+    if payload.mentions.len() > MAX_MENTIONS {
+        return Err(AppError::BadRequest("too many mentions".to_string()));
+    }
+    validate_display_name(payload.author.display_name.as_deref())?;
+    if let Some(avatar) = payload.author.avatar.as_deref() {
+        validate_remote_url(avatar, "avatar")?;
+    }
+
+    // We must already mirror this channel (i.e. one of our users joined the
+    // space). If not, we are not a participant — acknowledge and ignore.
+    let Ok(channel) = crate::db::channels::get_channel_row(&state.db, &payload.channel_id).await
+    else {
+        tracing::debug!(
+            "ignoring federated message for unmirrored channel {}",
+            payload.channel_id
+        );
+        return Ok(());
+    };
+    // Route storage and delivery on the channel's *own* space, never the
+    // peer-supplied `payload.space_id`: a trusted peer could otherwise set an
+    // arbitrary space_id and have the message broadcast to (or stored against)
+    // a space the channel does not belong to (gateway scoping bypass).
+    let channel_space_id = channel.space_id.as_deref();
+
+    // Cache the remote author's profile under its own home domain. Only the
+    // author's own home server may set/refresh that profile (S2).
+    let handle = crate::federation::mapping::handle(payload.author.username_or_id(), author_domain);
+    mirror_user(
+        state,
+        peer,
+        &payload.author.id,
+        &handle,
+        payload.author.display_name.as_deref(),
+        payload.author.avatar.as_deref(),
+    )
+    .await?;
+
+    // Store the replica message (idempotent on the qualified ID).
+    let mentions_json =
+        serde_json::to_string(&payload.mentions).unwrap_or_else(|_| "[]".to_string());
+    let embeds_json = serde_json::to_string(&payload.embeds).unwrap_or_else(|_| "[]".to_string());
+    if embeds_json.len() > MAX_EMBEDS_BYTES {
+        return Err(AppError::BadRequest("remote embeds too large".to_string()));
+    }
+    let insert = crate::db::messages::RemoteMessageInsert {
+        id: &payload.id,
+        channel_id: &payload.channel_id,
+        space_id: channel_space_id,
+        author_id: &payload.author.id,
+        content: &payload.content,
+        created_at: &payload.created_at,
+        mention_everyone: payload.mention_everyone,
+        mentions_json: &mentions_json,
+        embeds_json: &embeds_json,
+        reply_to: payload.reply_to.as_deref(),
+        origin: peer,
+    };
+
+    let Some(row) = crate::db::messages::insert_remote_message(&state.db, &insert).await? else {
+        // Duplicate delivery: already stored and broadcast.
+        return Ok(());
+    };
+
+    // Inject into the local gateway at the same seam local writes use. This is
+    // delivery-only: it MUST NOT trigger outbound fanout (S7).
+    let json = crate::routes::messages::message_row_to_json_with_attachments(&row, &[], None);
+    if let Some(dispatcher) = state.gateway_tx.read().await.as_ref() {
+        let event = serde_json::json!({
+            "op": 0,
+            "type": "message.create",
+            "data": json,
+        });
+        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+            space_id: channel_space_id.map(str::to_string),
+            target_user_ids: None,
+            event,
+            intent: "messages".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteMessageEdit {
+    id: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    edited_at: Option<String>,
+}
+
+async fn apply_message_update(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let payload: RemoteMessageEdit = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid update payload: {e}")))?;
+    authority::require_homed_on(&payload.id, peer, "message")?;
+
+    if let Some(content) = &payload.content {
+        if content.chars().count() > MAX_CONTENT_CHARS {
+            return Err(AppError::BadRequest(
+                "remote message content too long".to_string(),
+            ));
+        }
+    }
+    // Only touch a replica row homed on this peer (S2).
+    let Ok(existing) = crate::db::messages::get_message_row(&state.db, &payload.id).await else {
+        return Ok(());
+    };
+    if existing.origin.as_deref() != Some(peer) {
+        return Ok(());
+    }
+    crate::db::messages::edit_remote_message(
+        &state.db,
+        &payload.id,
+        payload.content.as_deref(),
+        payload.edited_at.as_deref(),
+    )
+    .await?;
+
+    if let Ok(row) = crate::db::messages::get_message_row(&state.db, &payload.id).await {
+        let json = crate::routes::messages::message_row_to_json_with_attachments(&row, &[], None);
+        rebroadcast(
+            state,
+            row.space_id.clone(),
+            "message.update",
+            json,
+            "messages",
+        )
+        .await;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteMessageDelete {
+    id: String,
+    #[serde(default)]
+    channel_id: Option<String>,
+}
+
+async fn apply_message_delete(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let payload: RemoteMessageDelete = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid delete payload: {e}")))?;
+    authority::require_homed_on(&payload.id, peer, "message")?;
+
+    let Ok(existing) = crate::db::messages::get_message_row(&state.db, &payload.id).await else {
+        return Ok(());
+    };
+    if existing.origin.as_deref() != Some(peer) {
+        return Ok(());
+    }
+    let channel_id = payload
+        .channel_id
+        .clone()
+        .unwrap_or(existing.channel_id.clone());
+    crate::db::messages::delete_message(&state.db, &payload.id).await?;
+
+    rebroadcast(
+        state,
+        existing.space_id.clone(),
+        "message.delete",
+        serde_json::json!({ "id": payload.id, "channel_id": channel_id }),
+        "messages",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteMemberJoin {
+    user: RemoteUserRef,
+}
+
+async fn apply_member_join(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let Some(space_id) = env.space_id.clone() else {
+        return Err(AppError::BadRequest(
+            "member event missing space_id".to_string(),
+        ));
+    };
+    let payload: RemoteMemberJoin = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid member.join payload: {e}")))?;
+
+    // Only act if we mirror this space (the envelope's space_id was already
+    // bound to the signing peer by authority::check).
+    if crate::db::spaces::get_space_row(&state.db, &space_id)
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    // The joining member must be a qualified remote ID (never a bare local ID — S2).
+    authority::require_remote_target(&payload.user.id)?;
+    let domain = crate::federation::mapping::domain_of(&payload.user.id).unwrap_or(peer);
+    mirror_user(
+        state,
+        peer,
+        &payload.user.id,
+        &crate::federation::mapping::handle(payload.user.username_or_id(), domain),
+        payload.user.display_name.as_deref(),
+        payload.user.avatar.as_deref(),
+    )
+    .await?;
+    crate::db::federation::add_member_with_origin(
+        &state.db,
+        &space_id,
+        &payload.user.id,
+        Some(domain),
+    )
+    .await?;
+
+    rebroadcast(
+        state,
+        Some(space_id.clone()),
+        "member.join",
+        serde_json::json!({ "space_id": space_id, "user_id": payload.user.id }),
+        "members",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteMemberLeave {
+    user_id: String,
+}
+
+async fn apply_member_leave(
+    state: &AppState,
+    _peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let Some(space_id) = env.space_id.clone() else {
+        return Err(AppError::BadRequest(
+            "member event missing space_id".to_string(),
+        ));
+    };
+    let payload: RemoteMemberLeave = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid member.leave payload: {e}")))?;
+
+    if crate::db::spaces::get_space_row(&state.db, &space_id)
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+    crate::db::members::remove_member(&state.db, &space_id, &payload.user_id).await?;
+
+    rebroadcast(
+        state,
+        Some(space_id.clone()),
+        "member.leave",
+        serde_json::json!({ "space_id": space_id, "user_id": payload.user_id }),
+        "members",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteReaction {
+    channel_id: String,
+    message_id: String,
+    user_id: String,
+    emoji: String,
+}
+
+async fn apply_reaction(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+    add: bool,
+) -> Result<(), AppError> {
+    let payload: RemoteReaction = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid reaction payload: {e}")))?;
+    // The message/channel belong to the peer's space; the reactor may be remote
+    // but MUST be a qualified remote ID (never a bare local ID — S2).
+    authority::require_homed_on(&payload.message_id, peer, "message")?;
+    authority::require_homed_on(&payload.channel_id, peer, "channel")?;
+    authority::require_remote_target(&payload.user_id)?;
+
+    // Input cap (S6): never trust the remote-supplied emoji size.
+    if payload.emoji.chars().count() > MAX_REACTION_EMOJI_CHARS {
+        return Err(AppError::BadRequest("reaction emoji too long".to_string()));
+    }
+
+    // Must mirror the message; otherwise ignore.
+    let Ok(msg) = crate::db::messages::get_message_row(&state.db, &payload.message_id).await else {
+        return Ok(());
+    };
+
+    // Ensure the reactor exists locally (FK), under its own home domain. A
+    // reaction carries no profile, so never overwrite an existing user — that
+    // would wipe a cached display name/avatar set by the reactor's home (S2).
+    let reactor_domain = crate::federation::mapping::domain_of(&payload.user_id).unwrap_or(peer);
+    crate::db::users::ensure_remote_user(
+        &state.db,
+        &payload.user_id,
+        reactor_domain,
+        &payload.user_id,
+        None,
+        None,
+    )
+    .await?;
+
+    if add {
+        crate::db::messages::add_reaction(
+            &state.db,
+            &payload.message_id,
+            &payload.user_id,
+            &payload.emoji,
+        )
+        .await?;
+    } else {
+        crate::db::messages::remove_reaction(
+            &state.db,
+            &payload.message_id,
+            &payload.user_id,
+            &payload.emoji,
+        )
+        .await?;
+    }
+
+    let event_type = if add {
+        "reaction.add"
+    } else {
+        "reaction.remove"
+    };
+    rebroadcast(
+        state,
+        msg.space_id.clone(),
+        event_type,
+        serde_json::json!({
+            "channel_id": payload.channel_id,
+            "message_id": payload.message_id,
+            "user_id": payload.user_id,
+            "emoji": payload.emoji,
+        }),
+        "message_reactions",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteEmoji {
+    id: String,
+    space_id: String,
+    name: String,
+    #[serde(default)]
+    animated: bool,
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    role_ids: Vec<String>,
+}
+
+/// Mirror a remote space's custom emoji (`m.emoji.create` / `m.emoji.update`).
+/// The emoji and its space must be homed on the signing peer (S1); the image is
+/// referenced by the home server's absolute URL rather than mirrored.
+async fn apply_emoji_upsert(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+    created: bool,
+) -> Result<(), AppError> {
+    let payload: RemoteEmoji = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid emoji payload: {e}")))?;
+    authority::require_homed_on(&payload.id, peer, "emoji")?;
+    authority::require_homed_on(&payload.space_id, peer, "space")?;
+
+    // Input caps (S6): never trust remote-supplied sizes.
+    if payload.name.chars().count() > MAX_EMOJI_NAME_CHARS {
+        return Err(AppError::BadRequest("emoji name too long".to_string()));
+    }
+    if payload.role_ids.len() > MAX_EMOJI_ROLES {
+        return Err(AppError::BadRequest("too many emoji roles".to_string()));
+    }
+    if let Some(image_url) = payload.image_url.as_deref() {
+        validate_remote_url(image_url, "emoji image")?;
+    }
+
+    // Only act if we mirror this space (one of our users joined it).
+    if crate::db::spaces::get_space_row(&state.db, &payload.space_id)
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    crate::db::emojis::upsert_remote_emoji(
+        &state.db,
+        &payload.id,
+        peer,
+        &payload.space_id,
+        &payload.name,
+        payload.animated,
+        payload.image_url.as_deref(),
+        &payload.role_ids,
+    )
+    .await?;
+
+    let emoji = crate::db::emojis::get_emoji(&state.db, &payload.id)
+        .await
+        .ok();
+    let event_type = if created {
+        "emoji.create"
+    } else {
+        "emoji.update"
+    };
+    rebroadcast(
+        state,
+        Some(payload.space_id.clone()),
+        event_type,
+        serde_json::json!({ "space_id": payload.space_id, "emoji": emoji }),
+        "emojis",
+    )
+    .await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteEmojiDelete {
+    id: String,
+}
+
+async fn apply_emoji_delete(
+    state: &AppState,
+    peer: &str,
+    env: &FederationEnvelope,
+) -> Result<(), AppError> {
+    let payload: RemoteEmojiDelete = serde_json::from_value(env.payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid emoji delete payload: {e}")))?;
+    authority::require_homed_on(&payload.id, peer, "emoji")?;
+
+    // Only ever delete a replica row homed on this peer (S2).
+    if crate::db::emojis::emoji_origin(&state.db, &payload.id)
+        .await?
+        .as_deref()
+        != Some(peer)
+    {
+        return Ok(());
+    }
+    // Route delivery on the emoji's *own* space (read before deletion), never the
+    // peer-supplied `payload.space_id`: a peer could otherwise misroute the
+    // broadcast to an unrelated space's subscribers (gateway scoping bypass).
+    let emoji_space_id = crate::db::emojis::emoji_space_id(&state.db, &payload.id).await?;
+    crate::db::emojis::delete_emoji(&state.db, &payload.id).await?;
+
+    rebroadcast(
+        state,
+        emoji_space_id.clone(),
+        "emoji.delete",
+        serde_json::json!({ "space_id": emoji_space_id, "emoji_id": payload.id }),
+        "emojis",
+    )
+    .await;
+    Ok(())
+}

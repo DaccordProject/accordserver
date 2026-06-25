@@ -418,6 +418,18 @@ pub async fn join_public_space(
             });
         }
 
+        // Fan the new member out to interested peers for a locally-homed space.
+        if let Some(fed) = state.federation.as_ref() {
+            let payload = crate::federation::outbound::member_join_payload(&fed.domain, &user);
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                &space.id,
+                "m.member.join",
+                payload,
+            )
+            .await;
+        }
+
         // Audit log: record public join
         if let Ok(entry) = db::audit_log::create_entry(
             &state.db,
@@ -452,4 +464,35 @@ pub async fn get_anonymous_count(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let count = state.guest_counts.get(&space_id).map(|c| *c).unwrap_or(0);
     Ok(Json(serde_json::json!({ "count": count })))
+}
+
+/// Request body for joining a space homed on a remote federated server.
+#[derive(serde::Deserialize)]
+pub struct JoinFederatedSpace {
+    /// Home domain of the remote server.
+    pub domain: String,
+    /// The home server's (bare) space ID to join.
+    pub space_id: String,
+}
+
+/// Join a space homed on a remote federated server. Contacts the home server's
+/// join endpoint, applies the returned snapshot as a local replica, and returns
+/// the mirrored (qualified) space ID.
+pub async fn join_federated_space(
+    state: State<AppState>,
+    auth: AuthUser,
+    Json(input): Json<JoinFederatedSpace>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if state.federation.is_none() {
+        return Err(AppError::BadRequest(
+            "federation is not enabled".to_string(),
+        ));
+    }
+    let user = db::users::get_user(&state.db, &auth.user_id).await?;
+    let mirrored =
+        crate::federation::forward::initiate_join(&state, &input.domain, &input.space_id, &user)
+            .await?;
+    Ok(Json(
+        serde_json::json!({ "data": { "space_id": mirrored } }),
+    ))
 }

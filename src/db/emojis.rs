@@ -140,6 +140,78 @@ pub async fn update_emoji(
     get_emoji(pool, emoji_id).await
 }
 
+/// The home domain of an emoji, or `None` if it is locally homed. Used by the
+/// inbound applier to confirm a delete only ever touches a replica row homed on
+/// the signing peer (S2).
+pub async fn emoji_origin(pool: &AnyPool, emoji_id: &str) -> Result<Option<String>, AppError> {
+    let row = sqlx::query(&super::q("SELECT origin FROM emojis WHERE id = ?"))
+        .bind(emoji_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.try_get::<String, _>("origin").ok()))
+}
+
+pub async fn emoji_space_id(pool: &AnyPool, emoji_id: &str) -> Result<Option<String>, AppError> {
+    let row = sqlx::query(&super::q("SELECT space_id FROM emojis WHERE id = ?"))
+        .bind(emoji_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.try_get::<String, _>("space_id").ok()))
+}
+
+/// Mirror a remote space's emoji (`origin = <home domain>`). Idempotent on the
+/// qualified emoji ID. `image_url` is an absolute home-server URL (the image is
+/// not mirrored). Role restrictions are replaced wholesale, but only for roles
+/// we already mirror — a role we don't have would violate the FK, so it is
+/// silently dropped from the restriction set.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_remote_emoji(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    space_id: &str,
+    name: &str,
+    animated: bool,
+    image_url: Option<&str>,
+    role_ids: &[String],
+) -> Result<(), AppError> {
+    sqlx::query(
+        &super::q("INSERT INTO emojis (id, space_id, name, animated, managed, image_path, origin) \
+         VALUES (?, ?, ?, ?, TRUE, ?, ?) \
+         ON CONFLICT (id) DO UPDATE SET name = excluded.name, animated = excluded.animated, image_path = excluded.image_path, origin = excluded.origin"),
+    )
+    .bind(id)
+    .bind(space_id)
+    .bind(name)
+    .bind(animated)
+    .bind(image_url)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(&super::q("DELETE FROM emoji_roles WHERE emoji_id = ?"))
+        .bind(id)
+        .execute(pool)
+        .await?;
+    for role_id in role_ids {
+        let exists: Option<(String,)> =
+            sqlx::query_as(&super::q("SELECT id FROM roles WHERE id = ?"))
+                .bind(role_id)
+                .fetch_optional(pool)
+                .await?;
+        if exists.is_some() {
+            sqlx::query(&super::q(
+                "INSERT INTO emoji_roles (emoji_id, role_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+            ))
+            .bind(id)
+            .bind(role_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 /// Delete an emoji. Returns the image_path for file cleanup.
 pub async fn delete_emoji(pool: &AnyPool, emoji_id: &str) -> Result<Option<String>, AppError> {
     let image_path: Option<String> =

@@ -64,6 +64,56 @@ pub fn router(state: AppState) -> Router {
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/mcp", post(crate::mcp::handle_mcp))
         .route("/invite/{code}", get(invite_page::invite_page))
+        // Federation: signature-authed (not bearer/rate-limited), so wired here
+        // rather than under /api/v1.
+        .route(
+            crate::federation::peers::WELL_KNOWN_PATH,
+            get(crate::federation::wellknown::handle_well_known),
+        )
+        .route(
+            crate::federation::inbox::INBOX_PATH,
+            post(crate::federation::inbox::handle_inbox),
+        )
+        .route(
+            crate::federation::handshake::JOIN_PATH,
+            post(crate::federation::handshake::handle_join),
+        )
+        .route(
+            crate::federation::forward::SEND_PATH,
+            post(crate::federation::forward::handle_send),
+        )
+        .route(
+            crate::federation::forward::REACT_PATH,
+            post(crate::federation::forward::handle_react),
+        )
+        .route(
+            crate::federation::forward::LEAVE_PATH,
+            post(crate::federation::forward::handle_leave),
+        )
+        .route(
+            crate::federation::forward::EDIT_PATH,
+            post(crate::federation::forward::handle_edit),
+        )
+        .route(
+            crate::federation::forward::DELETE_PATH,
+            post(crate::federation::forward::handle_delete),
+        )
+        .route(
+            crate::federation::forward::TYPING_PATH,
+            post(crate::federation::forward::handle_typing),
+        )
+        .route(
+            crate::federation::dm::DM_OPEN_PATH,
+            post(crate::federation::dm::handle_open),
+        )
+        .route(
+            crate::federation::dm::DM_ANNOUNCE_PATH,
+            post(crate::federation::dm::handle_announce),
+        )
+        .route(
+            crate::federation::dm::DM_SEND_PATH,
+            post(crate::federation::dm::handle_send),
+        )
         .nest_service("/cdn", cdn_service)
         .nest("/s", seo)
         .nest("/api/v1", api);
@@ -292,6 +342,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/spaces/{space_id}/join", post(spaces::join_public_space))
         .route(
+            "/federation/spaces/join",
+            post(spaces::join_federated_space),
+        )
+        .route(
             "/spaces/{space_id}/anonymous-count",
             get(spaces::get_anonymous_count),
         )
@@ -444,6 +498,15 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/admin/users/{user_id}/reset-password",
             post(admin::reset_user_password),
+        )
+        // Admin: federation peer management
+        .route(
+            "/admin/federation/peers",
+            get(admin::list_federation_peers).post(admin::add_federation_peer),
+        )
+        .route(
+            "/admin/federation/peers/{domain}",
+            patch(admin::update_federation_peer).delete(admin::delete_federation_peer),
         )
         // Admin settings (GET + PATCH, admin-only)
         .route(

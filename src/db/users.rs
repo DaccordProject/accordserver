@@ -21,10 +21,11 @@ fn row_to_user(row: sqlx::any::AnyRow) -> User {
         flags: row.get("flags"),
         public_flags: row.get("public_flags"),
         created_at: row.get("created_at"),
+        origin: row.try_get("origin").ok().flatten(),
     }
 }
 
-const SELECT_USERS: &str = "SELECT id, username, display_name, avatar, banner, accent_color, bio, bot, system, is_admin, totp_enabled, disabled, flags, public_flags, created_at FROM users";
+const SELECT_USERS: &str = "SELECT id, username, display_name, avatar, banner, accent_color, bio, bot, system, is_admin, totp_enabled, disabled, flags, public_flags, created_at, origin FROM users";
 
 pub async fn get_user(pool: &AnyPool, user_id: &str) -> Result<User, AppError> {
     let row = sqlx::query(&super::q(&format!("{SELECT_USERS} WHERE id = ?")))
@@ -69,6 +70,72 @@ pub async fn create_user(pool: &AnyPool, input: &CreateUser) -> Result<User, App
     .await?;
 
     get_user(pool, &id).await
+}
+
+/// Insert or refresh a remote (federated) user's cached profile.
+///
+/// `id` is the fully-qualified user ID (`<snowflake>@<domain>`) and `origin` is
+/// the home domain. The fully-qualified `handle` (e.g. `alice@b.example`) is
+/// stored in the `username` column — inherently unique across servers, so it
+/// never collides with a local bare username and the existing global UNIQUE on
+/// `username` is preserved. Remote users never authenticate here, so
+/// `password_hash` stays NULL. Idempotent: re-receiving a profile updates the
+/// mutable fields.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_remote_user(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    handle: &str,
+    display_name: Option<&str>,
+    avatar: Option<&str>,
+) -> Result<User, AppError> {
+    sqlx::query(&super::q(
+        "INSERT INTO users (id, username, display_name, avatar, origin) VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT (id) DO UPDATE SET username = excluded.username, \
+         display_name = excluded.display_name, avatar = excluded.avatar, origin = excluded.origin",
+    ))
+    .bind(id)
+    .bind(handle)
+    .bind(display_name.unwrap_or(handle))
+    .bind(avatar)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+
+    get_user(pool, id).await
+}
+
+/// Ensure a remote user row exists (for FK integrity) WITHOUT overwriting an
+/// existing cached profile. A new row takes the supplied profile; an existing
+/// row is left untouched.
+///
+/// Use this instead of [`upsert_remote_user`] when the event's signing peer is
+/// not the user's home server (so it is not authoritative for that user's
+/// profile), or when the event carries no profile data. This prevents a peer
+/// from spoofing or clobbering another server's user (S2): only a user's own
+/// home may refresh its profile.
+#[allow(clippy::too_many_arguments)]
+pub async fn ensure_remote_user(
+    pool: &AnyPool,
+    id: &str,
+    origin: &str,
+    handle: &str,
+    display_name: Option<&str>,
+    avatar: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query(&super::q(
+        "INSERT INTO users (id, username, display_name, avatar, origin) VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT (id) DO NOTHING",
+    ))
+    .bind(id)
+    .bind(handle)
+    .bind(display_name.unwrap_or(handle))
+    .bind(avatar)
+    .bind(origin)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Returns the id of the singleton System user, creating it if absent.

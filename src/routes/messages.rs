@@ -180,6 +180,46 @@ pub async fn create_message(
     }
 
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+
+    // Remote-homed space: this server is only a replica. Forward the message to
+    // the authoritative home server and return its canonical result; the home
+    // server fans it back to us (and other peers) via our inbox. We deliberately
+    // do NOT persist locally here (the inbox does, with the canonical ID).
+    if let Some(ref sid) = channel.space_id {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, sid).await? {
+            let author = db::users::get_user(&state.db, &auth.user_id).await?;
+            let payload = crate::federation::forward::forward_message(
+                &state,
+                &home,
+                &channel_id,
+                &author,
+                &input.content,
+                input.reply_to.as_deref(),
+            )
+            .await?;
+            return Ok(Json(payload));
+        }
+    }
+
+    // Remote-homed DM: we are only a replica. Forward to the home server, which
+    // persists the canonical message and fans it back to us via the inbox.
+    let is_dm = channel.space_id.is_none() && crate::federation::dm::is_dm(&channel.channel_type);
+    if is_dm {
+        if let Some(home) = crate::db::federation::channel_origin(&state.db, &channel_id).await? {
+            let author = db::users::get_user(&state.db, &auth.user_id).await?;
+            let payload = crate::federation::dm::forward_dm_message(
+                &state,
+                &home,
+                &channel_id,
+                &author,
+                &input.content,
+                input.reply_to.as_deref(),
+            )
+            .await?;
+            return Ok(Json(payload));
+        }
+    }
+
     let msg = db::messages::create_message(
         &state.db,
         &channel_id,
@@ -193,6 +233,18 @@ pub async fn create_message(
 
     let json = message_row_to_json_with_attachments(&msg, &[], None);
 
+    // DMs have no space, so gateway delivery targets the participant user IDs
+    // directly rather than space membership.
+    let dm_targets = if is_dm {
+        Some(
+            db::dm_participants::list_participant_ids(&state.db, &channel_id)
+                .await
+                .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
+
     // Broadcast to gateway
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
@@ -202,7 +254,7 @@ pub async fn create_message(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id.clone(),
-            target_user_ids: None,
+            target_user_ids: dm_targets.clone(),
             event,
             intent: "messages".to_string(),
         });
@@ -235,6 +287,27 @@ pub async fn create_message(
                     event: update_event,
                     intent: "messages".to_string(),
                 });
+            }
+        }
+    }
+
+    // Fan the message out to federated peers that have a member in this space.
+    // No-op unless federation is enabled and the space is locally homed.
+    if let Err(e) = crate::federation::outbound::fanout_message_create(&state, &msg).await {
+        tracing::warn!("federation fanout failed for message {}: {e}", msg.id);
+    }
+
+    // Fan a locally-homed DM message out to its remote participants' servers.
+    if is_dm {
+        if let Some(fed) = state.federation.as_ref() {
+            if let Ok(author) = db::users::get_user(&state.db, &auth.user_id).await {
+                let qualified =
+                    crate::federation::outbound::message_payload(&fed.domain, &msg, &author);
+                if let Err(e) =
+                    crate::federation::dm::fanout_dm_message(&state, &channel, &qualified).await
+                {
+                    tracing::warn!("dm fanout failed for message {}: {e}", msg.id);
+                }
             }
         }
     }
@@ -437,6 +510,26 @@ pub async fn update_message(
     if existing.channel_id != channel_id {
         return Err(AppError::NotFound("unknown_message".to_string()));
     }
+
+    // Remote-homed space: forward the edit to the authoritative home server.
+    if let Some(ref sid) = existing.space_id {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, sid).await? {
+            let content = input.content.clone().ok_or_else(|| {
+                AppError::BadRequest("federated edits require content".to_string())
+            })?;
+            let actor = db::users::get_user(&state.db, &auth.user_id).await?;
+            let payload = crate::federation::forward::forward_edit(
+                &state,
+                &home,
+                &message_id,
+                &actor,
+                &content,
+            )
+            .await?;
+            return Ok(Json(serde_json::json!({ "data": payload })));
+        }
+    }
+
     // Author can always edit their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
         require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
@@ -464,11 +557,29 @@ pub async fn update_message(
             "data": json
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-            space_id: channel.space_id,
+            space_id: channel.space_id.clone(),
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
         });
+    }
+
+    // Fan the edit out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        if let Some(ref sid) = channel.space_id {
+            let payload = serde_json::json!({
+                "id": crate::federation::mapping::qualify(&message_id, &fed.domain),
+                "content": msg.content,
+                "edited_at": msg.edited_at,
+            });
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                sid,
+                "m.message.update",
+                payload,
+            )
+            .await;
+        }
     }
 
     Ok(Json(serde_json::json!({ "data": json })))
@@ -483,6 +594,16 @@ pub async fn delete_message(
     if existing.channel_id != channel_id {
         return Err(AppError::NotFound("unknown_message".to_string()));
     }
+
+    // Remote-homed space: forward the deletion to the authoritative home server.
+    if let Some(ref sid) = existing.space_id {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, sid).await? {
+            let actor = db::users::get_user(&state.db, &auth.user_id).await?;
+            crate::federation::forward::forward_delete(&state, &home, &message_id, &actor).await?;
+            return Ok(Json(serde_json::json!({ "data": null })));
+        }
+    }
+
     // Author can always delete their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
         require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
@@ -514,6 +635,23 @@ pub async fn delete_message(
             event,
             intent: "messages".to_string(),
         });
+    }
+
+    // Fan the deletion out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        if let Some(ref sid) = channel.space_id {
+            let payload = serde_json::json!({
+                "id": crate::federation::mapping::qualify(&message_id, &fed.domain),
+                "channel_id": crate::federation::mapping::qualify(&channel_id, &fed.domain),
+            });
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state,
+                sid,
+                "m.message.delete",
+                payload,
+            )
+            .await;
+        }
     }
 
     Ok(Json(serde_json::json!({ "data": null })))
@@ -582,6 +720,19 @@ pub async fn typing_indicator(
     if !space_id.is_empty() {
         require_not_timed_out(&state.db, &space_id, &auth).await?;
     }
+
+    // Remote-homed space: forward typing to the home authority (best-effort).
+    if !space_id.is_empty() {
+        if let Some(home) = crate::db::federation::space_origin(&state.db, &space_id).await? {
+            if let Ok(actor) = db::users::get_user(&state.db, &auth.user_id).await {
+                let _ =
+                    crate::federation::forward::forward_typing(&state, &home, &channel_id, &actor)
+                        .await;
+            }
+            return Ok(Json(serde_json::json!({ "data": null })));
+        }
+    }
+
     let thread_id = body.and_then(|b| b.thread_id.clone());
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
@@ -605,6 +756,21 @@ pub async fn typing_indicator(
             intent: "message_typing".to_string(),
         });
     }
+
+    // Fan typing out to interested peers for a locally-homed space.
+    if let Some(fed) = state.federation.as_ref() {
+        if !space_id.is_empty() {
+            let payload = serde_json::json!({
+                "channel_id": crate::federation::mapping::qualify(&channel_id, &fed.domain),
+                "user_id": crate::federation::mapping::qualify(&auth.user_id, &fed.domain),
+            });
+            let _ = crate::federation::outbound::fanout_to_space(
+                &state, &space_id, "m.typing", payload,
+            )
+            .await;
+        }
+    }
+
     Ok(Json(serde_json::json!({ "data": null })))
 }
 

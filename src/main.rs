@@ -175,6 +175,28 @@ async fn run_main_server(config: Config) {
     let totp_key = config.totp_key;
     let mcp_api_key = config.mcp_api_key;
 
+    // Build the federation context (loads/generates the Ed25519 signing key) when
+    // FEDERATION_DOMAIN is configured and enabled.
+    let federation = match config.federation.as_ref() {
+        Some(fc) if fc.enabled => {
+            match accordserver::federation::FederationContext::build(fc, &storage_path) {
+                Ok(ctx) => {
+                    status_line(format!(
+                        "  \x1b[2mfederation\x1b[0m   {} (inbox {})",
+                        ctx.domain,
+                        ctx.inbox_url()
+                    ));
+                    Some(Arc::new(ctx))
+                }
+                Err(e) => {
+                    tracing::error!("failed to initialise federation: {e}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
     let state = AppState {
         db,
         db_is_postgres: accordserver::db::url_is_postgres(&config.database_url),
@@ -190,6 +212,7 @@ async fn run_main_server(config: Config) {
         settings: Arc::new(ArcSwap::from_pointee(settings.clone())),
         master_config: master_config.clone(),
         master_task: Arc::new(Mutex::new(None)),
+        federation,
         mfa_tickets: Arc::new(DashMap::new()),
         totp_attempts: Arc::new(DashMap::new()),
         totp_key,
@@ -218,6 +241,11 @@ async fn run_main_server(config: Config) {
         } else {
             tracing::info!("master server configured but public_listing is off; not registering");
         }
+    }
+
+    // Spawn the federation outbound delivery loop when federation is active.
+    if state.federation.is_some() {
+        tokio::spawn(accordserver::federation::run(state.clone()));
     }
 
     let app = accordserver::routes::router(state);

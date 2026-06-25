@@ -27,6 +27,7 @@ data-encoding = "2"
 aes-gcm = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [[bin]]
 name = "accordserver"

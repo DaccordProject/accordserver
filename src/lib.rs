@@ -1,6 +1,7 @@
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod federation;
 pub mod gateway;
 pub mod master;
 pub mod mcp;
