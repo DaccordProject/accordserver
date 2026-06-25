@@ -379,8 +379,14 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, AppError> {
 }
 
 /// Resolve a storage path to a canonical PathBuf for tests.
+///
+/// Mirrors the production layout (`data/cdn`) by placing the storage root under
+/// a unique per-call parent directory. This keeps sibling state derived from
+/// `storage_path.parent()` — notably `federation_key` — isolated per test
+/// instead of colliding on a single shared `<tmp>/federation_key`.
 pub fn temp_storage_path() -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!("accord-test-{}", uuid::Uuid::new_v4()));
+    path.push("cdn");
     path
 }
