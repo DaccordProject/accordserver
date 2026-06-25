@@ -1,7 +1,8 @@
 //! Fetching and validating a peer's published federation metadata.
 
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use crate::error::AppError;
@@ -100,12 +101,86 @@ pub async fn validate_peer_url_resolved(url: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// True when an address must never be the target of an outbound federation
+/// request: loopback, private/RFC1918, link-local, CGNAT, IPv6 ULA, etc. IPv6
+/// addresses that embed an IPv4 address (mapped/compatible) are folded back to
+/// their V4 form so an attacker cannot smuggle `::ffff:127.0.0.1` past the V4
+/// checks.
 fn is_private(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+        IpAddr::V4(v4) => is_private_v4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_private_v4(&mapped);
+            }
+            // `to_ipv4()` also covers the deprecated IPv4-compatible range
+            // (::a.b.c.d), which would otherwise slip through as a global V6.
+            if let Some(compat) = v6.to_ipv4() {
+                return is_private_v4(&compat);
+            }
+            let seg = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Unique local addresses (fc00::/7).
+                || (seg[0] & 0xfe00) == 0xfc00
+                // Link-local unicast (fe80::/10).
+                || (seg[0] & 0xffc0) == 0xfe80
+                // Documentation prefix (2001:db8::/32).
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
         }
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+    }
+}
+
+fn is_private_v4(v4: &std::net::Ipv4Addr) -> bool {
+    let o = v4.octets();
+    v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        // Carrier-grade NAT (100.64.0.0/10).
+        || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        // "This host on this network" (0.0.0.0/8).
+        || o[0] == 0
+        // Reserved/benchmarking and multicast ranges have no business being a
+        // unicast federation peer.
+        || v4.is_multicast()
+}
+
+/// Custom DNS resolver that re-applies [`is_private`] at connect time, closing
+/// the TOCTOU/DNS-rebinding gap between [`validate_peer_url_resolved`] and the
+/// actual TCP connection. Wired into the federation HTTP client via
+/// `ClientBuilder::dns_resolver`.
+#[derive(Debug, Clone, Default)]
+pub struct SsrfGuardResolver;
+
+impl Resolve for SsrfGuardResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            if allow_insecure() {
+                // Defer to the system resolver without filtering.
+                let host = name.as_str().to_string();
+                let addrs = tokio::net::lookup_host((host, 0)).await?;
+                let iter: Addrs = Box::new(addrs);
+                return Ok(iter);
+            }
+            let host = name.as_str().to_string();
+            let resolved: Vec<SocketAddr> =
+                tokio::net::lookup_host((host.clone(), 0)).await?.collect();
+            if resolved.is_empty() {
+                return Err(format!("host {host} did not resolve").into());
+            }
+            for addr in &resolved {
+                if is_private(&addr.ip()) {
+                    return Err(
+                        format!("host {host} resolves to a private/internal address").into(),
+                    );
+                }
+            }
+            let iter: Addrs = Box::new(resolved.into_iter());
+            Ok(iter)
+        })
     }
 }
 

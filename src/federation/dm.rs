@@ -293,8 +293,13 @@ pub async fn handle_announce(
             Ok(t) => t,
             Err(resp) => return resp,
         };
-    // Authority: the channel must be homed on the signing peer.
+    // Authority: the channel must be homed on the signing peer, and so must the
+    // opener. `opener_id` drives consent enforcement below, so an unbound opener
+    // would let a peer claim any user initiated the DM and bypass block-lists.
     if let Err(e) = authority::require_homed_on(&snapshot.channel_id, &peer.domain, "dm channel") {
+        return e.into_response();
+    }
+    if let Err(e) = authority::require_homed_on(&snapshot.opener_id, &peer.domain, "dm opener") {
         return e.into_response();
     }
     match mirror_dm(&state, &our_domain, &snapshot).await {
@@ -313,12 +318,21 @@ async fn mirror_dm(state: &AppState, our_domain: &str, snap: &DmSnapshot) -> Res
             let local_id = mapping::local_part(&p.id).to_string();
             if !p.id.eq_ignore_ascii_case(&snap.opener_id) {
                 // A local, non-initiating participant must consent to the DM.
-                if crate::db::relationships::is_blocked_by(&state.db, &local_id, &snap.opener_id)
-                    .await?
-                {
-                    return Err(AppError::Forbidden(
-                        "recipient is not accepting DMs from this user".to_string(),
-                    ));
+                // Enforce the block-list against *every* other participant, not
+                // just the opener: a hostile home server could otherwise name a
+                // benign opener while dragging the local user into a group DM
+                // with someone they have blocked.
+                for other in &snap.participants {
+                    if other.id.eq_ignore_ascii_case(&p.id) {
+                        continue;
+                    }
+                    if crate::db::relationships::is_blocked_by(&state.db, &local_id, &other.id)
+                        .await?
+                    {
+                        return Err(AppError::Forbidden(
+                            "recipient is not accepting DMs from this user".to_string(),
+                        ));
+                    }
                 }
             }
         } else {

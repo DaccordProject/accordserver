@@ -21,6 +21,41 @@ const MAX_EMBEDS: usize = 10;
 const MAX_MENTIONS: usize = 100;
 const MAX_EMOJI_NAME_CHARS: usize = 64;
 const MAX_EMOJI_ROLES: usize = 100;
+/// Serialized embed payload byte cap: bounds storage amplification when a peer
+/// sends a small *number* of embeds that are each enormous.
+const MAX_EMBEDS_BYTES: usize = 16 * 1024;
+/// A reaction emoji is either a unicode grapheme or a `name:id` custom ref; cap
+/// it so a peer can't store a multi-megabyte "emoji".
+const MAX_REACTION_EMOJI_CHARS: usize = 128;
+/// Cap on a remote-supplied display name before it is cached locally (S6).
+const MAX_DISPLAY_NAME_CHARS: usize = 256;
+/// Cap on any remote-supplied URL (avatar, emoji image) before caching (S6).
+const MAX_URL_CHARS: usize = 2048;
+
+/// Validate a remote-supplied URL before it is cached and later served to local
+/// clients. Rejects non-`http(s)` schemes (a `javascript:`/`data:` URL stored
+/// here would be a stored-XSS vector in the client) and over-long URLs (S6).
+fn validate_remote_url(url: &str, what: &str) -> Result<(), AppError> {
+    if url.chars().count() > MAX_URL_CHARS {
+        return Err(AppError::BadRequest(format!("remote {what} url too long")));
+    }
+    match reqwest::Url::parse(url) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") => Ok(()),
+        _ => Err(AppError::BadRequest(format!("invalid remote {what} url"))),
+    }
+}
+
+/// Reject an over-long remote-supplied display name (S6).
+fn validate_display_name(name: Option<&str>) -> Result<(), AppError> {
+    if let Some(n) = name {
+        if n.chars().count() > MAX_DISPLAY_NAME_CHARS {
+            return Err(AppError::BadRequest(
+                "remote display name too long".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Outcome of applying an event, mapped to an HTTP status by the inbox.
 pub enum Applied {
@@ -154,6 +189,10 @@ async fn apply_message_create(
     if payload.mentions.len() > MAX_MENTIONS {
         return Err(AppError::BadRequest("too many mentions".to_string()));
     }
+    validate_display_name(payload.author.display_name.as_deref())?;
+    if let Some(avatar) = payload.author.avatar.as_deref() {
+        validate_remote_url(avatar, "avatar")?;
+    }
 
     // We must already mirror this channel (i.e. one of our users joined the
     // space). If not, we are not a participant — acknowledge and ignore.
@@ -188,6 +227,9 @@ async fn apply_message_create(
     let mentions_json =
         serde_json::to_string(&payload.mentions).unwrap_or_else(|_| "[]".to_string());
     let embeds_json = serde_json::to_string(&payload.embeds).unwrap_or_else(|_| "[]".to_string());
+    if embeds_json.len() > MAX_EMBEDS_BYTES {
+        return Err(AppError::BadRequest("remote embeds too large".to_string()));
+    }
     let insert = crate::db::messages::RemoteMessageInsert {
         id: &payload.id,
         channel_id: &payload.channel_id,
@@ -437,6 +479,11 @@ async fn apply_reaction(
     authority::require_homed_on(&payload.channel_id, peer, "channel")?;
     authority::require_remote_target(&payload.user_id)?;
 
+    // Input cap (S6): never trust the remote-supplied emoji size.
+    if payload.emoji.chars().count() > MAX_REACTION_EMOJI_CHARS {
+        return Err(AppError::BadRequest("reaction emoji too long".to_string()));
+    }
+
     // Must mirror the message; otherwise ignore.
     let Ok(msg) = crate::db::messages::get_message_row(&state.db, &payload.message_id).await else {
         return Ok(());
@@ -528,6 +575,9 @@ async fn apply_emoji_upsert(
     }
     if payload.role_ids.len() > MAX_EMOJI_ROLES {
         return Err(AppError::BadRequest("too many emoji roles".to_string()));
+    }
+    if let Some(image_url) = payload.image_url.as_deref() {
+        validate_remote_url(image_url, "emoji image")?;
     }
 
     // Only act if we mirror this space (one of our users joined it).

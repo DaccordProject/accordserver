@@ -76,6 +76,44 @@ pub(crate) async fn mirror_user(
     avatar: Option<&str>,
 ) -> Result<(), crate::error::AppError> {
     let domain = mapping::domain_of(id).unwrap_or(authoritative_domain);
+
+    // A peer may legitimately *echo* an action taken by one of our own users
+    // (e.g. our user reacted in a remote-homed space), referencing them by a
+    // qualified `<snowflake>@<our_domain>` id. Such a reference must resolve to
+    // a real local account, and the mirror row must adopt that account's real
+    // profile — never the peer-supplied handle/display/avatar, which would let a
+    // peer publish a spoofed profile under our user's identity (S2/S3).
+    if let Some(our_domain) = state.federation.as_ref().map(|f| f.domain.as_str()) {
+        if domain.eq_ignore_ascii_case(our_domain) {
+            let local_id = mapping::local_part(id);
+            let local = crate::db::users::get_user(&state.db, local_id)
+                .await
+                .map_err(|_| {
+                    crate::error::AppError::Forbidden(
+                        "referenced local user does not exist".to_string(),
+                    )
+                })?;
+            // Reject references to non-local rows that merely share our domain
+            // suffix (remote-origin rows are never authoritative-as-local).
+            if local.origin.is_some() {
+                return Err(crate::error::AppError::Forbidden(
+                    "referenced id is not a local user".to_string(),
+                ));
+            }
+            let real_handle = mapping::handle(&local.username, our_domain);
+            crate::db::users::ensure_remote_user(
+                &state.db,
+                id,
+                our_domain,
+                &real_handle,
+                local.display_name.as_deref(),
+                local.avatar.as_deref(),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
     if domain.eq_ignore_ascii_case(authoritative_domain) {
         crate::db::users::upsert_remote_user(&state.db, id, domain, handle, display_name, avatar)
             .await?;
@@ -209,6 +247,7 @@ fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(15))
+        .dns_resolver(std::sync::Arc::new(peers::SsrfGuardResolver))
         .build()
         .unwrap_or_default()
 }
