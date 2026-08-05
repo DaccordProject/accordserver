@@ -939,7 +939,10 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
         .await
         .ok()??;
         (row.0, true)
-    } else if let Some(tok) = token.strip_prefix("Bearer ") {
+    } else {
+        // Neither prefix means the token is unusable — `?` bails the same way
+        // the old trailing `else { return None }` did.
+        let tok = token.strip_prefix("Bearer ")?;
         let token_hash = auth_resolve::create_token_hash(tok);
         let now_fn = crate::db::now_sql(state.db_is_postgres);
         let sql = crate::db::q(&format!(
@@ -974,8 +977,6 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
                 guest_space_id: Some(guest_row.0),
             });
         }
-    } else {
-        return None;
     };
 
     let user = crate::db::users::get_user(&state.db, &user_id).await.ok()?;
