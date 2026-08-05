@@ -13,7 +13,7 @@ use crate::state::AppState;
 use crate::voice;
 
 /// Whether a channel type is a DM or group DM (no parent space).
-fn is_dm_channel(channel_type: &str) -> bool {
+pub(crate) fn is_dm_channel(channel_type: &str) -> bool {
     channel_type == "dm" || channel_type == "group_dm"
 }
 
@@ -271,7 +271,7 @@ pub async fn cancel_call(
 }
 
 /// Broadcasts a `call.*` signaling event to all participants of a DM channel.
-async fn broadcast_call_event(
+pub(crate) async fn broadcast_call_event(
     state: &AppState,
     channel_id: &str,
     event_type: &str,
@@ -310,7 +310,7 @@ pub async fn voice_info(state: State<AppState>) -> Json<serde_json::Value> {
 /// Broadcasts a `voice.state_update`. For space channels (`space_id` set) it
 /// fans out to the space; for DM/group DM calls (`space_id` is `None`) it
 /// targets the channel's participants directly.
-async fn broadcast_voice_state_update(
+pub(crate) async fn broadcast_voice_state_update(
     state: &AppState,
     channel_id: &str,
     space_id: Option<&str>,

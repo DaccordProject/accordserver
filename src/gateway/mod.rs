@@ -588,148 +588,148 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 op if op == events::opcode::VOICE_STATE_UPDATE => {
                                     if let Some(data) = gw_msg.data {
                                         if let Ok(vsu) = serde_json::from_value::<VoiceStateUpdateData>(data) {
-                                            if space_ids.contains(&vsu.space_id) {
-                                                let self_mute = vsu.self_mute.unwrap_or(false);
-                                                let self_deaf = vsu.self_deaf.unwrap_or(false);
-                                                let self_video = vsu.self_video.unwrap_or(false);
-                                                let self_stream = vsu.self_stream.unwrap_or(false);
+                                            let self_mute = vsu.self_mute.unwrap_or(false);
+                                            let self_deaf = vsu.self_deaf.unwrap_or(false);
+                                            let self_video = vsu.self_video.unwrap_or(false);
+                                            let self_stream = vsu.self_stream.unwrap_or(false);
 
-                                                if let Some(channel_id) = vsu.channel_id {
-                                                    // Check if user is already in this exact channel (flag-only update)
-                                                    let current_channel = crate::voice::state::get_user_voice_state(&state, &user_id)
-                                                        .and_then(|vs| vs.channel_id.clone());
-                                                    let is_same_channel = current_channel.as_deref() == Some(channel_id.as_str());
+                                            if let Some(channel_id) = vsu.channel_id {
+                                                let auth_user = crate::middleware::auth::AuthUser {
+                                                    user_id: user_id.clone(),
+                                                    is_bot,
+                                                    is_admin,
+                                                    is_guest: is_guest_session,
+                                                    guest_space_id: None,
+                                                };
 
-                                                    if is_same_channel {
-                                                        // Re-validate channel connect permission before allowing flag updates
-                                                        let auth_user = crate::middleware::auth::AuthUser {
-                                                            user_id: user_id.clone(),
-                                                            is_bot,
-                                                            is_admin,
-                                                            is_guest: is_guest_session,
-                                                            guest_space_id: None,
-                                                        };
-                                                        if crate::middleware::permissions::require_channel_permission(
-                                                            &state.db, &channel_id, &auth_user, "connect",
-                                                        ).await.is_err() {
-                                                            continue;
-                                                        }
+                                                let channel = match crate::db::channels::get_channel_row(&state.db, &channel_id).await {
+                                                    Ok(ch) => ch,
+                                                    Err(_) => continue,
+                                                };
+                                                let is_dm = routes::voice::is_dm_channel(&channel.channel_type);
 
-                                                        // Update flags in-place — no LiveKit teardown/rejoin
-                                                        if let Some(voice_state) = crate::voice::state::update_voice_state(
-                                                            &state, &user_id, self_mute, self_deaf, self_video, self_stream,
-                                                        ) {
-                                                            let event = serde_json::json!({
-                                                                "op": events::opcode::EVENT,
-                                                                "type": "voice.state_update",
-                                                                "data": voice_state
-                                                            });
-                                                            if let Some(ref gtx) = *state.gateway_tx.read().await {
-                                                                let _ = gtx.send(GatewayBroadcast {
-                                                                    space_id: Some(vsu.space_id.clone()),
-                                                                    target_user_ids: None,
-                                                                    event,
-                                                                    intent: "voice_states".to_string(),
-                                                                });
-                                                            }
-                                                        }
-                                                    } else {
-                                                        // New join or channel move — full LiveKit flow
-                                                        let auth_user = crate::middleware::auth::AuthUser {
-                                                            user_id: user_id.clone(),
-                                                            is_bot,
-                                                            is_admin,
-                                                            is_guest: is_guest_session,
-                                                            guest_space_id: None,
-                                                        };
-                                                        let channel = match crate::db::channels::get_channel_row(&state.db, &channel_id).await {
-                                                            Ok(ch) => ch,
-                                                            Err(_) => continue,
-                                                        };
+                                                // The scope comes from the channel, never from the
+                                                // payload, so a client cannot aim a broadcast at a
+                                                // space the channel doesn't belong to. DM/group DM
+                                                // calls resolve to `None`.
+                                                let scope_space_id: Option<String> = if is_dm {
+                                                    None
+                                                } else {
+                                                    match channel.space_id.clone() {
+                                                        Some(sid) if space_ids.contains(&sid) => Some(sid),
+                                                        _ => continue,
+                                                    }
+                                                };
+
+                                                // A payload that names a space must name the
+                                                // channel's own. Omitting it is allowed.
+                                                if let Some(ref claimed) = vsu.space_id {
+                                                    if scope_space_id.as_deref() != Some(claimed.as_str()) {
+                                                        continue;
+                                                    }
+                                                }
+
+                                                // Participation (DM) or `connect` (space),
+                                                // re-checked on every op including flag-only ones.
+                                                if crate::middleware::permissions::require_channel_permission(
+                                                    &state.db, &channel_id, &auth_user, "connect",
+                                                ).await.is_err() {
+                                                    continue;
+                                                }
+
+                                                // Check if user is already in this exact channel (flag-only update)
+                                                let current_channel = crate::voice::state::get_user_voice_state(&state, &user_id)
+                                                    .and_then(|vs| vs.channel_id.clone());
+                                                let is_same_channel = current_channel.as_deref() == Some(channel_id.as_str());
+
+                                                if is_same_channel {
+                                                    // Update flags in-place — no LiveKit teardown/rejoin
+                                                    if let Some(voice_state) = crate::voice::state::update_voice_state(
+                                                        &state, &user_id, self_mute, self_deaf, self_video, self_stream,
+                                                    ) {
+                                                        routes::voice::broadcast_voice_state_update(
+                                                            &state, &channel_id, scope_space_id.as_deref(), &voice_state,
+                                                        ).await;
+                                                    }
+                                                } else {
+                                                    // New join or channel move — full LiveKit flow.
+                                                    // DM calls have no channel type or timeout to
+                                                    // check; participation was enough.
+                                                    if !is_dm {
                                                         if channel.channel_type != "voice" {
                                                             continue;
                                                         }
-                                                        if crate::middleware::permissions::require_channel_permission(
-                                                            &state.db, &channel_id, &auth_user, "connect",
-                                                        ).await.is_err() {
-                                                            continue;
-                                                        }
                                                         // Timed-out members cannot connect to voice.
+                                                        let sid = match scope_space_id {
+                                                            Some(ref sid) => sid.as_str(),
+                                                            None => continue,
+                                                        };
                                                         if crate::middleware::permissions::require_not_timed_out(
-                                                            &state.db, &vsu.space_id, &auth_user,
+                                                            &state.db, sid, &auth_user,
                                                         ).await.is_err() {
                                                             continue;
-                                                        }
-
-                                                        let (voice_state, prev) = crate::voice::state::join_voice_channel(
-                                                            &state, &user_id, Some(&vsu.space_id), &channel_id,
-                                                            &session_id, self_mute, self_deaf, self_video, self_stream,
-                                                        );
-
-                                                        // Clean up old LiveKit room if the user moved channels
-                                                        if let Some(ref prev_ch) = prev {
-                                                            if !state.test_mode {
-                                                                if let Some(ref lk) = state.livekit_client {
-                                                                    lk.remove_participant(prev_ch, &user_id).await;
-                                                                    lk.delete_room_if_empty(prev_ch).await;
-                                                                }
-                                                            }
-                                                        }
-
-                                                        // Broadcast voice.state_update to the space
-                                                        let event = serde_json::json!({
-                                                            "op": events::opcode::EVENT,
-                                                            "type": "voice.state_update",
-                                                            "data": voice_state
-                                                        });
-                                                        if let Some(ref gtx) = *state.gateway_tx.read().await {
-                                                            let _ = gtx.send(GatewayBroadcast {
-                                                                space_id: Some(vsu.space_id.clone()),
-                                                                target_user_ids: None,
-                                                                event,
-                                                                intent: "voice_states".to_string(),
-                                                            });
-                                                        }
-
-                                                        // Send voice.server_update directly to this session
-                                                        if let Some(ref lk) = state.livekit_client {
-                                                            if !state.test_mode {
-                                                                let _ = lk.ensure_room(&channel_id).await;
-                                                            }
-                                                            let display_name = crate::db::users::get_user(&state.db, &user_id)
-                                                                .await
-                                                                .ok()
-                                                                .and_then(|u| u.display_name.or(Some(u.username)))
-                                                                .unwrap_or_else(|| user_id.clone());
-                                                            let server_update = match lk.generate_token(&user_id, &display_name, &channel_id) {
-                                                                Ok(token) => serde_json::json!({
-                                                                    "op": events::opcode::EVENT,
-                                                                    "type": "voice.server_update",
-                                                                    "data": {
-                                                                        "space_id": vsu.space_id,
-                                                                        "channel_id": channel_id,
-                                                                        "backend": "livekit",
-                                                                        "url": lk.external_url(),
-                                                                        "token": token
-                                                                    }
-                                                                }),
-                                                                Err(_) => serde_json::json!({
-                                                                    "op": events::opcode::EVENT,
-                                                                    "type": "voice.server_update",
-                                                                    "data": {
-                                                                        "space_id": vsu.space_id,
-                                                                        "channel_id": channel_id,
-                                                                        "backend": "livekit",
-                                                                        "error": "failed to generate token"
-                                                                    }
-                                                                }),
-                                                            };
-                                                            let _ = tx.send(server_update.to_string());
                                                         }
                                                     }
-                                                } else {
-                                                    // Leave voice
-                                                    if let Some(old_vs) = crate::voice::state::leave_voice_channel(&state, &user_id) {
+
+                                                    let (voice_state, prev) = crate::voice::state::join_voice_channel(
+                                                        &state, &user_id, scope_space_id.as_deref(), &channel_id,
+                                                        &session_id, self_mute, self_deaf, self_video, self_stream,
+                                                    );
+
+                                                    // Clean up old LiveKit room if the user moved channels
+                                                    if let Some(ref prev_ch) = prev {
+                                                        if !state.test_mode {
+                                                            if let Some(ref lk) = state.livekit_client {
+                                                                lk.remove_participant(prev_ch, &user_id).await;
+                                                                lk.delete_room_if_empty(prev_ch).await;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    routes::voice::broadcast_voice_state_update(
+                                                        &state, &channel_id, scope_space_id.as_deref(), &voice_state,
+                                                    ).await;
+
+                                                    // Send voice.server_update directly to this session
+                                                    if let Some(ref lk) = state.livekit_client {
+                                                        if !state.test_mode {
+                                                            let _ = lk.ensure_room(&channel_id).await;
+                                                        }
+                                                        let display_name = crate::db::users::get_user(&state.db, &user_id)
+                                                            .await
+                                                            .ok()
+                                                            .and_then(|u| u.display_name.or(Some(u.username)))
+                                                            .unwrap_or_else(|| user_id.clone());
+                                                        let server_update = match lk.generate_token(&user_id, &display_name, &channel_id) {
+                                                            Ok(token) => serde_json::json!({
+                                                                "op": events::opcode::EVENT,
+                                                                "type": "voice.server_update",
+                                                                "data": {
+                                                                    "space_id": scope_space_id,
+                                                                    "channel_id": channel_id,
+                                                                    "backend": "livekit",
+                                                                    "url": lk.external_url(),
+                                                                    "token": token
+                                                                }
+                                                            }),
+                                                            Err(_) => serde_json::json!({
+                                                                "op": events::opcode::EVENT,
+                                                                "type": "voice.server_update",
+                                                                "data": {
+                                                                    "space_id": scope_space_id,
+                                                                    "channel_id": channel_id,
+                                                                    "backend": "livekit",
+                                                                    "error": "failed to generate token"
+                                                                }
+                                                            }),
+                                                        };
+                                                        let _ = tx.send(server_update.to_string());
+                                                    }
+                                                }
+                                            } else {
+                                                // Leave voice
+                                                if let Some(old_vs) = crate::voice::state::leave_voice_channel(&state, &user_id) {
+                                                    if let Some(ref left_channel) = old_vs.channel_id {
                                                         let left_state = crate::models::voice::VoiceState {
                                                             user_id: user_id.clone(),
                                                             space_id: old_vs.space_id.clone(),
@@ -743,29 +743,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                             self_video: false,
                                                             suppress: false,
                                                         };
-                                                        let event = serde_json::json!({
-                                                            "op": events::opcode::EVENT,
-                                                            "type": "voice.state_update",
-                                                            "data": left_state
-                                                        });
-                                                        if let Some(ref gtx) = *state.gateway_tx.read().await {
-                                                            let _ = gtx.send(GatewayBroadcast {
-                                                                space_id: old_vs.space_id.clone(),
-                                                                target_user_ids: None,
-                                                                event,
-                                                                intent: "voice_states".to_string(),
-                                                            });
-                                                        }
+                                                        // Routed to the space, or to the DM
+                                                        // participants when there is none — a
+                                                        // broadcast with neither would reach every
+                                                        // session on the instance.
+                                                        routes::voice::broadcast_voice_state_update(
+                                                            &state, left_channel, old_vs.space_id.as_deref(), &left_state,
+                                                        ).await;
 
                                                         // LiveKit cleanup
-                                                        if let Some(ref ch_id) = old_vs.channel_id {
-                                                            if !state.test_mode {
-                                                                if let Some(ref lk) = state.livekit_client {
-                                                                    lk.remove_participant(ch_id, &user_id).await;
-                                                                    lk.delete_room_if_empty(ch_id).await;
-                                                                }
+                                                        if !state.test_mode {
+                                                            if let Some(ref lk) = state.livekit_client {
+                                                                lk.remove_participant(left_channel, &user_id).await;
+                                                                lk.delete_room_if_empty(left_channel).await;
                                                             }
                                                         }
+
+                                                        end_dm_call_if_empty(&state, &old_vs, left_channel, &user_id).await;
                                                     }
                                                 }
                                             }
@@ -785,7 +779,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Cleanup: remove from voice if connected
     if let Some(old_vs) = crate::voice::state::leave_voice_channel(&state, &user_id) {
-        if let Some(ref sid) = old_vs.space_id {
+        if let Some(ref ch_id) = old_vs.channel_id {
             let left_state = crate::models::voice::VoiceState {
                 user_id: user_id.clone(),
                 space_id: old_vs.space_id.clone(),
@@ -799,29 +793,26 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 self_video: false,
                 suppress: false,
             };
-            let event = serde_json::json!({
-                "op": events::opcode::EVENT,
-                "type": "voice.state_update",
-                "data": left_state
-            });
-            if let Some(ref gtx) = *state.gateway_tx.read().await {
-                let _ = gtx.send(GatewayBroadcast {
-                    space_id: Some(sid.clone()),
-                    target_user_ids: None,
-                    event,
-                    intent: "voice_states".to_string(),
-                });
-            }
-        }
+            // Reaches DM participants as well as spaces; dropping the socket
+            // mid-call used to leave the other side of a DM call showing a
+            // participant who was already gone.
+            routes::voice::broadcast_voice_state_update(
+                &state,
+                ch_id,
+                old_vs.space_id.as_deref(),
+                &left_state,
+            )
+            .await;
 
-        // LiveKit cleanup on disconnect
-        if let Some(ref ch_id) = old_vs.channel_id {
+            // LiveKit cleanup on disconnect
             if !state.test_mode {
                 if let Some(ref lk) = state.livekit_client {
                     lk.remove_participant(ch_id, &user_id).await;
                     lk.delete_room_if_empty(ch_id).await;
                 }
             }
+
+            end_dm_call_if_empty(&state, &old_vs, ch_id, &user_id).await;
         }
     }
 
@@ -902,6 +893,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 }
 
+/// After the last participant leaves a DM call, tell the rest of the channel the
+/// call is over so ringing/active-call UI clears. Mirrors `POST /voice/leave`;
+/// no-ops for space channels, which have no call lifecycle.
+async fn end_dm_call_if_empty(
+    state: &AppState,
+    old_vs: &crate::models::voice::VoiceState,
+    channel_id: &str,
+    user_id: &str,
+) {
+    if old_vs.space_id.is_some()
+        || !crate::voice::state::get_channel_voice_states(state, channel_id).is_empty()
+    {
+        return;
+    }
+    routes::voice::broadcast_call_event(
+        state,
+        channel_id,
+        "call.end",
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": user_id,
+        }),
+    )
+    .await;
+}
+
 struct ResolvedAuth {
     user_id: String,
     is_bot: bool,
@@ -922,7 +939,10 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
         .await
         .ok()??;
         (row.0, true)
-    } else if let Some(tok) = token.strip_prefix("Bearer ") {
+    } else {
+        // Neither prefix means the token is unusable — `?` bails the same way
+        // the old trailing `else { return None }` did.
+        let tok = token.strip_prefix("Bearer ")?;
         let token_hash = auth_resolve::create_token_hash(tok);
         let now_fn = crate::db::now_sql(state.db_is_postgres);
         let sql = crate::db::q(&format!(
@@ -957,8 +977,6 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
                 guest_space_id: Some(guest_row.0),
             });
         }
-    } else {
-        return None;
     };
 
     let user = crate::db::users::get_user(&state.db, &user_id).await.ok()?;

@@ -2,6 +2,7 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
 use sqlx::Row;
+use std::collections::HashSet;
 
 use crate::db;
 use crate::error::AppError;
@@ -133,7 +134,68 @@ pub async fn update_current_user(
 
     let user =
         db::users::update_user(&state.db, &auth.user_id, &input, state.db_is_postgres).await?;
+    broadcast_user_update(&state, &user).await;
     Ok(Json(serde_json::json!({ "data": user })))
+}
+
+/// Fans a `user.update` out to everyone who renders this profile: every space
+/// the user is a member of, plus friends, DM/group DM peers and the user's own
+/// other sessions — none of which are guaranteed to share a space. Mirrors the
+/// `presence.update` routing in the gateway.
+///
+/// The payload is the [`PublicUser`](crate::models::user::PublicUser)
+/// projection. A single broadcast reaches third parties, so it must not carry
+/// `is_admin` / `mfa_enabled` / `disabled` / `flags`; the updater's own client
+/// gets the full object from this request's response body.
+async fn broadcast_user_update(state: &AppState, user: &crate::models::user::User) {
+    let public = crate::models::user::PublicUser::from(user.clone());
+    let data = match serde_json::to_value(&public) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let event = || {
+        serde_json::json!({
+            "op": 0,
+            "type": "user.update",
+            "data": data,
+        })
+    };
+
+    let space_ids = db::users::get_user_spaces(&state.db, &user.id)
+        .await
+        .unwrap_or_default();
+
+    let mut targets: HashSet<String> = HashSet::new();
+    targets.insert(user.id.clone());
+    if let Ok(friends) = db::relationships::get_friend_ids(&state.db, &user.id).await {
+        targets.extend(friends);
+    }
+    if let Ok(dm_channels) = db::users::get_user_dm_channels(&state.db, &user.id).await {
+        for channel in &dm_channels {
+            if let Ok(ids) = db::dm_participants::list_participant_ids(&state.db, &channel.id).await
+            {
+                targets.extend(ids);
+            }
+        }
+    }
+
+    let Some(tx) = state.gateway_tx.read().await.clone() else {
+        return;
+    };
+    for sid in space_ids {
+        let _ = tx.send(GatewayBroadcast {
+            space_id: Some(sid),
+            target_user_ids: None,
+            event: event(),
+            intent: "users".to_string(),
+        });
+    }
+    let _ = tx.send(GatewayBroadcast {
+        space_id: None,
+        target_user_ids: Some(targets.into_iter().collect()),
+        event: event(),
+        intent: "users".to_string(),
+    });
 }
 
 pub async fn get_user(
