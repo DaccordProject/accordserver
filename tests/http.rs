@@ -2057,3 +2057,145 @@ async fn test_call_decline_and_cancel_dm() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+// -------------------------------------------------------------------------
+// Report categories (DaccordProject/daccord#204)
+// -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_list_report_categories() {
+    let app = common::test_app().await;
+    let req = Request::builder()
+        .uri("/api/v1/reports/categories")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = parse_body(response).await;
+    let values: Vec<&str> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["value"].as_str().unwrap())
+        .collect();
+
+    for expected in [
+        "spam",
+        "harassment",
+        "hate",
+        "nsfw",
+        "violence",
+        "self_harm",
+        "csam",
+        "terrorism",
+        "fraud",
+        "other",
+    ] {
+        assert!(values.contains(&expected), "missing category {expected}");
+    }
+    // Every category must carry a display label for the report dialog.
+    for c in body["data"].as_array().unwrap() {
+        assert!(!c["label"].as_str().unwrap().is_empty());
+    }
+}
+
+// Every category the server advertises must actually be accepted by
+// create_report, and the legacy `hate_speech` spelling must normalise to
+// `hate` rather than 400.
+#[tokio::test]
+async fn test_report_accepts_every_advertised_category() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "message to report" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let msg_id = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let req = Request::builder()
+        .uri("/api/v1/reports/categories")
+        .body(Body::empty())
+        .unwrap();
+    let response = server.router().oneshot(req).await.unwrap();
+    let listed = parse_body(response).await;
+    let mut categories: Vec<String> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["value"].as_str().unwrap().to_string())
+        .collect();
+    categories.push("hate_speech".to_string());
+
+    for category in categories {
+        let req = authenticated_json_request(
+            Method::POST,
+            &format!("/api/v1/spaces/{space_id}/reports"),
+            &alice.auth_header(),
+            &serde_json::json!({
+                "target_type": "message",
+                "target_id": msg_id,
+                "category": category,
+            }),
+        );
+        let response = server.router().oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "category {category} was rejected"
+        );
+
+        let stored = parse_body(response).await["data"]["category"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let expected = if category == "hate_speech" {
+            "hate"
+        } else {
+            &category
+        };
+        assert_eq!(stored, expected, "category {category} stored as {stored}");
+    }
+}
+
+#[tokio::test]
+async fn test_report_unknown_category_rejected() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "message to report" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let msg_id = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/reports"),
+        &alice.auth_header(),
+        &serde_json::json!({
+            "target_type": "message",
+            "target_id": msg_id,
+            "category": "not_a_category",
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

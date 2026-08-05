@@ -232,6 +232,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(audit_log::list_audit_log),
         )
         // Reports
+        .route("/reports/categories", get(reports::list_report_categories))
         .route(
             "/spaces/{space_id}/reports",
             get(reports::list_reports).post(reports::create_report),

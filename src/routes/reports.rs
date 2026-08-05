@@ -30,15 +30,52 @@ pub struct ResolveReportBody {
     pub action_taken: Option<String>,
 }
 
-const VALID_CATEGORIES: &[&str] = &[
-    "csam",
-    "terrorism",
-    "fraud",
-    "hate",
-    "violence",
-    "self_harm",
-    "other",
+/// The canonical report categories, in the order clients should offer them:
+/// everyday moderation reasons first, severe/legal ones after, `other` last.
+///
+/// This is the single source of truth for the allowlist — it is enforced in
+/// `create_report`, mirrored by the `reports.category` CHECK constraint, and
+/// served to clients by `GET /api/v1/reports/categories` so the two cannot
+/// drift apart.
+pub const REPORT_CATEGORIES: &[(&str, &str)] = &[
+    ("spam", "Spam"),
+    ("harassment", "Harassment or bullying"),
+    ("hate", "Hate speech"),
+    ("nsfw", "Inappropriate content"),
+    ("violence", "Violence or threats"),
+    ("self_harm", "Self-harm or suicide"),
+    ("csam", "Child sexual abuse material"),
+    ("terrorism", "Terrorism or violent extremism"),
+    ("fraud", "Fraud or scam"),
+    ("other", "Other"),
 ];
+
+/// Accepted spellings that are not the canonical value. Kept so older clients
+/// keep working after a rename instead of hard-failing on every report.
+const CATEGORY_ALIASES: &[(&str, &str)] = &[("hate_speech", "hate")];
+
+/// Map a client-supplied category onto its canonical value, or `None` if it is
+/// not a category this server accepts.
+fn canonical_category(input: &str) -> Option<&'static str> {
+    if let Some((canonical, _)) = REPORT_CATEGORIES.iter().find(|(v, _)| *v == input) {
+        return Some(canonical);
+    }
+    CATEGORY_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == input)
+        .map(|(_, canonical)| *canonical)
+}
+
+/// Public list of the report categories this server accepts, with display
+/// labels. Unauthenticated so clients can populate the report dialog before a
+/// space is even open.
+pub async fn list_report_categories() -> Json<serde_json::Value> {
+    let data: Vec<serde_json::Value> = REPORT_CATEGORIES
+        .iter()
+        .map(|(value, label)| serde_json::json!({ "value": value, "label": label }))
+        .collect();
+    Json(serde_json::json!({ "data": data }))
+}
 
 pub async fn create_report(
     state: State<AppState>,
@@ -46,12 +83,8 @@ pub async fn create_report(
     auth: AuthUser,
     Json(body): Json<CreateReportBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if !VALID_CATEGORIES.contains(&body.category.as_str()) {
-        return Err(AppError::BadRequest(format!(
-            "invalid category: {}",
-            body.category
-        )));
-    }
+    let category = canonical_category(&body.category)
+        .ok_or_else(|| AppError::BadRequest(format!("invalid category: {}", body.category)))?;
     if body.target_type != "message" && body.target_type != "user" {
         return Err(AppError::BadRequest(
             "target_type must be 'message' or 'user'".into(),
@@ -78,7 +111,7 @@ pub async fn create_report(
         &body.target_type,
         &body.target_id,
         body.channel_id.as_deref(),
-        &body.category,
+        category,
         body.description.as_deref(),
     )
     .await?;

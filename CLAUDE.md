@@ -72,6 +72,7 @@ All REST endpoints are under `/api/v1` with a rate-limit middleware layer. The r
 - **Public Spaces** — `POST /spaces/{space_id}/join` lets users join public spaces without an invite
 - **Reactions** — Add/remove per-user, list by emoji, bulk remove
 - **Emojis** — CRUD with role restrictions
+- **Reports** — File/list/get/resolve moderation reports per space. `GET /api/v1/reports/categories` (public) returns the accepted `category` values with display labels; `REPORT_CATEGORIES` in `src/routes/reports.rs` is the single source of truth and must stay in sync with the `reports.category` CHECK constraint.
 - **Voice** — Join/leave channels, voice regions, voice status, voice info (`GET /voice/info` returns `{ "backend": "livekit" }`)
 - **Applications** — Bot app CRUD, token reset
 - **Interactions** — Slash command stubs
