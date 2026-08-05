@@ -1,10 +1,12 @@
 mod common;
 
-use common::TestServer;
+use common::{authenticated_json_request, TestServer};
 use futures_util::{SinkExt, StreamExt};
+use http::{Method, StatusCode};
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tower::ServiceExt;
 
 async fn spawn_server() -> String {
     let app = common::test_app().await;
@@ -517,4 +519,117 @@ async fn test_ws_heartbeat_ack() {
     assert_eq!(json["op"], 4, "expected HEARTBEAT_ACK opcode (4)");
 
     ws.close(None).await.unwrap();
+}
+
+// ── user.update fanout ──────────────────────────────────────────────────────
+
+/// PATCH /users/@me through the same AppState the gateway sessions are bound to.
+async fn patch_display_name(server: &TestServer, user: &common::TestUser, name: &str) {
+    let response = server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::PATCH,
+            "/api/v1/users/@me",
+            &user.auth_header(),
+            &serde_json::json!({ "display_name": name }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "profile update should succeed"
+    );
+}
+
+#[tokio::test]
+async fn test_ws_user_update_broadcast_to_space_members() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "SharedSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let mut ws_bob = connect_and_identify(&ws_url, &bob.gateway_token()).await;
+
+    patch_display_name(&server, &alice, "Alice Renamed").await;
+
+    let (found, others) = recv_event_type(&mut ws_bob, "user.update", 4).await;
+    let json = found
+        .unwrap_or_else(|| panic!("Bob should receive Alice's profile change; got {others:?}"));
+    assert_eq!(json["data"]["id"], alice.user.id);
+    assert_eq!(json["data"]["display_name"], "Alice Renamed");
+
+    // The broadcast reaches third parties, so it must carry only the public
+    // projection — never is_admin/mfa_enabled/disabled/flags.
+    for field in ["is_admin", "mfa_enabled", "disabled", "flags"] {
+        assert!(
+            json["data"].get(field).is_none(),
+            "user.update must not expose `{field}`"
+        );
+    }
+
+    ws_bob.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ws_user_update_reaches_dm_peer_without_shared_space() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let _dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let mut ws_bob = connect_and_identify(&ws_url, &bob.gateway_token()).await;
+
+    patch_display_name(&server, &alice, "Alice In DMs").await;
+
+    let (found, others) = recv_event_type(&mut ws_bob, "user.update", 4).await;
+    let json = found.unwrap_or_else(|| {
+        panic!("a DM peer should see the change even with no shared space; got {others:?}")
+    });
+    assert_eq!(json["data"]["display_name"], "Alice In DMs");
+
+    ws_bob.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ws_user_update_not_sent_to_strangers() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let carol = server.create_user_with_token("carol").await;
+    let _alice_space = server.create_space(&alice.user.id, "AliceSpace").await;
+    let _carol_space = server.create_space(&carol.user.id, "CarolSpace").await;
+
+    let mut ws_carol = connect_and_identify(&ws_url, &carol.gateway_token()).await;
+
+    patch_display_name(&server, &alice, "Alice Renamed").await;
+
+    let (found, others) = recv_event_type(&mut ws_carol, "user.update", 2).await;
+    assert!(
+        found.is_none(),
+        "Carol shares no space, DM or friendship with Alice; got {others:?}"
+    );
+
+    ws_carol.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ws_user_update_reaches_own_other_sessions() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    // No spaces, no DMs, no friends — a second session of Alice's own still has
+    // to learn that her profile changed.
+    let mut ws_alice = connect_and_identify(&ws_url, &alice.gateway_token()).await;
+
+    patch_display_name(&server, &alice, "Alice Elsewhere").await;
+
+    let (found, others) = recv_event_type(&mut ws_alice, "user.update", 4).await;
+    let json = found.unwrap_or_else(|| {
+        panic!("Alice's other session should sync her own change; got {others:?}")
+    });
+    assert_eq!(json["data"]["id"], alice.user.id);
+    assert_eq!(json["data"]["display_name"], "Alice Elsewhere");
+
+    ws_alice.close(None).await.unwrap();
 }

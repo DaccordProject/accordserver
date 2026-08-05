@@ -57,6 +57,10 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
         | "plugin.event"
         | "plugin.session_state"
         | "plugin.role_changed" => Some("plugins"),
+        // Profile changes are already fanned out only to shared spaces, DM
+        // peers and friends, and every client renders usernames and avatars
+        // regardless of which intents it asked for.
+        "user.update" => None,        // always delivered
         "interaction.create" => None, // always delivered
         _ => None,
     }
