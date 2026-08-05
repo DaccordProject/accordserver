@@ -73,7 +73,11 @@ pub struct PresenceUpdateData {
 /// VOICE_STATE_UPDATE (opcode 9) payload data.
 #[derive(Debug, Deserialize)]
 pub struct VoiceStateUpdateData {
-    pub space_id: String,
+    /// Absent for DM/group DM calls, which have no parent space. When present
+    /// it must match the channel's own space — the handler resolves the scope
+    /// from the channel and uses this only as a cross-check.
+    #[serde(default)]
+    pub space_id: Option<String>,
     pub channel_id: Option<String>,
     pub self_mute: Option<bool>,
     pub self_deaf: Option<bool>,

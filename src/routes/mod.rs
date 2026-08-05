@@ -28,7 +28,7 @@ pub mod system_messages;
 #[cfg(feature = "test-seed")]
 mod test_seed;
 mod users;
-mod voice;
+pub(crate) mod voice;
 
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, patch, post, put};

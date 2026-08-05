@@ -521,6 +521,203 @@ async fn test_ws_heartbeat_ack() {
     ws.close(None).await.unwrap();
 }
 
+// ── DM voice state (no parent space) ────────────────────────────────────────
+
+/// Join a DM call over the gateway by sending VOICE_STATE_UPDATE with no
+/// `space_id`, and consume the resulting `voice.server_update`.
+async fn join_dm_voice(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    dm_id: &str,
+) {
+    let vsu = serde_json::json!({
+        "op": 9,
+        "data": { "channel_id": dm_id, "self_mute": false, "self_deaf": false }
+    });
+    ws.send(Message::Text(vsu.to_string().into()))
+        .await
+        .unwrap();
+    let (found, _) = recv_event_type(ws, "voice.server_update", 3).await;
+    assert!(
+        found.is_some(),
+        "should receive voice.server_update after joining a DM call"
+    );
+}
+
+#[tokio::test]
+async fn test_ws_dm_voice_mute_broadcasts_to_peer() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let mut ws_alice = connect_and_identify(&ws_url, &alice.gateway_token()).await;
+    let mut ws_bob = connect_and_identify(&ws_url, &bob.gateway_token()).await;
+
+    join_dm_voice(&mut ws_alice, &dm_id).await;
+
+    // Bob sees the join.
+    let (found, _) = recv_event_type(&mut ws_bob, "voice.state_update", 3).await;
+    let json = found.expect("Bob should receive the DM join");
+    assert_eq!(json["data"]["channel_id"], dm_id);
+    assert_eq!(json["data"]["space_id"], serde_json::Value::Null);
+    assert_eq!(json["data"]["self_mute"], false);
+
+    // Mid-call mute/deafen — the update this whole path exists for.
+    let vsu = serde_json::json!({
+        "op": 9,
+        "data": { "channel_id": dm_id, "self_mute": true, "self_deaf": true }
+    });
+    ws_alice
+        .send(Message::Text(vsu.to_string().into()))
+        .await
+        .unwrap();
+
+    let (found, _) = recv_event_type(&mut ws_bob, "voice.state_update", 3).await;
+    let json = found.expect("Bob should receive Alice's mid-call mute");
+    assert_eq!(json["data"]["user_id"], alice.user.id);
+    assert_eq!(json["data"]["self_mute"], true);
+    assert_eq!(json["data"]["self_deaf"], true);
+
+    // The stored state moved too — the peer isn't just seeing a stray event.
+    let vs = accordserver::voice::state::get_user_voice_state(&server.state, &alice.user.id)
+        .expect("Alice should still be in the call");
+    assert!(vs.self_mute);
+    assert!(vs.self_deaf);
+    assert!(vs.space_id.is_none(), "a DM call has no parent space");
+
+    ws_alice.close(None).await.unwrap();
+    ws_bob.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ws_dm_voice_not_broadcast_to_strangers() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let carol = server.create_user_with_token("carol").await;
+    let dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let mut ws_alice = connect_and_identify(&ws_url, &alice.gateway_token()).await;
+    let mut ws_carol = connect_and_identify(&ws_url, &carol.gateway_token()).await;
+
+    join_dm_voice(&mut ws_alice, &dm_id).await;
+
+    // Carol shares no space and no DM with Alice. A DM voice broadcast carries
+    // neither a space_id nor Carol in its targets, so it must not reach her —
+    // a `None`/`None` broadcast would go to every session on the instance.
+    let (found, others) = recv_event_type(&mut ws_carol, "voice.state_update", 2).await;
+    assert!(
+        found.is_none(),
+        "Carol must not receive a DM voice state she has no part in; got {others:?}"
+    );
+
+    ws_alice.close(None).await.unwrap();
+    ws_carol.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ws_dm_voice_leave_notifies_peer_and_ends_call() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let mut ws_alice = connect_and_identify(&ws_url, &alice.gateway_token()).await;
+    let mut ws_bob = connect_and_identify(&ws_url, &bob.gateway_token()).await;
+
+    join_dm_voice(&mut ws_alice, &dm_id).await;
+    let (found, _) = recv_event_type(&mut ws_bob, "voice.state_update", 3).await;
+    assert!(found.is_some(), "Bob should receive the DM join");
+
+    // Leave: channel_id omitted.
+    let vsu = serde_json::json!({ "op": 9, "data": { "channel_id": null } });
+    ws_alice
+        .send(Message::Text(vsu.to_string().into()))
+        .await
+        .unwrap();
+
+    let (found, _) = recv_event_type(&mut ws_bob, "voice.state_update", 3).await;
+    let json = found.expect("Bob should be told Alice left");
+    assert_eq!(json["data"]["user_id"], alice.user.id);
+    assert_eq!(json["data"]["channel_id"], serde_json::Value::Null);
+
+    // Nobody left in the call, so the call itself is over.
+    let (found, others) = recv_event_type(&mut ws_bob, "call.end", 3).await;
+    assert!(
+        found.is_some(),
+        "Bob should receive call.end once the DM call empties; got {others:?}"
+    );
+
+    ws_alice.close(None).await.unwrap();
+    ws_bob.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ws_dm_voice_rejected_for_non_participant() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let carol = server.create_user_with_token("carol").await;
+    let dm_id = server.create_dm(&alice.user.id, &bob.user.id).await;
+
+    let mut ws_carol = connect_and_identify(&ws_url, &carol.gateway_token()).await;
+
+    let vsu = serde_json::json!({
+        "op": 9,
+        "data": { "channel_id": dm_id, "self_mute": false, "self_deaf": false }
+    });
+    ws_carol
+        .send(Message::Text(vsu.to_string().into()))
+        .await
+        .unwrap();
+
+    let (found, _) = recv_event_type(&mut ws_carol, "voice.server_update", 2).await;
+    assert!(
+        found.is_none(),
+        "a non-participant must not be able to join someone else's DM call"
+    );
+    let vs = accordserver::voice::state::get_user_voice_state(&server.state, &carol.user.id);
+    assert!(vs.is_none(), "no voice state should be set for Carol");
+
+    ws_carol.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ws_voice_state_update_mismatched_space_ignored() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "VoiceSpace").await;
+    let other_space = server.create_space(&alice.user.id, "OtherSpace").await;
+    let vc_id = server.create_voice_channel(&space_id, "voice-chat").await;
+
+    let mut ws = connect_and_identify(&ws_url, &alice.gateway_token()).await;
+
+    // Alice is a member of both spaces, but names the wrong one for this
+    // channel. The scope is resolved from the channel, so the claim is a
+    // cross-check that must fail rather than steer the broadcast.
+    let vsu = serde_json::json!({
+        "op": 9,
+        "data": {
+            "space_id": other_space,
+            "channel_id": vc_id,
+            "self_mute": false,
+            "self_deaf": false
+        }
+    });
+    ws.send(Message::Text(vsu.to_string().into()))
+        .await
+        .unwrap();
+
+    let (found, _) = recv_event_type(&mut ws, "voice.server_update", 2).await;
+    assert!(found.is_none(), "a mismatched space_id should be ignored");
+    let vs = accordserver::voice::state::get_user_voice_state(&server.state, &alice.user.id);
+    assert!(vs.is_none(), "voice state should not be set");
+
+    ws.close(None).await.unwrap();
+}
+
 // ── user.update fanout ──────────────────────────────────────────────────────
 
 /// PATCH /users/@me through the same AppState the gateway sessions are bound to.
