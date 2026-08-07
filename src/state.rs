@@ -9,6 +9,7 @@ use tokio::time::Instant;
 use crate::config::MasterServerConfig;
 use crate::gateway::dispatcher::Dispatcher;
 use crate::gateway::events::GatewayBroadcast;
+use crate::gateway::resume::ParkedSession;
 use crate::models::presence::Presence;
 use crate::models::settings::ServerSettings;
 use crate::models::voice::VoiceState;
@@ -94,4 +95,9 @@ pub struct AppState {
     pub guest_attempts: Arc<DashMap<String, GuestAttemptTracker>>,
     /// Tracks the number of active anonymous guests per space for member list display
     pub guest_counts: Arc<DashMap<String, u32>>,
+    /// session_id -> ParkedSession; gateway sessions whose socket dropped and
+    /// which a client may still reclaim with opcode 3 RESUME. The session's own
+    /// task stays alive behind each entry until it is claimed or
+    /// `resume::RESUME_WINDOW` elapses.
+    pub resumable_sessions: Arc<DashMap<String, ParkedSession>>,
 }

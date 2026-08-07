@@ -148,6 +148,7 @@ impl TestServer {
             register_attempts: Arc::new(DashMap::new()),
             guest_attempts: Arc::new(DashMap::new()),
             guest_counts: Arc::new(DashMap::new()),
+            resumable_sessions: Arc::new(DashMap::new()),
         };
 
         Self { state }

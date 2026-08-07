@@ -63,6 +63,17 @@ pub struct IdentifyData {
     pub presence: Option<serde_json::Value>,
 }
 
+/// RESUME (opcode 3) payload data.
+#[derive(Debug, Deserialize)]
+pub struct ResumeData {
+    pub token: String,
+    pub session_id: String,
+    /// Sequence number of the last event the client processed. Absent is
+    /// treated as 0, which only resumes a session that never dispatched.
+    #[serde(default)]
+    pub seq: u64,
+}
+
 /// PRESENCE_UPDATE (opcode 8) payload data.
 #[derive(Debug, Deserialize)]
 pub struct PresenceUpdateData {
