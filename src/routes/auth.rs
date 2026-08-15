@@ -284,6 +284,19 @@ fn extract_request_ip(headers: &HeaderMap) -> String {
 }
 
 fn check_register_rate_limit(state: &AppState, ip: &str) -> Result<(), AppError> {
+    // Automated suites provision accounts in bulk, and 5-per-IP-per-15-minutes
+    // caps a whole test run at five users per server process. `test_mode` is
+    // opt-in (ACCORD_TEST_MODE) and off in production, like the LiveKit
+    // relaxations in `routes/voice.rs`.
+    //
+    // Deliberately not applied to `check_login_rate_limit`: brute-force
+    // protection is a security control with tests that assert it fires
+    // (`tests/security.rs::test_login_brute_force_blocked_after_5_failures`),
+    // and no test suite needs to fail a login six times to make progress.
+    if state.test_mode {
+        return Ok(());
+    }
+
     let ip_hash = hash_ip(ip);
     let now = Instant::now();
     if let Some(tracker) = state.register_attempts.get(&ip_hash) {
