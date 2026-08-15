@@ -2642,6 +2642,34 @@ async fn test_login_brute_force_blocked_after_5_failures() {
     );
 }
 
+/// Registration is capped at 5 per IP per 15 minutes in production, which caps
+/// an automated suite at five accounts per server process. `test_mode` lifts it.
+#[tokio::test]
+async fn test_register_rate_limit_bypassed_in_test_mode() {
+    let server = TestServer::new().await;
+    assert!(server.state.test_mode, "TestServer runs in test mode");
+
+    // Well past REGISTER_MAX_ATTEMPTS (5).
+    for i in 0..8 {
+        let app = server.router();
+        let req = json_request(
+            Method::POST,
+            "/api/v1/auth/register",
+            &json!({ "username": format!("bulk{i}"), "password": "correctpassword1" }),
+        );
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "registration {} should succeed in test mode",
+            i + 1
+        );
+    }
+}
+
+/// The production path still enforces it — see
+/// `test_register_ip_rate_limit_blocked_after_5_attempts`, which turns
+/// `test_mode` off.
 #[tokio::test]
 async fn test_login_successful_clears_failure_counter() {
     let server = TestServer::new().await;
@@ -2730,7 +2758,10 @@ async fn test_login_nonexistent_username_counts_toward_limit() {
 
 #[tokio::test]
 async fn test_register_ip_rate_limit_blocked_after_5_attempts() {
-    let server = TestServer::new().await;
+    let mut server = TestServer::new().await;
+    // The limit is bypassed under `test_mode` so suites can provision accounts
+    // in bulk; this asserts the production control, so turn it off.
+    server.state.test_mode = false;
 
     // 5 registration attempts from the same (implicit "unknown") IP
     for i in 0..5 {
