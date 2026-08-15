@@ -1380,3 +1380,100 @@ async fn test_ws_space_left_mid_session_stops_receiving_events() {
         "a left space must stop delivering messages"
     );
 }
+
+/// Banning deletes the member row, so the banned user's session must drop the
+/// space the same way a kick or a self-leave does — otherwise it keeps
+/// receiving the space's traffic until it happens to reconnect (#56).
+#[tokio::test]
+async fn test_ws_banned_user_stops_receiving_the_space() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    let space_id = server.create_public_space(&alice.user.id, "Open").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let (mut ws_bob, _) = connect_with(
+        &ws_url,
+        &bob.gateway_token(),
+        &["messages", "message_content", "members"],
+        None,
+    )
+    .await;
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "reason": "spam" }),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let (found, others) = recv_event_type(&mut ws_bob, "member.leave", 5).await;
+    let leave = found.unwrap_or_else(|| panic!("bob's own member.leave; got {others:?}"));
+    assert_eq!(leave["data"]["user_id"], bob.user.id);
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "after the ban" }),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let (found, _) = recv_event_type(&mut ws_bob, "message.create", 3).await;
+    assert!(
+        found.is_none(),
+        "a banned session must stop receiving the space"
+    );
+}
+
+/// Moderators watching the space get the moderation event the intent table
+/// already anticipates.
+#[tokio::test]
+async fn test_ws_ban_create_and_delete_reach_moderators() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    let space_id = server.create_public_space(&alice.user.id, "Open").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let (mut ws_alice, _) = connect_with(
+        &ws_url,
+        &alice.gateway_token(),
+        &["moderation", "members"],
+        None,
+    )
+    .await;
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "reason": "spam" }),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let (found, others) = recv_event_type(&mut ws_alice, "ban.create", 5).await;
+    let created = found.unwrap_or_else(|| panic!("ban.create; got {others:?}"));
+    assert_eq!(created["data"]["user_id"], bob.user.id);
+    assert_eq!(created["data"]["reason"], "spam");
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({}),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let (found, others) = recv_event_type(&mut ws_alice, "ban.delete", 5).await;
+    let deleted = found.unwrap_or_else(|| panic!("ban.delete; got {others:?}"));
+    assert_eq!(deleted["data"]["user_id"], bob.user.id);
+}
