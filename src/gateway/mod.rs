@@ -225,8 +225,22 @@ enum Delivery {
     Skip,
     /// The session's mute list changed and has to be reloaded.
     RefreshMutes,
+    /// This session's own space membership changed: reload the space set, then
+    /// deliver the payload if it's `Some` (an intent can still gate the event
+    /// itself — the reload is about routing and happens either way).
+    RefreshSpaces(Option<serde_json::Value>),
     /// Deliver this event; the caller stamps the session's next `seq` into it.
     Send(serde_json::Value),
+}
+
+/// The user a `member.join` / `member.leave` event is about. The two carry the
+/// subject differently: `member.join` embeds the whole user object, while
+/// `member.leave` sends a bare id.
+fn membership_event_subject(event: &serde_json::Value) -> Option<&str> {
+    let data = event.get("data")?;
+    data.get("user_id")
+        .and_then(|u| u.as_str())
+        .or_else(|| data.get("user")?.get("id")?.as_str())
 }
 
 fn classify_broadcast(
@@ -236,6 +250,24 @@ fn classify_broadcast(
     muted_channel_ids: &HashSet<String>,
     intents: &[String],
 ) -> Delivery {
+    let event_type = broadcast
+        .event
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    // Our own membership changing is checked *before* the space filter below.
+    // On a join the space isn't in `space_ids` yet, so the filter would drop
+    // the one event that says to add it — and the session would then stay deaf
+    // to that space for its whole life.
+    if matches!(event_type, "member.join" | "member.leave")
+        && membership_event_subject(&broadcast.event) == Some(user_id)
+    {
+        return Delivery::RefreshSpaces(
+            intents::has_intent(intents, event_type).then(|| broadcast.event.clone()),
+        );
+    }
+
     let should_receive = match (&broadcast.target_user_ids, &broadcast.space_id) {
         (Some(targets), _) => targets.iter().any(|t| t == user_id),
         (None, Some(sid)) => space_ids.contains(sid),
@@ -244,12 +276,6 @@ fn classify_broadcast(
     if !should_receive {
         return Delivery::Skip;
     }
-
-    let event_type = broadcast
-        .event
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
 
     // Mute list updates from the REST API
     if event_type == "channel_mute.create" || event_type == "channel_mute.delete" {
@@ -273,6 +299,36 @@ fn classify_broadcast(
         return Delivery::Skip;
     }
     Delivery::Send(broadcast.event.clone())
+}
+
+/// Re-reads the user's space memberships mid-session.
+///
+/// Guests are scoped to a single space handed out with their token and have no
+/// row in `members`, so re-reading would silently strip their access — they
+/// keep [`current`] instead.
+async fn reload_space_ids(
+    state: &AppState,
+    user_id: &str,
+    is_guest_session: bool,
+    current: &HashSet<String>,
+) -> HashSet<String> {
+    if is_guest_session {
+        return current.clone();
+    }
+    db::spaces::list_space_ids_for_user(&state.db, user_id)
+        .await
+        .map(|sids| sids.into_iter().collect())
+        .unwrap_or_else(|_| current.clone())
+}
+
+/// Mirrors a refreshed space set onto the session registered with the
+/// dispatcher, so the two don't drift.
+async fn sync_session_spaces(state: &AppState, session_id: &str, space_ids: &HashSet<String>) {
+    if let Some(ref dispatcher) = *state.dispatcher.read().await {
+        if let Some(mut session) = dispatcher.sessions().get_mut(session_id) {
+            session.space_ids = space_ids.clone();
+        }
+    }
 }
 
 fn stamp_seq(mut event: serde_json::Value, seq: u64) -> String {
@@ -691,8 +747,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let is_admin = auth.is_admin;
 
     // Memberships and mutes are reloaded on RESUME too — they can change while
-    // a client is away.
-    let space_ids: HashSet<String>;
+    // a client is away — and `space_ids` is additionally refreshed mid-session
+    // whenever this user joins or leaves a space (see Delivery::RefreshSpaces).
+    let mut space_ids: HashSet<String>;
     let mut muted_channel_ids: HashSet<String>;
     if auth.is_guest {
         // Guest: use scoped space only, no mutes
@@ -869,6 +926,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
                                     .map(|ids| ids.into_iter().collect())
                                     .unwrap_or_default();
+                            }
+                            Delivery::RefreshSpaces(event) => {
+                                space_ids = reload_space_ids(&state, &user_id, is_guest_session, &space_ids).await;
+                                sync_session_spaces(&state, &session_id, &space_ids).await;
+                                if let Some(event) = event {
+                                    seq += 1;
+                                    let payload = stamp_seq(event, seq);
+                                    if ws_sink.send(Message::Text(payload.clone().into())).await.is_err() {
+                                        break;
+                                    }
+                                    resume::push(&mut replay_buffer, seq, payload);
+                                }
                             }
                             Delivery::Send(event) => {
                                 seq += 1;
@@ -1291,6 +1360,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
                             .map(|ids| ids.into_iter().collect())
                             .unwrap_or_default();
+                    }
+                    Delivery::RefreshSpaces(event) => {
+                        space_ids = reload_space_ids(&state, &user_id, is_guest_session, &space_ids).await;
+                        sync_session_spaces(&state, &session_id, &space_ids).await;
+                        if let Some(event) = event {
+                            seq += 1;
+                            resume::push(&mut replay_buffer, seq, stamp_seq(event, seq));
+                        }
                     }
                     Delivery::Send(event) => {
                         seq += 1;

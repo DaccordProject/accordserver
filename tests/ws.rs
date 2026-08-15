@@ -1227,3 +1227,156 @@ async fn test_ws_identify_preserves_existing_status() {
         .expect("READY should carry Alice's own presence");
     assert_eq!(own["status"], "dnd");
 }
+
+// =========================================================================
+// Mid-session membership changes (#52)
+// =========================================================================
+
+/// A session that joins a space *after* IDENTIFY must start receiving that
+/// space's events without reconnecting. The membership set used for fan-out
+/// was previously a snapshot taken at IDENTIFY, so a space joined while
+/// connected stayed silent for the life of the connection.
+#[tokio::test]
+async fn test_ws_space_joined_mid_session_receives_events() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    let space_id = server.create_public_space(&alice.user.id, "Open").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // Bob connects first, while he is not a member of anything.
+    let (mut ws_bob, _) = connect_with(
+        &ws_url,
+        &bob.gateway_token(),
+        &["messages", "message_content", "members"],
+        None,
+    )
+    .await;
+
+    // …and only then joins.
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/join"),
+        &bob.auth_header(),
+        &serde_json::json!({}),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    // His own member.join must arrive — the event that carries the membership
+    // change can't be filtered out by the stale membership it announces.
+    let (found, others) = recv_event_type(&mut ws_bob, "member.join", 5).await;
+    let join = found.unwrap_or_else(|| panic!("bob's own member.join; got {others:?}"));
+    assert_eq!(join["data"]["user"]["id"], bob.user.id);
+
+    // And a message posted afterwards must reach him.
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "after the join" }),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let (found, others) = recv_event_type(&mut ws_bob, "message.create", 5).await;
+    let message = found.unwrap_or_else(|| panic!("message after join; got {others:?}"));
+    assert_eq!(message["data"]["content"], "after the join");
+}
+
+/// The refresh is about routing, not subscription: a client that didn't ask
+/// for the `members` intent still has its membership updated, it just doesn't
+/// see the `member.join` itself.
+#[tokio::test]
+async fn test_ws_mid_session_join_refreshes_without_members_intent() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    let space_id = server.create_public_space(&alice.user.id, "Open").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    // No "members" intent.
+    let (mut ws_bob, _) = connect_with(
+        &ws_url,
+        &bob.gateway_token(),
+        &["messages", "message_content"],
+        None,
+    )
+    .await;
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/join"),
+        &bob.auth_header(),
+        &serde_json::json!({}),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "still routed" }),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let (found, others) = recv_event_type(&mut ws_bob, "message.create", 5).await;
+    let message = found.unwrap_or_else(|| panic!("message after join; got {others:?}"));
+    assert_eq!(message["data"]["content"], "still routed");
+    assert!(
+        !others.iter().any(|e| e["type"] == "member.join"),
+        "member.join needs the members intent"
+    );
+}
+
+/// Leaving is the mirror image: the session must stop receiving the space's
+/// events without waiting for a reconnect.
+#[tokio::test]
+async fn test_ws_space_left_mid_session_stops_receiving_events() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    let space_id = server.create_public_space(&alice.user.id, "Open").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let (mut ws_bob, _) = connect_with(
+        &ws_url,
+        &bob.gateway_token(),
+        &["messages", "message_content", "members"],
+        None,
+    )
+    .await;
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::DELETE,
+        &format!("/api/v1/spaces/{space_id}/members/@me"),
+        &bob.auth_header(),
+        &serde_json::json!({}),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let (found, others) = recv_event_type(&mut ws_bob, "member.leave", 5).await;
+    found.unwrap_or_else(|| panic!("bob's own member.leave; got {others:?}"));
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "after the leave" }),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let (found, _) = recv_event_type(&mut ws_bob, "message.create", 3).await;
+    assert!(
+        found.is_none(),
+        "a left space must stop delivering messages"
+    );
+}
