@@ -8,6 +8,9 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tower::ServiceExt;
 
+type WsConn =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
 async fn spawn_server() -> String {
     let app = common::test_app().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -829,4 +832,398 @@ async fn test_ws_user_update_reaches_own_other_sessions() {
     assert_eq!(json["data"]["display_name"], "Alice Elsewhere");
 
     ws_alice.close(None).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Handshake, RESUME, rate limiting and IDENTIFY presence
+// ---------------------------------------------------------------------------
+
+const SHORT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Connect and IDENTIFY with explicit intents and an optional presence payload.
+/// Returns the socket and the READY frame.
+async fn connect_with(
+    ws_url: &str,
+    token: &str,
+    intents: &[&str],
+    presence: Option<serde_json::Value>,
+) -> (WsConn, serde_json::Value) {
+    let (mut ws, _) = connect_async(format!("{ws_url}/ws")).await.unwrap();
+    let hello = next_json(&mut ws).await;
+    assert_eq!(hello["op"], 5);
+
+    let mut data = serde_json::json!({ "token": token, "intents": intents });
+    if let Some(presence) = presence {
+        data["presence"] = presence;
+    }
+    ws.send(Message::Text(
+        serde_json::json!({ "op": 2, "data": data })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+
+    let ready = next_json(&mut ws).await;
+    assert_eq!(ready["type"], "ready", "expected READY, got {ready}");
+    (ws, ready)
+}
+
+/// Read the next frame as JSON, failing rather than hanging if none arrives.
+async fn next_json(ws: &mut WsConn) -> serde_json::Value {
+    let msg = tokio::time::timeout(SHORT, ws.next())
+        .await
+        .expect("timed out waiting for a gateway frame")
+        .expect("stream ended")
+        .expect("websocket error");
+    assert!(!msg.is_close(), "expected a text frame, got {msg:?}");
+    serde_json::from_str(&msg.into_text().unwrap()).unwrap()
+}
+
+async fn post_message(server: &TestServer, user: &common::TestUser, channel_id: &str, body: &str) {
+    let response = server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::POST,
+            &format!("/api/v1/channels/{channel_id}/messages"),
+            &user.auth_header(),
+            &serde_json::json!({ "content": body }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_ws_unknown_opcode_before_identify_fails_fast() {
+    let url = spawn_server().await;
+    let (mut ws, _) = connect_async(format!("{url}/ws")).await.unwrap();
+    let _hello = ws.next().await.unwrap().unwrap();
+
+    ws.send(Message::Text(
+        serde_json::json!({ "op": 99 }).to_string().into(),
+    ))
+    .await
+    .unwrap();
+
+    // The answer has to be immediate. Stalling until the 30s identify timeout
+    // turns a blip into a visible outage for everyone in the user's spaces.
+    let json = next_json(&mut ws).await;
+    assert_eq!(json["op"], 7, "expected INVALID_SESSION, got {json}");
+    assert_eq!(json["data"]["resumable"], false);
+}
+
+#[tokio::test]
+async fn test_ws_heartbeat_before_identify_is_acked() {
+    let url = spawn_server().await;
+    let (mut ws, _) = connect_async(format!("{url}/ws")).await.unwrap();
+    let _hello = ws.next().await.unwrap().unwrap();
+
+    // HELLO hands out the heartbeat interval, so a client may start beating
+    // before it identifies; that must not be read as a protocol error.
+    ws.send(Message::Text(
+        serde_json::json!({ "op": 1 }).to_string().into(),
+    ))
+    .await
+    .unwrap();
+
+    let json = next_json(&mut ws).await;
+    assert_eq!(json["op"], 4, "expected HEARTBEAT_ACK, got {json}");
+}
+
+#[tokio::test]
+async fn test_ws_resume_replays_events_missed_while_disconnected() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "SharedSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let (ws_alice, ready) =
+        connect_with(&ws_url, &alice.gateway_token(), &["messages"], None).await;
+    let session_id = ready["data"]["session_id"].as_str().unwrap().to_string();
+    let last_seq = ready["seq"].as_u64().unwrap();
+
+    // Drop the socket the way a network blip would: no close frame.
+    drop(ws_alice);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    post_message(&server, &bob, &channel_id, "while you were out").await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let (mut ws, _) = connect_async(format!("{ws_url}/ws")).await.unwrap();
+    let hello = next_json(&mut ws).await;
+    assert_eq!(hello["op"], 5);
+    ws.send(Message::Text(
+        serde_json::json!({
+            "op": 3,
+            "data": {
+                "token": alice.gateway_token(),
+                "session_id": session_id,
+                "seq": last_seq
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    // The message sent while Alice was away is replayed before the resume is
+    // confirmed — a client told it resumed stops backfilling, so anything the
+    // gap swallowed would be lost for good.
+    let replayed = next_json(&mut ws).await;
+    assert_eq!(
+        replayed["type"], "message.create",
+        "expected the missed message, got {replayed}"
+    );
+    assert_eq!(replayed["data"]["content"], "while you were out");
+    assert!(replayed["seq"].as_u64().unwrap() > last_seq);
+
+    let resumed = next_json(&mut ws).await;
+    assert_eq!(
+        resumed["type"], "resumed",
+        "expected RESUMED, got {resumed}"
+    );
+    assert_eq!(resumed["data"]["session_id"], session_id);
+    assert_eq!(resumed["data"]["replayed"], 1);
+}
+
+#[tokio::test]
+async fn test_ws_resume_keeps_delivering_after_handover() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "SharedSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let (ws_alice, ready) =
+        connect_with(&ws_url, &alice.gateway_token(), &["messages"], None).await;
+    let session_id = ready["data"]["session_id"].as_str().unwrap().to_string();
+    drop(ws_alice);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (mut ws, _) = connect_async(format!("{ws_url}/ws")).await.unwrap();
+    let _hello = next_json(&mut ws).await;
+    ws.send(Message::Text(
+        serde_json::json!({
+            "op": 3,
+            "data": {
+                "token": alice.gateway_token(),
+                "session_id": session_id,
+                "seq": ready["seq"]
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let resumed = next_json(&mut ws).await;
+    assert_eq!(
+        resumed["type"], "resumed",
+        "expected RESUMED, got {resumed}"
+    );
+
+    // The handed-over receiver has to keep working on the new socket.
+    post_message(&server, &bob, &channel_id, "after the handover").await;
+    let (found, others) = recv_event_type(&mut ws, "message.create", 4).await;
+    let json = found.unwrap_or_else(|| {
+        panic!("a resumed session should still receive live events; got {others:?}")
+    });
+    assert_eq!(json["data"]["content"], "after the handover");
+}
+
+#[tokio::test]
+async fn test_ws_resume_rejects_another_users_session() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let mallory = server.create_user_with_token("mallory").await;
+
+    let (ws_alice, ready) =
+        connect_with(&ws_url, &alice.gateway_token(), &["messages"], None).await;
+    let session_id = ready["data"]["session_id"].as_str().unwrap().to_string();
+    drop(ws_alice);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (mut ws, _) = connect_async(format!("{ws_url}/ws")).await.unwrap();
+    let _hello = next_json(&mut ws).await;
+    ws.send(Message::Text(
+        serde_json::json!({
+            "op": 3,
+            "data": {
+                "token": mallory.gateway_token(),
+                "session_id": session_id,
+                "seq": 1
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    let json = next_json(&mut ws).await;
+    assert_eq!(json["op"], 7, "expected INVALID_SESSION, got {json}");
+    drop(ws);
+
+    // Rejecting Mallory must not have consumed the session: Alice can still
+    // claim it herself.
+    let (mut ws_alice, _) = connect_async(format!("{ws_url}/ws")).await.unwrap();
+    let _hello = next_json(&mut ws_alice).await;
+    ws_alice
+        .send(Message::Text(
+            serde_json::json!({
+                "op": 3,
+                "data": {
+                    "token": alice.gateway_token(),
+                    "session_id": session_id,
+                    "seq": ready["seq"]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let resumed = next_json(&mut ws_alice).await;
+    assert_eq!(
+        resumed["type"], "resumed",
+        "expected RESUMED, got {resumed}"
+    );
+}
+
+#[tokio::test]
+async fn test_ws_heartbeats_are_not_rate_limited() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let mut ws = connect_and_identify(&ws_url, &alice.gateway_token()).await;
+
+    // Well past the 120-per-minute cap. A dropped heartbeat lets last_heartbeat
+    // go stale and kills the session at the next timeout check, which culls
+    // precisely the busiest clients.
+    const BEATS: usize = 200;
+    for _ in 0..BEATS {
+        ws.send(Message::Text(
+            serde_json::json!({ "op": 1 }).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let mut acks = 0;
+    while acks < BEATS {
+        let json = next_json(&mut ws).await;
+        if json["op"] == 4 {
+            acks += 1;
+        }
+    }
+    assert_eq!(acks, BEATS);
+}
+
+#[tokio::test]
+async fn test_ws_rate_limit_closes_instead_of_dropping_silently() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let mut ws = connect_and_identify(&ws_url, &alice.gateway_token()).await;
+
+    // Presence updates are counted. Going quiet on the overflow leaves the
+    // client with no idea it should back off, so the server closes with 4008.
+    for _ in 0..130 {
+        ws.send(Message::Text(
+            serde_json::json!({ "op": 8, "data": { "status": "online" } })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let mut close_code = None;
+    for _ in 0..16 {
+        let msg = tokio::time::timeout(SHORT, ws.next())
+            .await
+            .expect("expected a close frame, not silence");
+        match msg {
+            Some(Ok(Message::Close(frame))) => {
+                close_code = frame.map(|f| u16::from(f.code));
+                break;
+            }
+            Some(Ok(_)) => continue,
+            _ => break,
+        }
+    }
+    assert_eq!(close_code, Some(4008), "expected close code RATE_LIMITED");
+}
+
+#[tokio::test]
+async fn test_ws_identify_presence_is_honoured() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "SharedSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let (mut ws_bob, _) = connect_with(&ws_url, &bob.gateway_token(), &["presences"], None).await;
+    let (_ws_alice, _) = connect_with(
+        &ws_url,
+        &alice.gateway_token(),
+        &["presences"],
+        Some(serde_json::json!({ "status": "dnd" })),
+    )
+    .await;
+
+    let (found, others) = recv_event_type(&mut ws_bob, "presence.update", 4).await;
+    let json = found.unwrap_or_else(|| panic!("Bob should see Alice connect; got {others:?}"));
+    assert_eq!(json["data"]["user_id"], alice.user.id);
+    assert_eq!(
+        json["data"]["status"], "dnd",
+        "IDENTIFY must publish the presence the client asked for"
+    );
+}
+
+#[tokio::test]
+async fn test_ws_identify_preserves_existing_status() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "SharedSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+
+    let (mut ws_bob, _) = connect_with(&ws_url, &bob.gateway_token(), &["presences"], None).await;
+
+    let (_ws_alice_1, _) = connect_with(
+        &ws_url,
+        &alice.gateway_token(),
+        &["presences"],
+        Some(serde_json::json!({ "status": "dnd" })),
+    )
+    .await;
+    let (found, _) = recv_event_type(&mut ws_bob, "presence.update", 4).await;
+    assert_eq!(
+        found.expect("Alice's first session")["data"]["status"],
+        "dnd"
+    );
+
+    // A second session that says nothing about presence must not reset her.
+    let (_ws_alice_2, ready) =
+        connect_with(&ws_url, &alice.gateway_token(), &["presences"], None).await;
+
+    let (found, others) = recv_event_type(&mut ws_bob, "presence.update", 4).await;
+    let json = found.unwrap_or_else(|| panic!("Alice's second session; got {others:?}"));
+    assert_eq!(json["data"]["user_id"], alice.user.id);
+    assert_eq!(
+        json["data"]["status"], "dnd",
+        "reconnecting must not stomp a chosen status"
+    );
+
+    let own = ready["data"]["presences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["user_id"] == alice.user.id.as_str())
+        .expect("READY should carry Alice's own presence");
+    assert_eq!(own["status"], "dnd");
 }

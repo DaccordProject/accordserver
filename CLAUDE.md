@@ -47,12 +47,17 @@ The crate is structured as a library (`src/lib.rs`) with a thin binary entry poi
 
 The gateway is the real-time event system. Clients connect via `GET /ws`.
 
-- **`mod.rs`** — WebSocket upgrade handler and the main session loop. Flow: send HELLO → wait for IDENTIFY (with token + intents) → send READY → enter event loop handling heartbeats, broadcasts, voice state updates, and voice signals.
+- **`mod.rs`** — WebSocket upgrade handler and the main session loop. Flow: send HELLO → wait for IDENTIFY (with token + intents) or RESUME → send READY (or replay + `resumed`) → enter event loop handling heartbeats, broadcasts, voice state updates, and voice signals. Any other frame during the handshake is answered with INVALID_SESSION immediately rather than left to the 30s timeout.
 - **`events.rs`** — Message envelope (`GatewayMessage`), opcodes (0-10: EVENT, HEARTBEAT, IDENTIFY, RESUME, HEARTBEAT_ACK, HELLO, RECONNECT, INVALID_SESSION, PRESENCE_UPDATE, VOICE_STATE_UPDATE, REQUEST_MEMBERS), and close codes (4000-4014).
+- **`resume.rs`** — Session resumption (opcode 3). When a socket drops without a close frame, its task *parks* instead of exiting: it stays subscribed to the broadcast channel, keeps filling a bounded replay buffer, and registers itself in `AppState.resumable_sessions` for `RESUME_WINDOW` (60s). A RESUME with a matching `session_id`, token and `seq` claims the parked session, and the parked task hands over its buffer *and its broadcast receiver* so no event is dropped or duplicated across the two sockets. If the buffer no longer covers the client's `seq` gap, the server replies INVALID_SESSION rather than a partial replay. Presence is held for the whole window, so a transient drop no longer flaps the user offline and back.
 - **`dispatcher.rs`** — Manages broadcast channel. Sessions register/deregister. Events are sent to all sessions then filtered by space membership and intents.
 - **`session.rs`** — Per-connection state: user_id, intents, space_ids, sequence counter, send channel.
 - **`heartbeat.rs`** — Heartbeat interval/timeout constants.
 - **`intents.rs`** — Maps event types to intent categories for filtering.
+
+Per-connection inbound rate limit is 120 frames/60s. HEARTBEAT is exempt (throttling keepalives starves `last_heartbeat` and culls the busiest sessions); exceeding the limit closes with 4008 rather than dropping frames silently. IDENTIFY/RESUME after the handshake close with 4005.
+
+Presence on IDENTIFY: the `presence` field of the IDENTIFY payload (`{ status, activities | activity }`) is honoured; otherwise the user's existing presence is carried forward, so reconnecting one session does not reset a chosen `dnd`/`idle` or custom status. `online` is only the fallback when there is nothing to preserve. `invisible` is published as `offline`.
 
 Authentication on the gateway uses `"Bot <token>"` or `"Bearer <token>"` in the IDENTIFY payload, resolved against `bot_tokens`/`user_tokens` tables via token hashing.
 

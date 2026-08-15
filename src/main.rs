@@ -221,6 +221,7 @@ async fn run_main_server(config: Config) {
         register_attempts: Arc::new(DashMap::new()),
         guest_attempts: Arc::new(DashMap::new()),
         guest_counts: Arc::new(DashMap::new()),
+        resumable_sessions: Arc::new(DashMap::new()),
     };
 
     // Ensure a default invite exists and display it

@@ -2,168 +2,406 @@ pub mod dispatcher;
 pub mod events;
 pub mod heartbeat;
 pub mod intents;
+pub mod resume;
 pub mod session;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashSet;
-use tokio::sync::mpsc;
+use std::collections::{HashSet, VecDeque};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::db;
 use crate::middleware::auth as auth_resolve;
 use crate::routes;
 use crate::state::AppState;
 use events::{
-    GatewayBroadcast, GatewayMessage, IdentifyData, PresenceUpdateData, VoiceStateUpdateData,
+    GatewayBroadcast, GatewayMessage, IdentifyData, PresenceUpdateData, ResumeData,
+    VoiceStateUpdateData,
 };
 use heartbeat::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
+use resume::{Handover, ParkedSession};
 use session::GatewaySession;
+
+type WsSink = SplitSink<WebSocket, Message>;
+type WsStream = SplitStream<WebSocket>;
+
+/// How long a client has to send IDENTIFY or RESUME after HELLO.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Status values a client may ask for.
+const VALID_STATUSES: [&str; 4] = ["online", "idle", "dnd", "invisible"];
 
 pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
-    let (mut ws_sink, mut ws_stream) = socket.split();
+// ---------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------
 
-    // Send HELLO
-    let hello = serde_json::json!({
-        "op": events::opcode::HELLO,
-        "data": {
-            "heartbeat_interval": HEARTBEAT_INTERVAL.as_millis() as u64
-        }
+/// Outcome of the pre-authentication handshake.
+enum Handshake {
+    Identify {
+        auth: ResolvedAuth,
+        intents: Vec<String>,
+        presence: Option<serde_json::Value>,
+    },
+    Resume {
+        auth: ResolvedAuth,
+        session_id: String,
+        intents: Vec<String>,
+        handover: Handover,
+        missed: Vec<String>,
+    },
+}
+
+async fn send_invalid_session(sink: &mut WsSink) {
+    let close = serde_json::json!({
+        "op": events::opcode::INVALID_SESSION,
+        "data": { "resumable": false }
     });
-    if ws_sink
-        .send(Message::Text(hello.to_string().into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
+    let _ = sink.send(Message::Text(close.to_string().into())).await;
+}
 
-    // Wait for IDENTIFY
-    let session_id;
-    let user_id;
-    let is_bot;
-    let is_admin;
-    let user_intents: Vec<String>;
-    let space_ids: HashSet<String>;
-    let mut muted_channel_ids: HashSet<String>;
+async fn send_close(sink: &mut WsSink, code: u16, reason: &str) {
+    let _ = sink
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await;
+}
 
-    // Channel for sending messages to this client
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-
-    // Give client 30 seconds to identify
-    let identify_timeout = tokio::time::sleep(std::time::Duration::from_secs(30));
-    tokio::pin!(identify_timeout);
+/// Wait for IDENTIFY or RESUME. Anything else is answered with INVALID_SESSION
+/// straight away rather than left to time out — a client whose opening frame we
+/// don't accept used to sit here for the full 30 seconds, long enough for the
+/// disconnect to be visible to everyone in its spaces.
+async fn await_handshake(
+    state: &AppState,
+    sink: &mut WsSink,
+    stream: &mut WsStream,
+) -> Option<Handshake> {
+    let timeout = tokio::time::sleep(HANDSHAKE_TIMEOUT);
+    tokio::pin!(timeout);
 
     loop {
         tokio::select! {
-            _ = &mut identify_timeout => {
-                let close = serde_json::json!({
-                    "op": events::opcode::INVALID_SESSION,
-                    "data": { "resumable": false }
-                });
-                let _ = ws_sink.send(Message::Text(close.to_string().into())).await;
-                return;
+            _ = &mut timeout => {
+                send_invalid_session(sink).await;
+                return None;
             }
-            msg = ws_stream.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(gw_msg) = serde_json::from_str::<GatewayMessage>(&text) {
-                            if gw_msg.op == events::opcode::IDENTIFY {
-                                if let Some(data) = gw_msg.data {
-                                    if let Ok(identify) = serde_json::from_value::<IdentifyData>(data) {
-                                        // Resolve token
-                                        let resolved = resolve_token(&state, &identify.token).await;
-                                        match resolved {
-                                            Some(auth) => {
-                                                user_id = auth.user_id;
-                                                is_bot = auth.is_bot;
-                                                is_admin = auth.is_admin;
-                                                user_intents = identify.intents;
-                                                session_id = crate::snowflake::generate();
+            msg = stream.next() => {
+                let text = match msg {
+                    Some(Ok(Message::Text(text))) => text,
+                    // A broken stream can keep yielding errors, so treat the
+                    // first one as the end rather than spinning on it.
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return None,
+                    // Ping/pong/binary aren't part of the handshake.
+                    _ => continue,
+                };
 
-                                                if auth.is_guest {
-                                                    // Guest: use scoped space only, no mutes
-                                                    space_ids = auth.guest_space_id
-                                                        .into_iter()
-                                                        .collect();
-                                                    muted_channel_ids = HashSet::new();
-                                                } else {
-                                                    // Load user's space memberships
-                                                    space_ids = db::spaces::list_space_ids_for_user(&state.db, &user_id).await
-                                                        .map(|sids| sids.into_iter().collect())
-                                                        .unwrap_or_default();
+                let Ok(gw_msg) = serde_json::from_str::<GatewayMessage>(&text) else {
+                    send_invalid_session(sink).await;
+                    return None;
+                };
 
-                                                    muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
-                                                        .map(|ids| ids.into_iter().collect())
-                                                        .unwrap_or_default();
-                                                }
-
-                                                break;
-                                            }
-                                            None => {
-                                                let close = serde_json::json!({
-                                                    "op": events::opcode::INVALID_SESSION,
-                                                    "data": { "resumable": false }
-                                                });
-                                                let _ = ws_sink.send(Message::Text(close.to_string().into())).await;
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                match gw_msg.op {
+                    // HELLO hands out the heartbeat interval, so a client may
+                    // well start beating before it finishes identifying.
+                    op if op == events::opcode::HEARTBEAT => {
+                        let ack = serde_json::json!({ "op": events::opcode::HEARTBEAT_ACK });
+                        if sink.send(Message::Text(ack.to_string().into())).await.is_err() {
+                            return None;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => return,
-                    _ => {}
+                    op if op == events::opcode::IDENTIFY => {
+                        let Some(identify) = gw_msg
+                            .data
+                            .and_then(|d| serde_json::from_value::<IdentifyData>(d).ok())
+                        else {
+                            send_invalid_session(sink).await;
+                            return None;
+                        };
+                        let Some(auth) = resolve_token(state, &identify.token).await else {
+                            send_invalid_session(sink).await;
+                            return None;
+                        };
+                        return Some(Handshake::Identify {
+                            auth,
+                            intents: identify.intents,
+                            presence: identify.presence,
+                        });
+                    }
+                    op if op == events::opcode::RESUME => {
+                        let Some(resume_data) = gw_msg
+                            .data
+                            .and_then(|d| serde_json::from_value::<ResumeData>(d).ok())
+                        else {
+                            send_invalid_session(sink).await;
+                            return None;
+                        };
+                        let Some(auth) = resolve_token(state, &resume_data.token).await else {
+                            send_invalid_session(sink).await;
+                            return None;
+                        };
+                        let claimed =
+                            claim_parked_session(state, &resume_data.session_id, &auth.user_id)
+                                .await;
+                        let Some((intents, handover)) = claimed else {
+                            send_invalid_session(sink).await;
+                            return None;
+                        };
+                        let missed = resume::missed_since(
+                            &handover.buffer,
+                            handover.seq,
+                            resume_data.seq,
+                        );
+                        let Some(missed) = missed else {
+                            // The replay buffer no longer covers the gap, so the
+                            // client has to rebuild its state from READY.
+                            send_invalid_session(sink).await;
+                            return None;
+                        };
+                        return Some(Handshake::Resume {
+                            auth,
+                            session_id: resume_data.session_id,
+                            intents,
+                            handover,
+                            missed,
+                        });
+                    }
+                    _ => {
+                        send_invalid_session(sink).await;
+                        return None;
+                    }
                 }
             }
         }
     }
+}
 
-    // Guest sessions: track in-memory, skip presence/relationships
-    let is_guest_session = user_id.starts_with("guest:");
+/// Take a parked session out of the registry and ask the task still holding it
+/// to hand over its buffer and broadcast receiver.
+async fn claim_parked_session(
+    state: &AppState,
+    session_id: &str,
+    user_id: &str,
+) -> Option<(Vec<String>, Handover)> {
+    // Ownership is checked before the entry is taken, so a caller holding
+    // someone else's session id can't evict it. The read guard is dropped at the
+    // end of this statement, before the `remove` below touches the same shard.
+    let owned = state
+        .resumable_sessions
+        .get(session_id)
+        .map(|entry| entry.user_id == user_id)
+        .unwrap_or(false);
+    if !owned {
+        return None;
+    }
+    // Removing hands the session to exactly one socket.
+    let (_, parked) = state.resumable_sessions.remove(session_id)?;
 
+    let (reply_tx, reply_rx) = oneshot::channel();
+    parked.claim_tx.send(reply_tx).await.ok()?;
+    // The parked task replies immediately; the timeout only covers it having
+    // already hit its own deadline and exited.
+    let handover = tokio::time::timeout(std::time::Duration::from_secs(5), reply_rx)
+        .await
+        .ok()?
+        .ok()?;
+    Some((parked.intents, handover))
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast filtering
+// ---------------------------------------------------------------------------
+
+/// What a session should do with a broadcast it received.
+enum Delivery {
+    /// Not for this session, or suppressed by a mute or a missing intent.
+    Skip,
+    /// The session's mute list changed and has to be reloaded.
+    RefreshMutes,
+    /// Deliver this event; the caller stamps the session's next `seq` into it.
+    Send(serde_json::Value),
+}
+
+fn classify_broadcast(
+    broadcast: &GatewayBroadcast,
+    user_id: &str,
+    space_ids: &HashSet<String>,
+    muted_channel_ids: &HashSet<String>,
+    intents: &[String],
+) -> Delivery {
+    let should_receive = match (&broadcast.target_user_ids, &broadcast.space_id) {
+        (Some(targets), _) => targets.iter().any(|t| t == user_id),
+        (None, Some(sid)) => space_ids.contains(sid),
+        (None, None) => true, // global event
+    };
+    if !should_receive {
+        return Delivery::Skip;
+    }
+
+    let event_type = broadcast
+        .event
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    // Mute list updates from the REST API
+    if event_type == "channel_mute.create" || event_type == "channel_mute.delete" {
+        return Delivery::RefreshMutes;
+    }
+
+    // Suppress message/typing events for muted channels
+    if event_type.starts_with("message.") || event_type.starts_with("typing.") {
+        let channel_id = broadcast
+            .event
+            .get("data")
+            .and_then(|d| d.get("channel_id"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        if !channel_id.is_empty() && muted_channel_ids.contains(channel_id) {
+            return Delivery::Skip;
+        }
+    }
+
+    if !intents::has_intent(intents, event_type) {
+        return Delivery::Skip;
+    }
+    Delivery::Send(broadcast.event.clone())
+}
+
+fn stamp_seq(mut event: serde_json::Value, seq: u64) -> String {
+    if let Some(obj) = event.as_object_mut() {
+        obj.insert("seq".to_string(), serde_json::json!(seq));
+    }
+    event.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Presence helpers
+// ---------------------------------------------------------------------------
+
+/// Pull `{ status, activities | activity }` out of an IDENTIFY presence
+/// payload. `None` for either half means the client expressed no preference, as
+/// opposed to asking for an empty one.
+fn parse_presence_payload(
+    value: &serde_json::Value,
+) -> (Option<String>, Option<Vec<serde_json::Value>>) {
+    let status = value
+        .get("status")
+        .and_then(|s| s.as_str())
+        .filter(|s| VALID_STATUSES.contains(s))
+        .map(|s| s.to_string());
+    let activities = match value.get("activities").and_then(|a| a.as_array()) {
+        Some(list) => Some(list.clone()),
+        None => match value.get("activity") {
+            Some(a) if !a.is_null() => Some(vec![a.clone()]),
+            _ => None,
+        },
+    };
+    (status, activities)
+}
+
+/// Send a `presence.update` to every space the user is in, plus any friends who
+/// share none of them. `invisible` is published as `offline`.
+async fn broadcast_presence(
+    state: &AppState,
+    user_id: &str,
+    space_ids: &HashSet<String>,
+    friend_ids: &HashSet<String>,
+    status: &str,
+    activities: &[serde_json::Value],
+) {
+    let gateway_tx = state.gateway_tx.read().await;
+    let Some(gtx) = gateway_tx.as_ref() else {
+        return;
+    };
+
+    let visible = if status == "invisible" {
+        "offline"
+    } else {
+        status
+    };
+    let client_status = if visible == "offline" {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({ "desktop": visible })
+    };
+    let data = serde_json::json!({
+        "user_id": user_id,
+        "status": visible,
+        "client_status": client_status,
+        "activities": activities
+    });
+    let event = || {
+        serde_json::json!({
+            "op": events::opcode::EVENT,
+            "type": "presence.update",
+            "data": data
+        })
+    };
+
+    for sid in space_ids {
+        let _ = gtx.send(GatewayBroadcast {
+            space_id: Some(sid.clone()),
+            target_user_ids: None,
+            event: event(),
+            intent: "presences".to_string(),
+        });
+    }
+    // Friends who may not share any space still track each other's presence.
+    if !friend_ids.is_empty() {
+        let _ = gtx.send(GatewayBroadcast {
+            space_id: None,
+            target_user_ids: Some(friend_ids.iter().cloned().collect()),
+            event: event(),
+            intent: "presences".to_string(),
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// READY / RESUMED
+// ---------------------------------------------------------------------------
+
+/// Build and send the READY payload — the client's full initial state.
+/// Returns false when the socket is gone.
+async fn send_ready(
+    state: &AppState,
+    sink: &mut WsSink,
+    session_id: &str,
+    user_id: &str,
+    is_guest_session: bool,
+    space_ids: &HashSet<String>,
+    muted_channel_ids: &HashSet<String>,
+) -> bool {
     let presences_json: Vec<serde_json::Value>;
-    let friend_ids: HashSet<String>;
     let relationships_json: Vec<serde_json::Value>;
 
     if is_guest_session {
         presences_json = vec![];
-        friend_ids = HashSet::new();
         relationships_json = vec![];
     } else {
-        // Set user presence to online
-        crate::presence::set_presence(&state, &user_id, "online", vec![]);
-
         // Collect presences of online members in the user's spaces
-        let mut all_member_ids = std::collections::HashSet::new();
-        for sid in &space_ids {
+        let mut all_member_ids = HashSet::new();
+        for sid in space_ids {
             if let Ok(members) = db::spaces::list_member_ids_for_space(&state.db, sid).await {
                 for mid in members {
                     all_member_ids.insert(mid);
                 }
             }
         }
-        let presences = crate::presence::get_space_presences(&state, &all_member_ids);
-        presences_json = presences
+        presences_json = crate::presence::get_space_presences(state, &all_member_ids)
             .iter()
             .map(|p| serde_json::to_value(p).unwrap_or_default())
             .collect();
 
-        // Load this user's relationships for READY payload and friend set for presence routing
-        friend_ids = db::relationships::get_friend_ids(&state.db, &user_id)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-
-        relationships_json = db::relationships::list_relationships(&state.db, &user_id)
+        relationships_json = db::relationships::list_relationships(&state.db, user_id)
             .await
             .unwrap_or_default()
             .iter()
@@ -189,7 +427,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Fetch full initial state for the READY payload
     let current_user_json = if !is_guest_session {
-        db::users::get_user(&state.db, &user_id)
+        db::users::get_user(&state.db, user_id)
             .await
             .ok()
             .map(|u| serde_json::to_value(&u).unwrap_or_default())
@@ -205,7 +443,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut all_users_json: Vec<serde_json::Value> = Vec::new();
     let mut seen_user_ids: HashSet<String> = HashSet::new();
 
-    for sid in &space_ids {
+    for sid in space_ids {
         // Space
         if let Ok(space_row) = db::spaces::get_space_row(&state.db, sid).await {
             spaces_json.push(serde_json::to_value(&space_row).unwrap_or_default());
@@ -269,7 +507,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
 
         // Voice states for this space
-        let voice_states = crate::voice::state::get_space_voice_states(&state, sid);
+        let voice_states = crate::voice::state::get_space_voice_states(state, sid);
         for vs in &voice_states {
             all_voice_states_json.push(serde_json::to_value(vs).unwrap_or_default());
         }
@@ -277,7 +515,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // DM channels (with recipients)
     let dm_channels_json: Vec<serde_json::Value> = if !is_guest_session {
-        match db::users::get_user_dm_channels(&state.db, &user_id).await {
+        match db::users::get_user_dm_channels(&state.db, user_id).await {
             Ok(dm_rows) => {
                 let mut dms = Vec::new();
                 for row in &dm_rows {
@@ -299,7 +537,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Unread states
     let unread_json: Vec<serde_json::Value> = if !is_guest_session {
-        db::read_states::get_unread_channels(&state.db, &user_id)
+        db::read_states::get_unread_channels(&state.db, user_id)
             .await
             .map(|entries| {
                 entries
@@ -339,187 +577,355 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             "motd": motd
         }
     });
+    sink.send(Message::Text(ready.to_string().into()))
+        .await
+        .is_ok()
+}
+
+/// Replay the events the client missed while disconnected, then confirm the
+/// resume. Returns false when the socket is gone.
+async fn send_resumed(sink: &mut WsSink, session_id: &str, seq: u64, missed: &[String]) -> bool {
+    for payload in missed {
+        if sink
+            .send(Message::Text(payload.clone().into()))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    let resumed = serde_json::json!({
+        "op": events::opcode::EVENT,
+        "seq": seq,
+        "type": "resumed",
+        "data": {
+            "session_id": session_id,
+            "seq": seq,
+            "replayed": missed.len()
+        }
+    });
+    sink.send(Message::Text(resumed.to_string().into()))
+        .await
+        .is_ok()
+}
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+
+async fn handle_socket(socket: WebSocket, state: AppState) {
+    let (mut ws_sink, mut ws_stream) = socket.split();
+
+    // Send HELLO
+    let hello = serde_json::json!({
+        "op": events::opcode::HELLO,
+        "data": {
+            "heartbeat_interval": HEARTBEAT_INTERVAL.as_millis() as u64
+        }
+    });
     if ws_sink
-        .send(Message::Text(ready.to_string().into()))
+        .send(Message::Text(hello.to_string().into()))
         .await
         .is_err()
     {
         return;
     }
 
-    // Register session with dispatcher
-    let session = GatewaySession {
-        session_id: session_id.clone(),
-        user_id: user_id.clone(),
-        intents: user_intents.clone(),
-        space_ids: space_ids.clone(),
-        sequence: 1,
-        tx: tx.clone(),
+    // Channel for sending messages to this client
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+    let Some(handshake) = await_handshake(&state, &mut ws_sink, &mut ws_stream).await else {
+        return;
     };
 
-    if let Some(ref dispatcher) = *state.dispatcher.read().await {
-        dispatcher.register_session(session);
-    }
+    let auth;
+    let session_id;
+    let user_intents: Vec<String>;
+    let identify_presence: Option<serde_json::Value>;
+    let is_resume;
+    let missed_events: Vec<String>;
+    // A resumed session carries its sequence, replay buffer and broadcast
+    // receiver forward: the receiver in particular, so nothing dispatched
+    // between the two sockets is lost or delivered twice.
+    let mut seq: u64;
+    let mut replay_buffer: VecDeque<(u64, String)>;
+    let mut broadcast_rx: Option<broadcast::Receiver<GatewayBroadcast>>;
 
-    // Guest connect: broadcast anonymous_count_updated
-    if is_guest_session {
-        if let Some(ref gtx) = *state.gateway_tx.read().await {
-            for sid in &space_ids {
-                let count = state.guest_counts.get(sid).map(|c| *c).unwrap_or(0);
-                let event = serde_json::json!({
-                    "op": events::opcode::EVENT,
-                    "type": "anonymous_count_updated",
-                    "data": { "count": count, "space_id": sid }
-                });
-                let _ = gtx.send(GatewayBroadcast {
-                    space_id: Some(sid.clone()),
-                    target_user_ids: None,
-                    event,
-                    intent: "members".to_string(),
-                });
-            }
+    match handshake {
+        Handshake::Identify {
+            auth: resolved,
+            intents,
+            presence,
+        } => {
+            auth = resolved;
+            session_id = crate::snowflake::generate();
+            user_intents = intents;
+            identify_presence = presence;
+            is_resume = false;
+            missed_events = Vec::new();
+            seq = 1;
+            replay_buffer = VecDeque::new();
+            broadcast_rx = None;
+        }
+        Handshake::Resume {
+            auth: resolved,
+            session_id: prior_id,
+            intents,
+            handover,
+            missed,
+        } => {
+            auth = resolved;
+            session_id = prior_id;
+            user_intents = intents;
+            identify_presence = None;
+            is_resume = true;
+            missed_events = missed;
+            seq = handover.seq;
+            replay_buffer = handover.buffer;
+            broadcast_rx = handover.broadcast_rx;
         }
     }
 
-    // Broadcast presence.update (online) to all spaces (skip for guests)
+    let user_id = auth.user_id;
+    let is_bot = auth.is_bot;
+    let is_admin = auth.is_admin;
+
+    // Memberships and mutes are reloaded on RESUME too — they can change while
+    // a client is away.
+    let space_ids: HashSet<String>;
+    let mut muted_channel_ids: HashSet<String>;
+    if auth.is_guest {
+        // Guest: use scoped space only, no mutes
+        space_ids = auth.guest_space_id.into_iter().collect();
+        muted_channel_ids = HashSet::new();
+    } else {
+        space_ids = db::spaces::list_space_ids_for_user(&state.db, &user_id)
+            .await
+            .map(|sids| sids.into_iter().collect())
+            .unwrap_or_default();
+
+        muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id)
+            .await
+            .map(|ids| ids.into_iter().collect())
+            .unwrap_or_default();
+    }
+
+    // Guest sessions: track in-memory, skip presence/relationships
+    let is_guest_session = user_id.starts_with("guest:");
+
+    // Friend set for presence routing.
+    let friend_ids: HashSet<String> = if is_guest_session {
+        HashSet::new()
+    } else {
+        db::relationships::get_friend_ids(&state.db, &user_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+
+    // Resolve the presence this connection publishes, before READY is assembled
+    // so the user sees their own presence in it.
+    let mut announce_presence: Option<(String, Vec<serde_json::Value>)> = None;
     if !is_guest_session {
-        if let Some(ref gtx) = *state.gateway_tx.read().await {
-            let presence_data = serde_json::json!({
-                "user_id": user_id,
-                "status": "online",
-                "client_status": { "desktop": "online" },
-                "activities": []
-            });
-            for sid in &space_ids {
-                let event = serde_json::json!({
-                    "op": events::opcode::EVENT,
-                    "type": "presence.update",
-                    "data": presence_data
-                });
-                let _ = gtx.send(GatewayBroadcast {
-                    space_id: Some(sid.clone()),
-                    target_user_ids: None,
-                    event,
-                    intent: "presences".to_string(),
-                });
+        if is_resume {
+            // Presence is held across the resume window, so a successful resume
+            // normally has nothing to announce — that missing flap is the whole
+            // point. Re-publish only if it did lapse.
+            if crate::presence::get_user_presence(&state, &user_id).is_none() {
+                crate::presence::set_presence(&state, &user_id, "online", vec![]);
+                announce_presence = Some(("online".to_string(), vec![]));
             }
-            // Also broadcast to friends who may not share any space
-            if !friend_ids.is_empty() {
-                let event = serde_json::json!({
-                    "op": events::opcode::EVENT,
-                    "type": "presence.update",
-                    "data": presence_data
-                });
-                let _ = gtx.send(GatewayBroadcast {
-                    space_id: None,
-                    target_user_ids: Some(friend_ids.iter().cloned().collect()),
-                    event,
-                    intent: "presences".to_string(),
-                });
-            }
+        } else {
+            // Honour what IDENTIFY asks for; failing that, carry forward what
+            // the user's other sessions already published, so reconnecting no
+            // longer resets a chosen dnd/idle or a custom status. "online" is
+            // the fallback only when there is nothing to preserve.
+            let (wanted_status, wanted_activities) = identify_presence
+                .as_ref()
+                .map(parse_presence_payload)
+                .unwrap_or((None, None));
+            let prior = crate::presence::get_user_presence(&state, &user_id);
+            let status = wanted_status
+                .or_else(|| prior.as_ref().map(|p| p.status.clone()))
+                .unwrap_or_else(|| "online".to_string());
+            let activities = wanted_activities
+                .or_else(|| prior.map(|p| p.activities))
+                .unwrap_or_default();
+            crate::presence::set_presence(&state, &user_id, &status, activities.clone());
+            announce_presence = Some((status, activities));
         }
     }
 
-    // Subscribe to broadcasts
-    let mut broadcast_rx = (*state.dispatcher.read().await)
-        .as_ref()
-        .map(|dispatcher| dispatcher.subscribe());
+    // True unless the client hung up deliberately or we closed on it: a socket
+    // that merely dropped gets parked for RESUME instead of going offline.
+    let mut resumable = true;
 
-    let mut seq: u64 = 1;
-    let mut last_heartbeat = tokio::time::Instant::now();
-    let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+    // Presence is registered from here on, so failures must fall through to the
+    // cleanup below rather than return.
+    'session: {
+        let sent = if is_resume {
+            send_resumed(&mut ws_sink, &session_id, seq, &missed_events).await
+        } else {
+            send_ready(
+                &state,
+                &mut ws_sink,
+                &session_id,
+                &user_id,
+                is_guest_session,
+                &space_ids,
+                &muted_channel_ids,
+            )
+            .await
+        };
+        if !sent {
+            resumable = false;
+            break 'session;
+        }
 
-    // Per-connection rate limit: max 120 messages per 60 seconds
-    const WS_RATE_LIMIT: u32 = 120;
-    const WS_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-    let mut ws_msg_count: u32 = 0;
-    let mut ws_rate_window_start = tokio::time::Instant::now();
+        // Register session with dispatcher
+        let session = GatewaySession {
+            session_id: session_id.clone(),
+            user_id: user_id.clone(),
+            intents: user_intents.clone(),
+            space_ids: space_ids.clone(),
+            sequence: seq,
+            tx: tx.clone(),
+        };
 
-    loop {
-        tokio::select! {
-            // Outgoing messages from the session channel
-            Some(msg) = rx.recv() => {
-                if ws_sink.send(Message::Text(msg.into())).await.is_err() {
-                    break;
+        if let Some(ref dispatcher) = *state.dispatcher.read().await {
+            dispatcher.register_session(session);
+        }
+
+        // Guest connect: broadcast anonymous_count_updated
+        if is_guest_session {
+            if let Some(ref gtx) = *state.gateway_tx.read().await {
+                for sid in &space_ids {
+                    let count = state.guest_counts.get(sid).map(|c| *c).unwrap_or(0);
+                    let event = serde_json::json!({
+                        "op": events::opcode::EVENT,
+                        "type": "anonymous_count_updated",
+                        "data": { "count": count, "space_id": sid }
+                    });
+                    let _ = gtx.send(GatewayBroadcast {
+                        space_id: Some(sid.clone()),
+                        target_user_ids: None,
+                        event,
+                        intent: "members".to_string(),
+                    });
                 }
             }
-            // Broadcast events
-            broadcast = async {
-                if let Some(ref mut rx) = broadcast_rx {
-                    rx.recv().await.ok()
-                } else {
-                    std::future::pending::<Option<GatewayBroadcast>>().await
+        }
+
+        if let Some((ref status, ref activities)) = announce_presence {
+            broadcast_presence(
+                &state,
+                &user_id,
+                &space_ids,
+                &friend_ids,
+                status,
+                activities,
+            )
+            .await;
+        }
+
+        // Subscribe to broadcasts. A resumed session already carries the
+        // receiver its predecessor was reading from.
+        if broadcast_rx.is_none() {
+            broadcast_rx = (*state.dispatcher.read().await)
+                .as_ref()
+                .map(|dispatcher| dispatcher.subscribe());
+        }
+
+        let mut last_heartbeat = tokio::time::Instant::now();
+        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+
+        // Per-connection rate limit: max 120 messages per 60 seconds
+        const WS_RATE_LIMIT: u32 = 120;
+        const WS_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut ws_msg_count: u32 = 0;
+        let mut ws_rate_window_start = tokio::time::Instant::now();
+
+        loop {
+            tokio::select! {
+                // Outgoing messages from the session channel
+                Some(msg) = rx.recv() => {
+                    if ws_sink.send(Message::Text(msg.into())).await.is_err() {
+                        break;
+                    }
                 }
-            } => {
-                if let Some(broadcast) = broadcast {
-                    // Check if this session should receive this event
-                    let should_receive = match (&broadcast.target_user_ids, &broadcast.space_id) {
-                        (Some(targets), _) => targets.contains(&user_id),
-                        (None, Some(sid)) => space_ids.contains(sid),
-                        (None, None) => true, // global event
-                    };
-
-                    if should_receive {
-                        let event_type = broadcast.event.get("type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
-
-                        // Handle mute list updates from REST API
-                        if event_type == "channel_mute.create" || event_type == "channel_mute.delete" {
-                            muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
-                                .map(|ids| ids.into_iter().collect())
-                                .unwrap_or_default();
-                            continue;
-                        }
-
-                        // Suppress message/typing events for muted channels
-                        if event_type.starts_with("message.") || event_type.starts_with("typing.") {
-                            let channel_id = broadcast.event.get("data")
-                                .and_then(|d| d.get("channel_id"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("");
-                            if !channel_id.is_empty() && muted_channel_ids.contains(channel_id) {
-                                continue;
+                // Broadcast events
+                broadcast = async {
+                    if let Some(ref mut rx) = broadcast_rx {
+                        rx.recv().await.ok()
+                    } else {
+                        std::future::pending::<Option<GatewayBroadcast>>().await
+                    }
+                } => {
+                    if let Some(broadcast) = broadcast {
+                        match classify_broadcast(&broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents) {
+                            Delivery::Skip => {}
+                            Delivery::RefreshMutes => {
+                                muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
+                                    .map(|ids| ids.into_iter().collect())
+                                    .unwrap_or_default();
                             }
-                        }
-
-                        // Check intent
-                        if intents::has_intent(&user_intents, event_type) {
-                            seq += 1;
-                            let mut event = broadcast.event.clone();
-                            if let Some(obj) = event.as_object_mut() {
-                                obj.insert("seq".to_string(), serde_json::json!(seq));
-                            }
-                            if ws_sink.send(Message::Text(event.to_string().into())).await.is_err() {
-                                break;
+                            Delivery::Send(event) => {
+                                seq += 1;
+                                let payload = stamp_seq(event, seq);
+                                if ws_sink.send(Message::Text(payload.clone().into())).await.is_err() {
+                                    break;
+                                }
+                                // Retained so a RESUME can replay it. Frames sent
+                                // through `tx` are session-scoped and carry no
+                                // seq, so they are not replayable.
+                                resume::push(&mut replay_buffer, seq, payload);
                             }
                         }
                     }
                 }
-            }
-            // Heartbeat check
-            _ = heartbeat_interval.tick() => {
-                if last_heartbeat.elapsed() > HEARTBEAT_TIMEOUT {
-                    // Session timed out
-                    break;
+                // Heartbeat check
+                _ = heartbeat_interval.tick() => {
+                    if last_heartbeat.elapsed() > HEARTBEAT_TIMEOUT {
+                        // Session timed out
+                        break;
+                    }
                 }
-            }
-            // Incoming messages
-            msg = ws_stream.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        // Per-connection rate limiting
-                        if ws_rate_window_start.elapsed() >= WS_RATE_WINDOW {
-                            ws_msg_count = 0;
-                            ws_rate_window_start = tokio::time::Instant::now();
-                        }
-                        ws_msg_count += 1;
-                        if ws_msg_count > WS_RATE_LIMIT {
-                            // Drop excess messages silently to prevent flooding
-                            continue;
-                        }
+                // Incoming messages
+                msg = ws_stream.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            let parsed = serde_json::from_str::<GatewayMessage>(&text).ok();
 
-                        if let Ok(gw_msg) = serde_json::from_str::<GatewayMessage>(&text) {
+                            // Keepalives are never throttled. Dropping a heartbeat
+                            // lets `last_heartbeat` go stale and kills the session
+                            // at the next timeout check, which selectively culls
+                            // the busiest clients — exactly the ones least likely
+                            // to deserve it.
+                            let is_heartbeat =
+                                parsed.as_ref().map(|m| m.op) == Some(events::opcode::HEARTBEAT);
+                            if !is_heartbeat {
+                                if ws_rate_window_start.elapsed() >= WS_RATE_WINDOW {
+                                    ws_msg_count = 0;
+                                    ws_rate_window_start = tokio::time::Instant::now();
+                                }
+                                ws_msg_count += 1;
+                                if ws_msg_count > WS_RATE_LIMIT {
+                                    // Say so rather than going quiet: a silent drop
+                                    // leaves the client with no idea it should back
+                                    // off, and no idea why its traffic stopped.
+                                    send_close(
+                                        &mut ws_sink,
+                                        events::close_code::RATE_LIMITED,
+                                        "rate limit exceeded",
+                                    ).await;
+                                    resumable = false;
+                                    break;
+                                }
+                            }
+
+                            let Some(gw_msg) = parsed else { continue };
+
                             match gw_msg.op {
                                 op if op == events::opcode::HEARTBEAT => {
                                     last_heartbeat = tokio::time::Instant::now();
@@ -530,11 +936,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         break;
                                     }
                                 }
+                                // The handshake is over. Answering plainly keeps
+                                // these from being a rate-limit-exempt spam vector.
+                                op if op == events::opcode::IDENTIFY || op == events::opcode::RESUME => {
+                                    send_close(
+                                        &mut ws_sink,
+                                        events::close_code::ALREADY_AUTHENTICATED,
+                                        "already authenticated",
+                                    ).await;
+                                    resumable = false;
+                                    break;
+                                }
                                 op if op == events::opcode::PRESENCE_UPDATE => {
                                     if let Some(data) = gw_msg.data {
                                         if let Ok(psu) = serde_json::from_value::<PresenceUpdateData>(data) {
-                                            let valid_statuses = ["online", "idle", "dnd", "invisible"];
-                                            let status = if valid_statuses.contains(&psu.status.as_str()) {
+                                            let status = if VALID_STATUSES.contains(&psu.status.as_str()) {
                                                 psu.status.as_str()
                                             } else {
                                                 "online"
@@ -544,44 +960,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 None => vec![],
                                             };
                                             crate::presence::set_presence(&state, &user_id, status, activities.clone());
-
-                                            // Broadcast to all spaces and to friends
-                                            if let Some(ref gtx) = *state.gateway_tx.read().await {
-                                                let broadcast_status = if status == "invisible" { "offline" } else { status };
-                                                let presence_data = serde_json::json!({
-                                                    "user_id": user_id,
-                                                    "status": broadcast_status,
-                                                    "client_status": { "desktop": broadcast_status },
-                                                    "activities": activities
-                                                });
-                                                for sid in &space_ids {
-                                                    let event = serde_json::json!({
-                                                        "op": events::opcode::EVENT,
-                                                        "type": "presence.update",
-                                                        "data": presence_data
-                                                    });
-                                                    let _ = gtx.send(GatewayBroadcast {
-                                                        space_id: Some(sid.clone()),
-                                                        target_user_ids: None,
-                                                        event,
-                                                        intent: "presences".to_string(),
-                                                    });
-                                                }
-                                                // Also broadcast to friends not sharing any space
-                                                if !friend_ids.is_empty() {
-                                                    let event = serde_json::json!({
-                                                        "op": events::opcode::EVENT,
-                                                        "type": "presence.update",
-                                                        "data": presence_data
-                                                    });
-                                                    let _ = gtx.send(GatewayBroadcast {
-                                                        space_id: None,
-                                                        target_user_ids: Some(friend_ids.iter().cloned().collect()),
-                                                        event,
-                                                        intent: "presences".to_string(),
-                                                    });
-                                                }
-                                            }
+                                            broadcast_presence(
+                                                &state, &user_id, &space_ids, &friend_ids, status, &activities,
+                                            ).await;
                                         }
                                     }
                                 }
@@ -769,9 +1150,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 _ => {}
                             }
                         }
+                        // An explicit close is a deliberate sign-off, so there is
+                        // nothing to hold open for a resume.
+                        Some(Ok(Message::Close(_))) => {
+                            resumable = false;
+                            break;
+                        }
+                        // A broken stream can keep yielding errors, so treat the
+                        // first one as the end rather than spinning on it. The
+                        // socket dropping is exactly the case RESUME is for.
+                        Some(Err(_)) | None => break,
+                        _ => {}
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
                 }
             }
         }
@@ -848,48 +1238,85 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    // Cleanup: set presence to offline if no other sessions for this user
-    if !is_guest_session
-        && !crate::presence::user_has_other_sessions(&state, &user_id, &session_id).await
-    {
-        crate::presence::remove_presence(&state, &user_id);
+    // Guests have no presence, and an anonymous session is cheap to
+    // re-establish, so they are never parked for resume.
+    if !resumable || is_guest_session {
+        if !is_guest_session
+            && !crate::presence::user_has_other_sessions(&state, &user_id, &session_id).await
+        {
+            crate::presence::remove_presence(&state, &user_id);
+            broadcast_presence(&state, &user_id, &space_ids, &friend_ids, "offline", &[]).await;
+        }
+        return;
+    }
 
-        // Broadcast presence.update (offline) to all spaces
-        if let Some(ref gtx) = *state.gateway_tx.read().await {
-            let presence_data = serde_json::json!({
-                "user_id": user_id,
-                "status": "offline",
-                "client_status": {},
-                "activities": []
-            });
-            for sid in &space_ids {
-                let event = serde_json::json!({
-                    "op": events::opcode::EVENT,
-                    "type": "presence.update",
-                    "data": presence_data
-                });
-                let _ = gtx.send(GatewayBroadcast {
-                    space_id: Some(sid.clone()),
-                    target_user_ids: None,
-                    event,
-                    intent: "presences".to_string(),
-                });
+    // The socket dropped rather than signed off, so park the session instead of
+    // ending it: this task keeps collecting events for a RESUME to replay, and
+    // presence stays standing for the window. A transient blip used to broadcast
+    // offline immediately and online again on reconnect, which everyone in the
+    // user's spaces saw as a flap.
+    drop(ws_sink);
+    drop(ws_stream);
+
+    let (claim_tx, mut claim_rx) = mpsc::channel::<oneshot::Sender<Handover>>(1);
+    state.resumable_sessions.insert(
+        session_id.clone(),
+        ParkedSession {
+            user_id: user_id.clone(),
+            intents: user_intents.clone(),
+            claim_tx,
+        },
+    );
+
+    let deadline = tokio::time::Instant::now() + resume::RESUME_WINDOW;
+    let mut claim: Option<oneshot::Sender<Handover>> = None;
+    loop {
+        tokio::select! {
+            reply = claim_rx.recv() => {
+                claim = reply;
+                break;
             }
-            // Also broadcast offline to friends who may not share any space
-            if !friend_ids.is_empty() {
-                let event = serde_json::json!({
-                    "op": events::opcode::EVENT,
-                    "type": "presence.update",
-                    "data": presence_data
-                });
-                let _ = gtx.send(GatewayBroadcast {
-                    space_id: None,
-                    target_user_ids: Some(friend_ids.iter().cloned().collect()),
-                    event,
-                    intent: "presences".to_string(),
-                });
+            _ = tokio::time::sleep_until(deadline) => break,
+            broadcast = async {
+                if let Some(ref mut rx) = broadcast_rx {
+                    rx.recv().await.ok()
+                } else {
+                    std::future::pending::<Option<GatewayBroadcast>>().await
+                }
+            } => {
+                let Some(broadcast) = broadcast else { continue };
+                match classify_broadcast(&broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents) {
+                    Delivery::Skip => {}
+                    Delivery::RefreshMutes => {
+                        muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
+                            .map(|ids| ids.into_iter().collect())
+                            .unwrap_or_default();
+                    }
+                    Delivery::Send(event) => {
+                        seq += 1;
+                        resume::push(&mut replay_buffer, seq, stamp_seq(event, seq));
+                    }
+                }
             }
         }
+    }
+
+    if let Some(reply) = claim {
+        // A resuming socket took the session over; presence carries on untouched.
+        let _ = reply.send(Handover {
+            seq,
+            buffer: replay_buffer,
+            broadcast_rx,
+        });
+        return;
+    }
+
+    // The window closed unclaimed. The registry entry is only ours to drop here
+    // — a claim removes it before asking for the handover.
+    state.resumable_sessions.remove(&session_id);
+    if !crate::presence::user_has_other_sessions(&state, &user_id, &session_id).await {
+        crate::presence::remove_presence(&state, &user_id);
+        broadcast_presence(&state, &user_id, &space_ids, &friend_ids, "offline", &[]).await;
     }
 }
 
