@@ -1175,6 +1175,130 @@ async fn test_non_member_cannot_create_ban() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+#[tokio::test]
+async fn test_ban_purges_recent_messages_when_asked() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "BanSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+    let channel_id = server.create_channel(&space_id, "chat").await;
+
+    let bob_recent = post_message(&server, &channel_id, &bob.auth_header(), "bob recent").await;
+    let bob_old = post_message(&server, &channel_id, &bob.auth_header(), "bob old").await;
+    let alice_msg = post_message(&server, &channel_id, &alice.auth_header(), "alice stays").await;
+    // Age one of Bob's messages past the purge window.
+    backdate_message(&server, &bob_old, "2020-01-01 00:00:00").await;
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", bob.user.id),
+        &alice.auth_header(),
+        // One hour: covers `bob_recent`, not the backdated `bob_old`.
+        &serde_json::json!({ "reason": "spam", "delete_message_seconds": 3600 }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["deleted_message_count"], 1);
+
+    assert!(!message_exists(&server, &bob_recent).await);
+    // Outside the window, and someone else's message, both survive.
+    assert!(message_exists(&server, &bob_old).await);
+    assert!(message_exists(&server, &alice_msg).await);
+}
+
+#[tokio::test]
+async fn test_ban_keeps_messages_by_default() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space_id = server.create_space(&alice.user.id, "BanSpace").await;
+    server.add_member(&space_id, &bob.user.id).await;
+    let channel_id = server.create_channel(&space_id, "chat").await;
+    let bob_msg = post_message(&server, &channel_id, &bob.auth_header(), "bob stays").await;
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "reason": "no purge requested" }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["deleted_message_count"], 0);
+    assert!(message_exists(&server, &bob_msg).await);
+}
+
+#[tokio::test]
+async fn test_ban_purge_is_scoped_to_the_space() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let banned_space = server.create_space(&alice.user.id, "Banned").await;
+    let other_space = server.create_space(&alice.user.id, "Other").await;
+    for space in [&banned_space, &other_space] {
+        server.add_member(space, &bob.user.id).await;
+    }
+    let banned_channel = server.create_channel(&banned_space, "chat").await;
+    let other_channel = server.create_channel(&other_space, "chat").await;
+
+    let here = post_message(&server, &banned_channel, &bob.auth_header(), "here").await;
+    let elsewhere = post_message(&server, &other_channel, &bob.auth_header(), "elsewhere").await;
+
+    let app = server.router();
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{banned_space}/bans/{}", bob.user.id),
+        &alice.auth_header(),
+        &serde_json::json!({ "delete_message_seconds": 604800 }),
+    );
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert!(!message_exists(&server, &here).await);
+    // A ban is per-space; the user's posts in other spaces are untouched.
+    assert!(message_exists(&server, &elsewhere).await);
+}
+
+async fn post_message(server: &TestServer, channel_id: &str, auth: &str, content: &str) -> String {
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        auth,
+        &serde_json::json!({ "content": content }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Rewrites a message's `created_at` so a test can place it outside a purge
+/// window without waiting.
+async fn backdate_message(server: &TestServer, message_id: &str, created_at: &str) {
+    sqlx::query("UPDATE messages SET created_at = ? WHERE id = ?")
+        .bind(created_at)
+        .bind(message_id)
+        .execute(server.pool())
+        .await
+        .unwrap();
+}
+
+async fn message_exists(server: &TestServer, message_id: &str) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE id = ?")
+        .bind(message_id)
+        .fetch_one(server.pool())
+        .await
+        .unwrap()
+        > 0
+}
+
 // =========================================================================
 // Rate limiting
 // =========================================================================
