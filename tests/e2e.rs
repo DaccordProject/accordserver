@@ -1282,20 +1282,24 @@ async fn post_message(server: &TestServer, channel_id: &str, auth: &str, content
 /// Rewrites a message's `created_at` so a test can place it outside a purge
 /// window without waiting.
 async fn backdate_message(server: &TestServer, message_id: &str, created_at: &str) {
-    sqlx::query("UPDATE messages SET created_at = ? WHERE id = ?")
-        .bind(created_at)
-        .bind(message_id)
-        .execute(server.pool())
-        .await
-        .unwrap();
+    sqlx::query(&accordserver::db::q(
+        "UPDATE messages SET created_at = ? WHERE id = ?",
+    ))
+    .bind(created_at)
+    .bind(message_id)
+    .execute(server.pool())
+    .await
+    .unwrap();
 }
 
 async fn message_exists(server: &TestServer, message_id: &str) -> bool {
-    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE id = ?")
-        .bind(message_id)
-        .fetch_one(server.pool())
-        .await
-        .unwrap()
+    sqlx::query_scalar::<_, i64>(&accordserver::db::q(
+        "SELECT COUNT(*) FROM messages WHERE id = ?",
+    ))
+    .bind(message_id)
+    .fetch_one(server.pool())
+    .await
+    .unwrap()
         > 0
 }
 
