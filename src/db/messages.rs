@@ -443,6 +443,32 @@ pub async fn remove_reaction(
     Ok(())
 }
 
+/// Ids of [author_id]'s messages in [space_id] posted at or after [cutoff],
+/// returned as `(message_id, channel_id)` pairs.
+///
+/// [cutoff] is a `YYYY-MM-DD HH:MM:SS` UTC stamp — the format `created_at` is
+/// stored in on both backends — so the comparison is a plain lexicographic one,
+/// the same trick `search_messages` uses for its before/after filters.
+///
+/// Backs the ban flow's optional message purge; the caller deletes each row so
+/// the attachment cleanup and gateway fanout match a single delete exactly.
+pub async fn list_author_messages_in_space_since(
+    pool: &AnyPool,
+    space_id: &str,
+    author_id: &str,
+    cutoff: &str,
+) -> Result<Vec<(String, String)>, AppError> {
+    let rows = sqlx::query_as::<_, (String, String)>(&super::q(
+        "SELECT id, channel_id FROM messages WHERE space_id = ? AND author_id = ? AND created_at >= ? ORDER BY id DESC",
+    ))
+    .bind(space_id)
+    .bind(author_id)
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn bulk_delete_messages(
     pool: &AnyPool,
     channel_id: &str,
