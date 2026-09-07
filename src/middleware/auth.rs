@@ -105,7 +105,7 @@ async fn resolve_bearer_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
 async fn resolve_guest_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
     let token_hash = hash_token(token);
     let row = sqlx::query(&crate::db::q(
-        "SELECT space_id, expires_at FROM guest_tokens WHERE token_hash = ?",
+        "SELECT gt.space_id, gt.expires_at FROM guest_tokens gt JOIN spaces s ON s.id = gt.space_id WHERE gt.token_hash = ? AND s.allow_guest_access = TRUE",
     ))
     .bind(&token_hash)
     .fetch_optional(pool)

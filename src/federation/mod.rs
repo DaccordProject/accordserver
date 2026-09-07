@@ -245,6 +245,7 @@ impl FederationContext {
 /// long a slow/hostile peer can tie up a delivery worker.
 fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(15))
         .dns_resolver(std::sync::Arc::new(peers::SsrfGuardResolver))

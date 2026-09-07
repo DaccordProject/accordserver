@@ -17,6 +17,7 @@ use crate::db;
 use crate::error::AppError;
 use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::{create_token_hash, generate_token, AuthUser};
+use crate::middleware::client_ip::ClientIp;
 use crate::snowflake;
 use crate::state::{
     AppState, GuestAttemptTracker, LoginFailureTracker, MfaTicket, RegisterAttemptTracker,
@@ -268,21 +269,6 @@ fn hash_ip(ip: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn extract_request_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("X-Forwarded-For")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            headers
-                .get("X-Real-IP")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 fn check_register_rate_limit(state: &AppState, ip: &str) -> Result<(), AppError> {
     // Automated suites provision accounts in bulk, and 5-per-IP-per-15-minutes
     // caps a whole test run at five users per server process. `test_mode` is
@@ -432,11 +418,10 @@ pub(crate) fn validate_username(username: &str) -> Result<(), AppError> {
 
 pub async fn register(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    ClientIp(ip): ClientIp,
     Json(input): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Per-IP rate limit: max 5 registration attempts per 15 minutes
-    let ip = extract_request_ip(&headers);
     check_register_rate_limit(&state, &ip)?;
     record_register_attempt(&state, &ip);
 
@@ -1346,10 +1331,9 @@ async fn cleanup_expired_tokens(pool: &sqlx::AnyPool, user_id: &str) {
 
 pub async fn guest(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    ClientIp(ip): ClientIp,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Per-IP rate limit: max 10 guest tokens per hour
-    let ip = extract_request_ip(&headers);
     check_guest_rate_limit(&state, &ip)?;
     record_guest_attempt(&state, &ip);
 

@@ -391,10 +391,14 @@ pub async fn channel_snapshot(
         return Err(AppError::NotFound("not_found".to_string()));
     }
 
-    let channels = db::channels::list_channels_in_space(&state.db, &space.id).await?;
+    let channels: Vec<_> = db::channels::list_channels_in_space(&state.db, &space.id)
+        .await?
+        .into_iter()
+        .filter(|c| c.allow_anonymous_read)
+        .collect();
     let channel = channels
         .iter()
-        .find(|c| c.name.as_deref() == Some(&channel_name))
+        .find(|c| c.allow_anonymous_read && c.name.as_deref() == Some(&channel_name))
         .ok_or_else(|| AppError::NotFound("unknown_channel".to_string()))?;
 
     // Fetch recent messages (newest first, excluding thread replies).
@@ -623,10 +627,14 @@ pub async fn post_snapshot(
         return Err(AppError::NotFound("not_found".to_string()));
     }
 
-    let channels = db::channels::list_channels_in_space(&state.db, &space.id).await?;
+    let channels: Vec<_> = db::channels::list_channels_in_space(&state.db, &space.id)
+        .await?
+        .into_iter()
+        .filter(|c| c.allow_anonymous_read)
+        .collect();
     let channel = channels
         .iter()
-        .find(|c| c.name.as_deref() == Some(&channel_name))
+        .find(|c| c.allow_anonymous_read && c.name.as_deref() == Some(&channel_name))
         .ok_or_else(|| AppError::NotFound("unknown_channel".to_string()))?;
 
     // Fetch the post (parent message).
@@ -643,7 +651,7 @@ pub async fn post_snapshot(
         .unwrap_or_else(|| "Unknown".to_string());
 
     // Fetch thread replies with pagination.
-    let page = query.page.unwrap_or(1).max(1);
+    let page = query.page.unwrap_or(1).clamp(1, 100);
     let offset_cursor = if page > 1 {
         // Skip (page-1)*REPLIES_PER_PAGE replies by fetching them and using
         // the last ID as the cursor.
@@ -957,7 +965,11 @@ pub async fn space_snapshot(
         return Err(AppError::NotFound("not_found".to_string()));
     }
 
-    let channels = db::channels::list_channels_in_space(&state.db, &space.id).await?;
+    let channels: Vec<_> = db::channels::list_channels_in_space(&state.db, &space.id)
+        .await?
+        .into_iter()
+        .filter(|c| c.allow_anonymous_read)
+        .collect();
 
     let title = escape_html(&space.name);
     let description = space
@@ -1097,7 +1109,11 @@ pub async fn sitemap(
         let space_seg = url_seg(&space.slug);
         push(format!("{base}/s/{space_seg}"), None);
 
-        let channels = db::channels::list_channels_in_space(&state.db, &space.id).await?;
+        let channels: Vec<_> = db::channels::list_channels_in_space(&state.db, &space.id)
+            .await?
+            .into_iter()
+            .filter(|c| c.allow_anonymous_read)
+            .collect();
         for ch in &channels {
             if is_hidden_channel_type(&ch.channel_type) {
                 continue;
@@ -1196,10 +1212,14 @@ pub async fn oembed(
     let mut author_name = space.name.clone();
 
     if segs.len() >= 3 {
-        let channels = db::channels::list_channels_in_space(&state.db, &space.id).await?;
+        let channels: Vec<_> = db::channels::list_channels_in_space(&state.db, &space.id)
+            .await?
+            .into_iter()
+            .filter(|c| c.allow_anonymous_read)
+            .collect();
         let channel = channels
             .iter()
-            .find(|c| c.name.as_deref() == Some(segs[2].as_str()))
+            .find(|c| c.allow_anonymous_read && c.name.as_deref() == Some(segs[2].as_str()))
             .ok_or_else(|| AppError::NotFound("unknown_channel".to_string()))?;
 
         if segs.len() >= 4 {

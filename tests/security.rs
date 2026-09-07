@@ -1111,7 +1111,7 @@ async fn test_reorder_roles_cannot_affect_other_space() {
         &serde_json::json!([{ "id": role_b, "position": 99 }]),
     );
     let response = server.router().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     // Verify the role in Space B was NOT changed
     let role_after = accordserver::db::roles::get_role_row(server.pool(), &role_b)

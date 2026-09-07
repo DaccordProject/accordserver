@@ -50,7 +50,7 @@ pub async fn handle_join(
     let (our_domain, peer, join): (_, _, JoinRequest) =
         match crate::federation::verify::prepare(&state, &headers, JOIN_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     // Authority (S1): the joining user must be homed on the signing peer.

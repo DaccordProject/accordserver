@@ -75,7 +75,7 @@ pub async fn list_members(
     } else {
         require_membership(&state.db, &space_id, &auth.user_id).await?;
     }
-    let limit = params.limit.unwrap_or(50).min(1000);
+    let limit = params.limit.unwrap_or(50).clamp(1, 1000);
     let mut rows =
         db::members::list_members(&state.db, &space_id, params.after.as_deref(), limit).await?;
 
@@ -114,7 +114,7 @@ pub async fn search_members(
     Query(params): Query<SearchMembersQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_membership(&state.db, &space_id, &auth.user_id).await?;
-    let limit = params.limit.unwrap_or(25).min(100);
+    let limit = params.limit.unwrap_or(25).clamp(1, 100);
     let rows = db::members::search_members(&state.db, &space_id, &params.query, limit).await?;
 
     let user_json = resolve_member_users(&state, &rows, params.with_user).await?;
@@ -168,6 +168,9 @@ pub async fn update_member(
         // Verify each role being assigned is below the actor's highest role
         for role_id in roles {
             let role = db::roles::get_role_row(&state.db, role_id).await?;
+            if role.space_id != space_id {
+                return Err(AppError::NotFound("role not found in this space".into()));
+            }
             require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
         }
     }

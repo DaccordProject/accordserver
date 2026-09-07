@@ -213,7 +213,7 @@ pub async fn handle_open(
     let (our_domain, peer, req): (_, _, DmOpenRequest) =
         match crate::federation::verify::prepare(&state, &headers, DM_OPEN_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     match serve_open(&state, &our_domain, &peer.domain, &req).await {
         Ok(snapshot) => (StatusCode::OK, Json(snapshot)).into_response(),
@@ -291,7 +291,7 @@ pub async fn handle_announce(
     let (our_domain, peer, snapshot): (_, _, DmSnapshot) =
         match crate::federation::verify::prepare(&state, &headers, DM_ANNOUNCE_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     // Authority: the channel must be homed on the signing peer, and so must the
     // opener. `opener_id` drives consent enforcement below, so an unbound opener
@@ -411,7 +411,7 @@ pub async fn handle_send(
     let (our_domain, peer, req): (_, _, DmSendRequest) =
         match crate::federation::verify::prepare(&state, &headers, DM_SEND_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     match serve_send(&state, &our_domain, &peer.domain, &req).await {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),

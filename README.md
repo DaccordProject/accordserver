@@ -44,6 +44,7 @@ Configuration comes from environment variables, with optional CLI flags as overr
 | `DATABASE_URL` | `sqlite:data/accord.db?mode=rwc` | Database connection string (SQLite or PostgreSQL) |
 | `ACCORD_STORAGE_PATH` | `./data/cdn` | Where uploaded emoji, avatars, and attachments live |
 | `RUST_LOG` | `accordserver=debug,tower_http=debug` | Tracing log filter |
+| `TRUST_PROXY_HEADERS` | `false` | Trust proxy-supplied client IP headers for rate limiting. Enable only when direct access is blocked and your reverse proxy replaces incoming `X-Forwarded-For` / `X-Real-IP` headers. |
 | `LIVEKIT_INTERNAL_URL` | | LiveKit server URL for server communication (e.g. `http://livekit:7880`) |
 | `LIVEKIT_EXTERNAL_URL` | | LiveKit server URL for client connections (e.g. `wss://livekit.example.com`) |
 | `LIVEKIT_API_KEY` | | LiveKit API key |

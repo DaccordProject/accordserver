@@ -124,14 +124,25 @@ pub async fn reorder_roles(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "manage_roles").await?;
 
-    // Validate: only @everyone (position 0) can stay at position 0
+    // Validate the entire batch against the original hierarchy before writing.
     let roles = db::roles::list_roles(&state.db, &space_id).await?;
-    let everyone_id = roles.iter().find(|r| r.position == 0).map(|r| r.id.clone());
+    let mut seen = std::collections::HashSet::new();
     for u in &input {
-        if u.position == 0 && everyone_id.as_deref() != Some(&u.id) {
+        let role = roles
+            .iter()
+            .find(|r| r.id == u.id)
+            .ok_or_else(|| AppError::NotFound("role not found in this space".into()))?;
+        if !seen.insert(&u.id) || u.position < 0 || (role.position == 0) != (u.position == 0) {
             return Err(AppError::BadRequest(
-                "only @everyone can be at position 0".into(),
+                "invalid role positions; @everyone must remain at zero".into(),
             ));
+        }
+        if role.position == u.position {
+            continue;
+        }
+        if !auth.is_admin {
+            require_role_hierarchy(&state.db, &space_id, &auth.user_id, role.position).await?;
+            require_role_hierarchy(&state.db, &space_id, &auth.user_id, u.position).await?;
         }
     }
 

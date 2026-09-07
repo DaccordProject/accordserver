@@ -57,7 +57,7 @@ pub async fn get_space(
     let is_guest = auth.0.as_ref().is_some_and(|a| a.is_guest);
     let guest_allowed =
         is_guest && auth.0.as_ref().and_then(|a| a.guest_space_id.as_deref()) == Some(&space.id);
-    if is_guest && !space.allow_guest_access {
+    if is_guest && (!guest_allowed || !space.allow_guest_access) {
         return Err(AppError::Forbidden(
             "guest access is disabled for this space".into(),
         ));
@@ -190,28 +190,33 @@ pub async fn list_channels(
     auth: OptionalAuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let space = db::spaces::get_space_row(&state.db, &space_id).await?;
-    let is_guest = auth.0.as_ref().is_some_and(|a| a.is_guest);
-    if is_guest && !space.allow_guest_access {
-        return Err(AppError::Forbidden(
-            "guest access is disabled for this space".into(),
-        ));
+    if let Some(user) = auth.0.as_ref() {
+        if user.is_guest {
+            require_permission(&state.db, &space_id, user, "view_channel").await?;
+            if !space.allow_guest_access {
+                return Err(AppError::Forbidden("guest access is disabled".into()));
+            }
+        } else {
+            require_membership(&state.db, &space_id, &user.user_id).await?;
+        }
+    } else if !space.public {
+        return Err(AppError::Unauthorized("authentication required".into()));
     }
-    if !space.public && !is_guest {
-        let user = auth
-            .0
-            .ok_or_else(|| AppError::Unauthorized("authentication required".into()))?;
-        require_membership(&state.db, &space_id, &user.user_id).await?;
+    let mut channels = Vec::new();
+    for channel in db::channels::list_channels_in_space(&state.db, &space_id).await? {
+        match crate::middleware::permissions::require_channel_read_access(
+            &state.db,
+            &channel,
+            auth.0.as_ref(),
+            false,
+        )
+        .await
+        {
+            Ok(()) => channels.push(channel),
+            Err(AppError::Forbidden(_) | AppError::Unauthorized(_)) => {}
+            Err(e) => return Err(e),
+        }
     }
-    let channels = db::channels::list_channels_in_space(&state.db, &space_id).await?;
-    // Guest tokens: filter to only channels with allow_anonymous_read
-    let channels: Vec<_> = if is_guest {
-        channels
-            .into_iter()
-            .filter(|c| c.allow_anonymous_read)
-            .collect()
-    } else {
-        channels
-    };
     let data = channels_to_json_async(&state.db, &channels).await?;
     Ok(Json(serde_json::json!({ "data": data })))
 }

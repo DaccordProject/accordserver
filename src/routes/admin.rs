@@ -31,7 +31,7 @@ pub async fn list_spaces(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_server_admin(&auth)?;
 
-    let limit = params.limit.unwrap_or(50).min(1000);
+    let limit = params.limit.unwrap_or(50).clamp(1, 1000);
     let mut rows = db::admin::list_all_spaces(
         &state.db,
         params.after.as_deref(),
@@ -89,7 +89,7 @@ pub async fn list_users(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_server_admin(&auth)?;
 
-    let limit = params.limit.unwrap_or(50).min(1000);
+    let limit = params.limit.unwrap_or(50).clamp(1, 1000);
     let mut rows = db::admin::list_all_users(
         &state.db,
         params.after.as_deref(),

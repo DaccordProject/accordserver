@@ -348,6 +348,8 @@ pub async fn resolve_channel_permissions(
         }
     }
 
+    // Channel overwrites must never manufacture a space administrator.
+    perms.retain(|p| p != "administrator");
     Ok(perms)
 }
 
@@ -458,7 +460,7 @@ pub async fn require_channel_permission(
         return Ok(space_id);
     }
     let perms = resolve_channel_permissions(pool, channel_id, &space_id, &auth.user_id).await?;
-    if !has_permission(&perms, perm) {
+    if !has_permission(&perms, "view_channel") || !has_permission(&perms, perm) {
         return Err(AppError::Forbidden(format!("missing permission: {perm}")));
     }
     Ok(space_id)
@@ -549,4 +551,39 @@ pub async fn require_role_hierarchy(
         ));
     }
     Ok(())
+}
+
+/// Apply the same visibility policy to message reads, search, and channel lists.
+/// Public listing alone does not publish a channel's history.
+pub async fn require_channel_read_access(
+    pool: &AnyPool,
+    channel: &crate::models::channel::ChannelRow,
+    auth: Option<&AuthUser>,
+    history: bool,
+) -> Result<(), AppError> {
+    if let Some(auth) = auth {
+        if auth.is_guest {
+            let space_id = channel
+                .space_id
+                .as_deref()
+                .ok_or_else(|| AppError::Forbidden("guests cannot access DMs".into()))?;
+            let space = db::spaces::get_space_row(pool, space_id).await?;
+            if !space.allow_guest_access {
+                return Err(AppError::Forbidden("guest access is disabled".into()));
+            }
+        }
+        require_channel_permission(pool, &channel.id, auth, "view_channel").await?;
+        if history {
+            require_channel_permission(pool, &channel.id, auth, "read_history").await?;
+        }
+        return Ok(());
+    }
+    if channel.allow_anonymous_read {
+        if let Some(space_id) = &channel.space_id {
+            if db::spaces::get_space_row(pool, space_id).await?.public {
+                return Ok(());
+            }
+        }
+    }
+    Err(AppError::Unauthorized("authentication required".into()))
 }

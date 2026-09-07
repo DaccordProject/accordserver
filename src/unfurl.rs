@@ -1,8 +1,60 @@
 use crate::models::embed::{Embed, EmbedAuthor, EmbedImage};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::Client;
+use std::sync::Arc;
 use tracing::warn;
 
 const MAX_URLS: usize = 5;
+const MAX_HTML_BYTES: usize = 1024 * 1024;
+
+// Validate literals separately: reqwest bypasses its DNS resolver for IP URLs.
+fn validate_url(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(|host| {
+            let host = host.trim_matches(['[', ']']);
+            !host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+                && host
+                    .parse()
+                    .map(|ip| !crate::federation::peers::is_private(&ip))
+                    .unwrap_or(true)
+        })
+}
+
+#[derive(Debug)]
+struct PreviewResolver;
+
+impl Resolve for PreviewResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            let addresses: Vec<_> = tokio::net::lookup_host((name.as_str(), 0)).await?.collect();
+            if addresses.is_empty()
+                || addresses
+                    .iter()
+                    .any(|a| crate::federation::peers::is_private(&a.ip()))
+            {
+                return Err("link preview host is not a public address".into());
+            }
+            let addresses: Addrs = Box::new(addresses.into_iter());
+            Ok(addresses)
+        })
+    }
+}
+
+fn preview_client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .no_proxy()
+        .dns_resolver(Arc::new(PreviewResolver))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 || !validate_url(attempt.url()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+}
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Extract URLs from message text content.
@@ -24,8 +76,11 @@ pub fn extract_urls(content: &str) -> Vec<String> {
 }
 
 /// Fetch OpenGraph metadata from a URL and build an Embed.
-pub async fn unfurl_url(url: &str, client: &Client) -> Option<Embed> {
-    let response = client
+async fn unfurl_url(url: &str, client: &Client) -> Option<Embed> {
+    if !validate_url(&reqwest::Url::parse(url).ok()?) {
+        return None;
+    }
+    let mut response = client
         .get(url)
         .header("User-Agent", "AccordBot/1.0 (link preview)")
         .timeout(FETCH_TIMEOUT)
@@ -48,8 +103,20 @@ pub async fn unfurl_url(url: &str, client: &Client) -> Option<Embed> {
         return None;
     }
 
-    let body = response.text().await.ok()?;
-    parse_opengraph(&body, url)
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_HTML_BYTES as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if chunk.len() > MAX_HTML_BYTES - body.len() {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    parse_opengraph(&String::from_utf8_lossy(&body), url)
 }
 
 /// Parse OpenGraph meta tags from HTML body.
@@ -63,7 +130,7 @@ fn parse_opengraph(html: &str, source_url: &str) -> Option<Embed> {
 
     // Simple meta tag extraction without a full HTML parser.
     // Looks for <meta property="og:..." content="..."> patterns.
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
 
     for meta in extract_meta_tags(html) {
         let property = meta.0.to_lowercase();
@@ -138,7 +205,7 @@ fn parse_opengraph(html: &str, source_url: &str) -> Option<Embed> {
 /// Extract meta tag property/content pairs from HTML.
 fn extract_meta_tags(html: &str) -> Vec<(String, String)> {
     let mut tags = Vec::new();
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     let mut search_from = 0;
 
     while let Some(meta_start) = lower[search_from..].find("<meta ") {
@@ -165,7 +232,7 @@ fn extract_meta_tags(html: &str) -> Vec<(String, String)> {
 
 /// Extract an HTML attribute value from a tag string.
 fn extract_attr(tag: &str, attr_name: &str) -> Option<String> {
-    let lower = tag.to_lowercase();
+    let lower = tag.to_ascii_lowercase();
     let pattern = format!("{}=\"", attr_name);
     if let Some(start) = lower.find(&pattern) {
         let value_start = start + pattern.len();
@@ -231,11 +298,7 @@ pub async fn unfurl_message_urls(content: &str) -> Vec<Embed> {
         return Vec::new();
     }
 
-    let client = match Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-    {
+    let client = match preview_client_builder().build() {
         Ok(c) => c,
         Err(e) => {
             warn!("Failed to build HTTP client for unfurling: {e}");
@@ -255,6 +318,111 @@ pub async fn unfurl_message_urls(content: &str) -> Vec<Embed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_non_public_literal_urls() {
+        for url in [
+            "http://127.0.0.1/",
+            "http://2130706433/",
+            "http://169.254.169.254/",
+            "http://10.0.0.1/",
+            "http://100.64.0.1/",
+            "http://198.18.0.1/",
+            "http://240.0.0.1/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[fc00::1]/",
+            "http://[ff02::1]/",
+            "http://[64:ff9b::7f00:1]/",
+            "http://localhost./",
+            "file:///etc/passwd",
+            "http://user:password@example.com/",
+        ] {
+            assert!(!validate_url(&reqwest::Url::parse(url).unwrap()), "{url}");
+        }
+        assert!(validate_url(
+            &reqwest::Url::parse("https://example.com/").unwrap()
+        ));
+        assert!(validate_url(
+            &reqwest::Url::parse("https://[2606:4700:4700::1111]/").unwrap()
+        ));
+    }
+
+    #[test]
+    fn unicode_case_mapping_cannot_corrupt_parser_offsets() {
+        let html = "İİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİİ<title>safe</title><meta property='og:description' content='safe'>";
+        let embed = parse_opengraph(html, "https://example.com").unwrap();
+        assert_eq!(embed.title.as_deref(), Some("safe"));
+        assert_eq!(embed.description.as_deref(), Some("safe"));
+    }
+
+    #[tokio::test]
+    async fn preview_client_blocks_internal_dns_and_redirect_targets() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let redirect = format!("http://{addr}/secret");
+        let app = Router::new()
+            .route(
+                "/",
+                get(move || async move { axum::response::Redirect::temporary(&redirect) }),
+            )
+            .route(
+                "/secret",
+                get(|| async { axum::response::Html("<title>secret</title>") }),
+            );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = preview_client_builder().build().unwrap();
+        assert!(
+            unfurl_url(&format!("http://localhost:{}/secret", addr.port()), &client)
+                .await
+                .is_none()
+        );
+        // Inject a public-host resolution solely to exercise the real redirect policy.
+        let client = preview_client_builder()
+            .resolve("preview.test", addr)
+            .build()
+            .unwrap();
+        assert!(
+            unfurl_url(&format!("http://preview.test:{}/", addr.port()), &client)
+                .await
+                .is_none()
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn preview_body_limit_applies_without_content_length() {
+        use axum::{body::Body, routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/",
+            get(|| async {
+                let chunks = futures_util::stream::iter([
+                    Ok::<_, std::io::Error>(vec![b'a'; MAX_HTML_BYTES]),
+                    Ok(b"<title>oversized</title>".to_vec()),
+                ]);
+                ([("content-type", "text/html")], Body::from_stream(chunks))
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .resolve("preview.test", addr)
+            .build()
+            .unwrap();
+        assert!(
+            unfurl_url(&format!("http://preview.test:{}/", addr.port()), &client)
+                .await
+                .is_none()
+        );
+        task.abort();
+    }
 
     #[test]
     fn test_extract_urls_basic() {

@@ -51,10 +51,13 @@ pub fn validate_peer_url(url: &str) -> Result<(), AppError> {
     let host = parsed
         .host_str()
         .ok_or_else(|| AppError::BadRequest("peer url has no host".to_string()))?;
-    if host.eq_ignore_ascii_case("localhost") {
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+    {
         return Err(AppError::BadRequest("peer host not allowed".to_string()));
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
         if is_private(&ip) {
             return Err(AppError::BadRequest(
                 "peer host resolves to a private address".to_string(),
@@ -78,7 +81,7 @@ pub async fn validate_peer_url_resolved(url: &str) -> Result<(), AppError> {
         .host_str()
         .ok_or_else(|| AppError::BadRequest("peer url has no host".to_string()))?;
     // IP literals were already validated synchronously.
-    if host.parse::<IpAddr>().is_ok() {
+    if host.trim_matches(['[', ']']).parse::<IpAddr>().is_ok() {
         return Ok(());
     }
     let port = parsed.port_or_known_default().unwrap_or(443);
@@ -106,7 +109,7 @@ pub async fn validate_peer_url_resolved(url: &str) -> Result<(), AppError> {
 /// addresses that embed an IPv4 address (mapped/compatible) are folded back to
 /// their V4 form so an attacker cannot smuggle `::ffff:127.0.0.1` past the V4
 /// checks.
-fn is_private(ip: &IpAddr) -> bool {
+pub(crate) fn is_private(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_private_v4(v4),
         IpAddr::V6(v6) => {
@@ -119,7 +122,11 @@ fn is_private(ip: &IpAddr) -> bool {
                 return is_private_v4(&compat);
             }
             let seg = v6.segments();
-            v6.is_loopback()
+            // Only globally routed unicast; exclude translation/tunnel ranges.
+            (seg[0] & 0xe000) != 0x2000
+                || (seg[0] == 0x2001 && seg[1] < 0x0200)
+                || seg[0] == 0x2002
+                || v6.is_loopback()
                 || v6.is_unspecified()
                 // Unique local addresses (fc00::/7).
                 || (seg[0] & 0xfe00) == 0xfc00
@@ -146,6 +153,9 @@ fn is_private_v4(v4: &std::net::Ipv4Addr) -> bool {
         // Reserved/benchmarking and multicast ranges have no business being a
         // unicast federation peer.
         || v4.is_multicast()
+        || o[0] >= 240
+        || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0)
 }
 
 /// Custom DNS resolver that re-applies [`is_private`] at connect time, closing
@@ -211,9 +221,8 @@ pub async fn fetch_well_known(
         .error_for_status()
         .map_err(|e| AppError::BadRequest(format!("peer {domain} returned an error: {e}")))?;
 
-    let wk: WellKnown = resp
-        .json()
-        .await
+    let bytes = read_response_limited(resp).await?;
+    let wk: WellKnown = serde_json::from_slice(&bytes)
         .map_err(|e| AppError::BadRequest(format!("peer {domain} sent invalid metadata: {e}")))?;
 
     // Bind the document to the domain we asked: a peer cannot claim to be a
@@ -226,4 +235,33 @@ pub async fn fetch_well_known(
     }
     validate_peer_url_resolved(&wk.inbox_url).await?;
     Ok(wk)
+}
+
+/// Peer responses are untrusted, including chunked bodies without a length.
+pub(crate) async fn read_response_limited(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, AppError> {
+    const LIMIT: usize = 2 * 1024 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|len| len > LIMIT as u64)
+    {
+        return Err(AppError::BadRequest(
+            "peer response exceeds size limit".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("could not read peer response: {e}")))?
+    {
+        if chunk.len() > LIMIT - bytes.len() {
+            return Err(AppError::BadRequest(
+                "peer response exceeds size limit".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }

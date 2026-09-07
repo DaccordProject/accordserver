@@ -105,7 +105,7 @@ pub async fn handle_send(
     let (our_domain, peer, req): (_, _, SendRequest) =
         match crate::federation::verify::prepare(&state, &headers, SEND_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     match serve_send(&state, &our_domain, &peer.domain, &req).await {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
@@ -205,7 +205,7 @@ pub async fn handle_react(
     let (our_domain, peer, req): (_, _, ReactRequest) =
         match crate::federation::verify::prepare(&state, &headers, REACT_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     match serve_react(&state, &our_domain, &peer.domain, &req).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
@@ -346,7 +346,7 @@ pub async fn handle_leave(
     let (our_domain, peer, req): (_, _, LeaveRequest) =
         match crate::federation::verify::prepare(&state, &headers, LEAVE_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     match serve_leave(&state, &our_domain, &peer.domain, &req).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
@@ -437,7 +437,7 @@ pub async fn handle_edit(
     let (our_domain, peer, req): (_, _, EditRequest) =
         match crate::federation::verify::prepare(&state, &headers, EDIT_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     match serve_edit(&state, &our_domain, &peer.domain, &req).await {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
@@ -542,7 +542,7 @@ pub async fn handle_delete(
     let (our_domain, peer, req): (_, _, DeleteRequest) =
         match crate::federation::verify::prepare(&state, &headers, DELETE_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     match serve_delete(&state, &our_domain, &peer.domain, &req).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),
@@ -627,7 +627,7 @@ pub async fn handle_typing(
     let (our_domain, peer, req): (_, _, TypingRequest) =
         match crate::federation::verify::prepare(&state, &headers, TYPING_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     match serve_typing(&state, &our_domain, &peer.domain, &req).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "data": null }))).into_response(),

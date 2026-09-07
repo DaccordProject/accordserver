@@ -143,7 +143,7 @@ pub async fn list_reports(
     Query(query): Query<ListReportsQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "moderate_members").await?;
-    let limit = query.limit.unwrap_or(25).min(100);
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
     let reports = db::reports::list_reports(
         &state.db,
         &space_id,

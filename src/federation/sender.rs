@@ -222,9 +222,6 @@ pub async fn request_signed(
         .await
         .map_err(|e| AppError::Internal(format!("post to {target_domain}: {e}")))?;
     let status = resp.status();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("read response from {target_domain}: {e}")))?;
-    Ok((status, bytes.to_vec()))
+    let bytes = peers::read_response_limited(resp).await?;
+    Ok((status, bytes))
 }

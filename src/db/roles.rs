@@ -159,6 +159,7 @@ pub async fn reorder_roles(
     space_id: &str,
     updates: &[(String, i64)],
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
     for (id, position) in updates {
         sqlx::query(&super::q(
             "UPDATE roles SET position = ? WHERE id = ? AND space_id = ?",
@@ -166,8 +167,9 @@ pub async fn reorder_roles(
         .bind(position)
         .bind(id)
         .bind(space_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(())
 }

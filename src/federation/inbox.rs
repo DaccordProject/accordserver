@@ -37,7 +37,7 @@ pub async fn handle_inbox(
     let (_our_domain, peer, envelope): (_, _, mapping::FederationEnvelope) =
         match crate::federation::verify::prepare(&state, &headers, INBOX_PATH, &body).await {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     // --- Authority binding (S1) ---

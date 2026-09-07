@@ -1,7 +1,6 @@
-use axum::extract::{Request, State};
+use axum::extract::{FromRequestParts, Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 use crate::error::AppError;
@@ -22,38 +21,30 @@ pub async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    // Derive a key from the Authorization header (hashed) or fall back to IP-based keying.
-    let key = req
-        .headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .map(|auth| {
-            let mut hasher = Sha256::new();
-            hasher.update(auth.as_bytes());
-            format!("auth:{:x}", hasher.finalize())
-        })
-        .unwrap_or_else(|| {
-            // Use IP-based keying for unauthenticated requests to prevent
-            // one attacker from exhausting the bucket for all anonymous users.
-            let ip = req
-                .headers()
-                .get("X-Forwarded-For")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .map(|s| s.trim().to_string())
-                .or_else(|| {
-                    req.headers()
-                        .get("X-Real-IP")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-            let mut hasher = Sha256::new();
-            hasher.update(ip.as_bytes());
-            format!("ip:{:x}", hasher.finalize())
-        });
+    let (mut parts, body) = req.into_parts();
+    // Only verified tokens get a user bucket. Random tokens cannot buy capacity.
+    let auth = crate::middleware::auth::AuthUser::from_request_parts(&mut parts, &state)
+        .await
+        .ok();
+    let key = match auth {
+        Some(auth) if !auth.is_guest => format!("user:{}", auth.user_id),
+        _ => format!("ip:{}", crate::middleware::client_ip::request_ip(&parts)),
+    };
+    let req = Request::from_parts(parts, body);
 
     let now = Instant::now();
+    // Bound stale bucket growth without scanning on every request.
+    if state.rate_limits.len() >= 10_000 {
+        state
+            .rate_limits
+            .retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < WINDOW_SECS);
+        if state.rate_limits.len() >= 10_000 && !state.rate_limits.contains_key(&key) {
+            return AppError::RateLimited {
+                retry_after: WINDOW_SECS,
+            }
+            .into_response();
+        }
+    }
 
     let (remaining, retry_after) = {
         let mut entry = state

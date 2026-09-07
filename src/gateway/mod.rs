@@ -35,7 +35,9 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 const VALID_STATUSES: [&str; 4] = ["online", "idle", "dnd", "invisible"];
 
 pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ws.max_message_size(256 * 1024)
+        .max_frame_size(256 * 1024)
+        .on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +167,17 @@ async fn await_handshake(
                             send_invalid_session(sink).await;
                             return None;
                         };
+                        // Permissions may have changed after an event entered the buffer.
+                        let current_spaces: HashSet<String> = db::spaces::list_space_ids_for_user(&state.db, &auth.user_id).await.ok()?.into_iter().collect();
+                        for payload in &missed {
+                            let event: serde_json::Value = serde_json::from_str(payload).ok()?;
+                            if let Some(channel_id) = event.get("data").and_then(|d| d.get("channel_id")).and_then(|v| v.as_str()) {
+                                if !can_receive_channel(state, &auth.user_id, &current_spaces, channel_id, true).await {
+                                    send_invalid_session(sink).await;
+                                    return None;
+                                }
+                            }
+                        }
                         return Some(Handshake::Resume {
                             auth,
                             session_id: resume_data.session_id,
@@ -243,7 +256,8 @@ fn membership_event_subject(event: &serde_json::Value) -> Option<&str> {
         .or_else(|| data.get("user")?.get("id")?.as_str())
 }
 
-fn classify_broadcast(
+async fn classify_broadcast(
+    state: &AppState,
     broadcast: &GatewayBroadcast,
     user_id: &str,
     space_ids: &HashSet<String>,
@@ -277,6 +291,35 @@ fn classify_broadcast(
         return Delivery::Skip;
     }
 
+    // Space membership does not imply access to every channel in that space.
+    // Delete tombstones contain only IDs. They must reach clients even after
+    // the channel row is gone, so clients can discard their cached channel.
+    let channel_id = broadcast
+        .event
+        .get("data")
+        .filter(|_| event_type != "channel.delete")
+        .and_then(|data| {
+            data.get("channel_id").and_then(|v| v.as_str()).or_else(|| {
+                event_type
+                    .starts_with("channel.")
+                    .then(|| data.get("id")?.as_str())
+                    .flatten()
+            })
+        });
+    if let Some(channel_id) = channel_id {
+        if !can_receive_channel(
+            state,
+            user_id,
+            space_ids,
+            channel_id,
+            event_type.starts_with("message."),
+        )
+        .await
+        {
+            return Delivery::Skip;
+        }
+    }
+
     // Mute list updates from the REST API
     if event_type == "channel_mute.create" || event_type == "channel_mute.delete" {
         return Delivery::RefreshMutes;
@@ -299,6 +342,38 @@ fn classify_broadcast(
         return Delivery::Skip;
     }
     Delivery::Send(broadcast.event.clone())
+}
+
+async fn can_receive_channel(
+    state: &AppState,
+    user_id: &str,
+    space_ids: &HashSet<String>,
+    channel_id: &str,
+    history: bool,
+) -> bool {
+    let Ok(channel) = db::channels::get_channel_row(&state.db, channel_id).await else {
+        return false;
+    };
+    let is_guest = user_id.starts_with("guest:");
+    let auth = auth_resolve::AuthUser {
+        user_id: user_id.to_string(),
+        is_bot: false,
+        is_admin: false,
+        is_guest,
+        guest_space_id: if is_guest {
+            space_ids.iter().next().cloned()
+        } else {
+            None
+        },
+    };
+    crate::middleware::permissions::require_channel_read_access(
+        &state.db,
+        &channel,
+        Some(&auth),
+        history,
+    )
+    .await
+    .is_ok()
 }
 
 /// Re-reads the user's space memberships mid-session.
@@ -507,8 +582,13 @@ async fn send_ready(
 
         // Channels (with permission overwrites)
         if let Ok(channel_rows) = db::channels::list_channels_in_space(&state.db, sid).await {
-            if let Ok(channels) =
-                routes::spaces::channels_to_json_async(&state.db, &channel_rows).await
+            let mut visible = Vec::new();
+            for channel in channel_rows {
+                if can_receive_channel(state, user_id, space_ids, &channel.id, false).await {
+                    visible.push(channel);
+                }
+            }
+            if let Ok(channels) = routes::spaces::channels_to_json_async(&state.db, &visible).await
             {
                 all_channels_json.extend(channels);
             }
@@ -549,7 +629,10 @@ async fn send_ready(
                 // Collect unique user objects
                 if !seen_user_ids.contains(&member_row.user_id) {
                     if let Ok(user) = db::users::get_user(&state.db, &member_row.user_id).await {
-                        all_users_json.push(serde_json::to_value(&user).unwrap_or_default());
+                        all_users_json.push(
+                            serde_json::to_value(crate::models::user::PublicUser::from(user))
+                                .unwrap_or_default(),
+                        );
                         seen_user_ids.insert(member_row.user_id.clone());
                     }
                 }
@@ -565,6 +648,11 @@ async fn send_ready(
         // Voice states for this space
         let voice_states = crate::voice::state::get_space_voice_states(state, sid);
         for vs in &voice_states {
+            if let Some(channel_id) = &vs.channel_id {
+                if !can_receive_channel(state, user_id, space_ids, channel_id, false).await {
+                    continue;
+                }
+            }
             all_voice_states_json.push(serde_json::to_value(vs).unwrap_or_default());
         }
     }
@@ -920,7 +1008,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 } => {
                     if let Some(broadcast) = broadcast {
-                        match classify_broadcast(&broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents) {
+                        match classify_broadcast(&state, &broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents).await {
                             Delivery::Skip => {}
                             Delivery::RefreshMutes => {
                                 muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
@@ -1354,7 +1442,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             } => {
                 let Some(broadcast) = broadcast else { continue };
-                match classify_broadcast(&broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents) {
+                match classify_broadcast(&state, &broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents).await {
                     Delivery::Skip => {}
                     Delivery::RefreshMutes => {
                         muted_channel_ids = db::mutes::list_effective_muted_channel_ids(&state.db, &user_id).await
@@ -1464,7 +1552,7 @@ async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
             // Try guest token lookup
             let now_fn2 = crate::db::now_sql(state.db_is_postgres);
             let guest_sql = crate::db::q(&format!(
-                "SELECT space_id FROM guest_tokens WHERE token_hash = ? AND expires_at > {now_fn2}",
+                "SELECT gt.space_id FROM guest_tokens gt JOIN spaces s ON s.id = gt.space_id WHERE gt.token_hash = ? AND gt.expires_at > {now_fn2} AND s.allow_guest_access = TRUE",
             ));
             let guest_row = sqlx::query_as::<_, (String,)>(&guest_sql)
                 .bind(&token_hash)

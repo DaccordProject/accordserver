@@ -7,8 +7,8 @@ use crate::db::messages::ReactionAggregate;
 use crate::error::AppError;
 use crate::middleware::auth::{AuthUser, OptionalAuthUser};
 use crate::middleware::permissions::{
-    require_channel_membership, require_channel_permission, require_not_timed_out,
-    resolve_channel_permissions,
+    require_channel_membership, require_channel_permission, require_channel_read_access,
+    require_not_timed_out,
 };
 use crate::models::attachment::Attachment;
 use crate::models::message::{BulkDeleteMessages, CreateMessage, MessageRow, UpdateMessage};
@@ -30,24 +30,10 @@ pub async fn list_messages(
     auth: OptionalAuthUser,
     Query(params): Query<ListMessagesQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // Allow unauthenticated read for channels in public spaces
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    require_channel_read_access(&state.db, &channel, auth.0.as_ref(), true).await?;
     let current_user_id = auth.0.as_ref().map(|u| u.user_id.clone());
-    let is_public = if let Some(ref sid) = channel.space_id {
-        db::spaces::get_space_row(&state.db, sid)
-            .await
-            .map(|s| s.public)
-            .unwrap_or(false)
-    } else {
-        false
-    };
-    if !is_public {
-        let uid = current_user_id
-            .as_deref()
-            .ok_or_else(|| AppError::Unauthorized("authentication required".into()))?;
-        require_channel_membership(&state.db, &channel_id, uid).await?;
-    }
-    let limit = params.limit.unwrap_or(50).min(100);
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
 
     let is_forum = params.top_level.unwrap_or(false);
     let mut rows = if is_forum {
@@ -92,23 +78,9 @@ pub async fn get_message(
     Path((channel_id, message_id)): Path<(String, String)>,
     auth: OptionalAuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // Allow unauthenticated read for channels in public spaces
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    require_channel_read_access(&state.db, &channel, auth.0.as_ref(), true).await?;
     let current_user_id = auth.0.as_ref().map(|u| u.user_id.clone());
-    let is_public = if let Some(ref sid) = channel.space_id {
-        db::spaces::get_space_row(&state.db, sid)
-            .await
-            .map(|s| s.public)
-            .unwrap_or(false)
-    } else {
-        false
-    };
-    if !is_public {
-        let uid = current_user_id
-            .as_deref()
-            .ok_or_else(|| AppError::Unauthorized("authentication required".into()))?;
-        require_channel_membership(&state.db, &channel_id, uid).await?;
-    }
     let msg = db::messages::get_message_row(&state.db, &message_id).await?;
     if msg.channel_id != channel_id {
         return Err(AppError::NotFound("unknown_message".to_string()));
@@ -805,40 +777,23 @@ pub async fn search_messages(
         ));
     }
 
-    // Check space existence and publicity
-    let space = db::spaces::get_space_row(&state.db, &space_id).await?;
-    let is_public = space.public;
-
-    // Determine accessible channel IDs
+    db::spaces::get_space_row(&state.db, &space_id).await?;
     let all_channels = db::channels::list_channels_in_space(&state.db, &space_id).await?;
-
-    let accessible_channel_ids: Vec<String> = if let Some(ref user) = auth.0 {
-        // Authenticated: filter channels by view_channel permission
-        let mut ids = Vec::new();
-        for ch in &all_channels {
-            let perms =
-                resolve_channel_permissions(&state.db, &ch.id, &space_id, &user.user_id).await;
-            if let Ok(perms) = perms {
-                if perms
-                    .iter()
-                    .any(|p| p == "administrator" || p == "view_channel")
-                {
-                    ids.push(ch.id.clone());
-                }
-            }
+    let mut accessible_channel_ids = Vec::new();
+    for channel in &all_channels {
+        match require_channel_read_access(&state.db, channel, auth.0.as_ref(), true).await {
+            Ok(()) => accessible_channel_ids.push(channel.id.clone()),
+            Err(AppError::Forbidden(_) | AppError::Unauthorized(_)) => {}
+            Err(e) => return Err(e),
         }
-        if ids.is_empty() {
-            return Err(AppError::Forbidden(
-                "you are not a member of this space".to_string(),
-            ));
-        }
-        ids
-    } else if is_public {
-        // Unauthenticated on public space: all channels
-        all_channels.iter().map(|c| c.id.clone()).collect()
-    } else {
-        return Err(AppError::Unauthorized("authentication required".into()));
-    };
+    }
+    if accessible_channel_ids.is_empty() {
+        return Err(if auth.0.is_some() {
+            AppError::Forbidden("no accessible channels".into())
+        } else {
+            AppError::Unauthorized("authentication required".into())
+        });
+    }
 
     // If channel_id param given, validate and intersect
     let final_channel_ids = if let Some(ref cid) = params.channel_id {
@@ -857,7 +812,7 @@ pub async fn search_messages(
         accessible_channel_ids
     };
 
-    let limit = params.limit.unwrap_or(25).min(100);
+    let limit = params.limit.unwrap_or(25).clamp(1, 100);
 
     let search_params = db::messages::SearchMessagesParams {
         channel_ids: &final_channel_ids,

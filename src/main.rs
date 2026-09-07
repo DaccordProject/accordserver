@@ -62,6 +62,22 @@ async fn main() {
     run_main_server(config).await;
 }
 
+fn redact_database_url(url: &str) -> String {
+    if url.starts_with("sqlite:") {
+        return url.to_string();
+    }
+    match reqwest::Url::parse(url) {
+        Ok(mut parsed) => {
+            if parsed.password().is_some() {
+                let _ = parsed.set_password(Some("REDACTED"));
+            }
+            parsed.set_query(None);
+            parsed.to_string()
+        }
+        Err(_) => "[database URL redacted]".into(),
+    }
+}
+
 fn print_banner(config: &Config) {
     let version = env!("CARGO_PKG_VERSION");
     let voice = match &config.livekit {
@@ -89,7 +105,7 @@ fn print_banner(config: &Config) {
     status_line(format!("  \x1b[2mport\x1b[0m         {}", config.port));
     status_line(format!(
         "  \x1b[2mdatabase\x1b[0m     {}",
-        config.database_url
+        redact_database_url(&config.database_url)
     ));
     status_line(format!("  \x1b[2mvoice\x1b[0m        {voice}"));
     status_line(format!("  \x1b[2mmaster\x1b[0m       {master}"));
@@ -259,5 +275,10 @@ async fn run_main_server(config: Config) {
     status_line(format!("  \x1b[32m→ listening on {actual_addr}\x1b[0m"));
     eprintln!();
 
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .expect("server error");
 }

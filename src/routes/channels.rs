@@ -241,6 +241,40 @@ pub async fn upsert_overwrite(
         }
     }
 
+    let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    let space_id = channel
+        .space_id
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("DMs do not support permission overwrites".into()))?;
+    let actor_perms = if auth.is_admin {
+        vec!["administrator".to_string()]
+    } else {
+        crate::middleware::permissions::resolve_channel_permissions(
+            &state.db,
+            &channel_id,
+            space_id,
+            &auth.user_id,
+        )
+        .await?
+    };
+    for perm in input.allow.iter().chain(&input.deny) {
+        // Administrator is a space-level privilege, never a channel overwrite.
+        if perm == "administrator" {
+            return Err(AppError::BadRequest(
+                "administrator cannot be overwritten".into(),
+            ));
+        }
+        if !crate::models::permission::has_permission(&actor_perms, perm) {
+            return Err(AppError::Forbidden(format!(
+                "you cannot overwrite a permission you do not have: {perm}"
+            )));
+        }
+    }
+    validate_existing_overwrite(&state.db, &channel_id, &overwrite_id, &actor_perms).await?;
+    if input.overwrite_type == "member" {
+        db::members::get_member_row(&state.db, space_id, &overwrite_id).await?;
+    }
+
     // Validate that role/member belongs to the same space as the channel
     if input.overwrite_type == "role" {
         let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
@@ -265,12 +299,50 @@ pub async fn upsert_overwrite(
     Ok(Json(serde_json::json!({ "data": overwrite })))
 }
 
+// Replacing or deleting an overwrite also changes its old grants/denials.
+// Checking only the new arrays would let an actor clear their own restriction.
+async fn validate_existing_overwrite(
+    pool: &sqlx::AnyPool,
+    channel_id: &str,
+    overwrite_id: &str,
+    actor_perms: &[String],
+) -> Result<(), AppError> {
+    let overwrites = db::permission_overwrites::list_overwrites(pool, channel_id).await?;
+    if let Some(old) = overwrites.iter().find(|o| o.id == overwrite_id) {
+        for perm in old.allow.iter().chain(&old.deny) {
+            if !crate::models::permission::has_permission(actor_perms, perm) {
+                return Err(AppError::Forbidden(format!(
+                    "you cannot remove an overwrite for a permission you do not have: {perm}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn delete_overwrite(
     state: State<AppState>,
     Path((channel_id, overwrite_id)): Path<(String, String)>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_channel_permission(&state.db, &channel_id, &auth, "manage_roles").await?;
+    let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    let space_id = channel
+        .space_id
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("DMs do not support permission overwrites".into()))?;
+    let actor_perms = if auth.is_admin {
+        vec!["administrator".into()]
+    } else {
+        crate::middleware::permissions::resolve_channel_permissions(
+            &state.db,
+            &channel_id,
+            space_id,
+            &auth.user_id,
+        )
+        .await?
+    };
+    validate_existing_overwrite(&state.db, &channel_id, &overwrite_id, &actor_perms).await?;
     db::permission_overwrites::delete_overwrite(&state.db, &channel_id, &overwrite_id).await?;
     Ok(Json(serde_json::json!({ "data": null })))
 }

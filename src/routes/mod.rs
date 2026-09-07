@@ -123,7 +123,8 @@ pub fn router(state: AppState) -> Router {
     #[cfg(feature = "test-seed")]
     let base = base.route("/test/seed", post(test_seed::seed));
 
-    base.layer(TraceLayer::new_for_http())
+    base.layer(axum_mw::from_fn(cdn_security_headers))
+        .layer(TraceLayer::new_for_http())
         .layer(build_cors_layer())
         .with_state(state)
 }
@@ -564,4 +565,29 @@ fn build_cors_layer() -> CorsLayer {
             .allow_methods(methods)
             .allow_headers(headers),
     }
+}
+
+// Uploaded files can contain active HTML even when their filename looks benign.
+async fn cdn_security_headers(
+    req: axum::extract::Request,
+    next: axum_mw::Next,
+) -> axum::response::Response {
+    let cdn = req.uri().path().starts_with("/cdn/");
+    let attachment = req.uri().path().starts_with("/cdn/attachments/");
+    let mut response = next.run(req).await;
+    if cdn {
+        response
+            .headers_mut()
+            .insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+        response.headers_mut().insert(
+            "Content-Security-Policy",
+            "sandbox; default-src 'none'".parse().unwrap(),
+        );
+    }
+    if attachment {
+        response
+            .headers_mut()
+            .insert("Content-Disposition", "attachment".parse().unwrap());
+    }
+    response
 }

@@ -9,9 +9,13 @@ use axum::response::Response;
 use serde::de::DeserializeOwned;
 
 use crate::db::federation::Peer;
-use crate::federation::err_response as err;
 use crate::federation::signatures;
 use crate::state::AppState;
+
+// Keep verification errors small while preserving the exact HTTP response.
+fn err(status: StatusCode, message: &str) -> Box<Response> {
+    Box::new(crate::federation::err_response(status, message))
+}
 
 /// Common entry point for every signed S2S handler: reject if federation is
 /// disabled, verify the signature + resolve the trusted peer, and parse the
@@ -22,7 +26,7 @@ pub async fn prepare<T: DeserializeOwned>(
     headers: &HeaderMap,
     path: &str,
     body: &[u8],
-) -> Result<(String, Peer, T), Response> {
+) -> Result<(String, Peer, T), Box<Response>> {
     let Some(fed) = state.federation.clone() else {
         return Err(err(StatusCode::NOT_FOUND, "federation disabled"));
     };
@@ -40,7 +44,7 @@ pub async fn verify_signed(
     headers: &HeaderMap,
     path: &str,
     body: &[u8],
-) -> Result<Peer, Response> {
+) -> Result<Peer, Box<Response>> {
     let Some(sig_header) = headers.get("signature").and_then(|v| v.to_str().ok()) else {
         return Err(err(StatusCode::UNAUTHORIZED, "missing signature"));
     };

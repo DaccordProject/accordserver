@@ -17,6 +17,9 @@ use crate::models::plugin::{
 };
 use crate::state::AppState;
 
+const MAX_MANIFEST_SIZE: usize = 256 * 1024;
+const MAX_ICON_SIZE: usize = 2 * 1024 * 1024;
+
 const MAX_BUNDLE_SIZE: usize = 50 * 1024 * 1024; // 50 MB
 
 #[derive(Debug, Deserialize)]
@@ -763,6 +766,19 @@ struct ParsedBundle {
 
 /// Parse a `.daccord-plugin` ZIP bundle, extracting the manifest and icon.
 /// The full bundle ZIP is stored as-is for both scripted and native plugins.
+fn read_bundle_entry(file: impl Read, limit: usize) -> Result<Vec<u8>, AppError> {
+    let mut buf = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| AppError::BadRequest(format!("failed to read bundle entry: {e}")))?;
+    if buf.len() > limit {
+        return Err(AppError::PayloadTooLarge(
+            "expanded bundle entry exceeds size limit".into(),
+        ));
+    }
+    Ok(buf)
+}
+
 fn parse_plugin_bundle(zip_bytes: &[u8]) -> Result<ParsedBundle, AppError> {
     let cursor = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor)
@@ -770,12 +786,10 @@ fn parse_plugin_bundle(zip_bytes: &[u8]) -> Result<ParsedBundle, AppError> {
 
     // 1. Extract and parse plugin.json
     let manifest: PluginManifest = {
-        let mut file = archive.by_name("plugin.json").map_err(|_| {
+        let file = archive.by_name("plugin.json").map_err(|_| {
             AppError::BadRequest("bundle must contain a plugin.json manifest".to_string())
         })?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)
-            .map_err(|e| AppError::BadRequest(format!("failed to read plugin.json: {e}")))?;
+        let buf = read_bundle_entry(file, MAX_MANIFEST_SIZE)?;
         serde_json::from_slice(&buf)
             .map_err(|e| AppError::BadRequest(format!("invalid plugin.json: {e}")))?
     };
@@ -799,9 +813,8 @@ fn parse_plugin_bundle(zip_bytes: &[u8]) -> Result<ParsedBundle, AppError> {
 
     // 4. Extract icon if present (assets/icon.png)
     let icon_blob = match archive.by_name("assets/icon.png") {
-        Ok(mut file) => {
-            let mut buf = Vec::new();
-            let _ = file.read_to_end(&mut buf);
+        Ok(file) => {
+            let buf = read_bundle_entry(file, MAX_ICON_SIZE)?;
             if buf.is_empty() {
                 None
             } else {
@@ -880,5 +893,29 @@ async fn broadcast_plugin_event(
             event,
             intent: "plugins".to_string(),
         });
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    #[test]
+    fn compressed_manifest_cannot_expand_without_bound() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file(
+            "plugin.json",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(&vec![b' '; MAX_MANIFEST_SIZE + 1]).unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        assert!(bytes.len() < 1024);
+        assert!(matches!(
+            parse_plugin_bundle(&bytes),
+            Err(AppError::PayloadTooLarge(_))
+        ));
     }
 }

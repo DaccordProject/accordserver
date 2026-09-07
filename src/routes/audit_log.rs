@@ -24,7 +24,7 @@ pub async fn list_audit_log(
     Query(query): Query<ListAuditLogQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "view_audit_log").await?;
-    let limit = query.limit.unwrap_or(25).min(100);
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
     let entries = db::audit_log::list_entries(
         &state.db,
         &space_id,

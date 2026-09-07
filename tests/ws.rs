@@ -1477,3 +1477,63 @@ async fn test_ws_ban_create_and_delete_reach_moderators() {
     let deleted = found.unwrap_or_else(|| panic!("ban.delete; got {others:?}"));
     assert_eq!(deleted["data"]["user_id"], bob.user.id);
 }
+
+#[tokio::test]
+async fn test_ws_hidden_channel_history_is_not_in_ready_or_broadcasts() {
+    let (server, ws_url) = spawn_test_server().await;
+    let owner = server.create_user_with_token("owner").await;
+    let member = server.create_user_with_token("member").await;
+    let space = server.create_space(&owner.user.id, "privacy").await;
+    server.add_member(&space, &member.user.id).await;
+    let hidden = server.create_channel(&space, "hidden").await;
+    let visible = server.create_channel(&space, "visible").await;
+    let deleted = server.create_channel(&space, "deleted").await;
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/channels/{hidden}/permissions/{}", member.user.id),
+        &owner.auth_header(),
+        &serde_json::json!({"type":"member", "allow":[], "deny":["view_channel"]}),
+    );
+    assert_eq!(
+        server.router().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let (mut ws, _) = connect_async(format!("{ws_url}/ws")).await.unwrap();
+    ws.next().await.unwrap().unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({"op":2,"data":{"token":member.gateway_token(),"intents":["messages", "spaces"]}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let ready = ws.next().await.unwrap().unwrap().into_text().unwrap();
+    assert!(!ready.contains(&hidden), "hidden channel leaked in READY");
+    assert!(ready.contains(&visible));
+    for channel in [&hidden, &visible] {
+        let req = authenticated_json_request(
+            Method::POST,
+            &format!("/api/v1/channels/{channel}/messages"),
+            &owner.auth_header(),
+            &serde_json::json!({"content":"privacy sentinel"}),
+        );
+        assert_eq!(
+            server.router().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    let (event, _) = recv_event_type(&mut ws, "message.create", 5).await;
+    assert_eq!(event.unwrap()["data"]["channel_id"], visible);
+    let req = common::authenticated_request(
+        Method::DELETE,
+        &format!("/api/v1/channels/{deleted}"),
+        &owner.auth_header(),
+    );
+    assert_eq!(
+        server.router().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let (event, _) = recv_event_type(&mut ws, "channel.delete", 5).await;
+    assert_eq!(event.unwrap()["data"]["id"], deleted);
+    ws.close(None).await.unwrap();
+}
