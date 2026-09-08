@@ -152,6 +152,10 @@ pub async fn update_user(
 
     let user =
         db::admin::admin_update_user(&state.db, &user_id, &input, state.db_is_postgres).await?;
+    // A disabled account keeps no access anywhere, voice included.
+    if user.disabled {
+        crate::security::revoke_user_voice_access(&state, &user_id).await;
+    }
     Ok(Json(serde_json::json!({ "data": user })))
 }
 
@@ -178,6 +182,7 @@ pub async fn delete_user(
     }
 
     db::admin::delete_user(&state.db, &user_id).await?;
+    crate::security::revoke_user_voice_access(&state, &user_id).await;
     Ok(Json(serde_json::json!({ "data": null })))
 }
 

@@ -445,6 +445,7 @@ async fn apply_member_leave(
         return Ok(());
     }
     crate::db::members::remove_member(&state.db, &space_id, &payload.user_id).await?;
+    crate::security::revoke_space_voice_access(state, &space_id, Some(&payload.user_id)).await;
 
     rebroadcast(
         state,

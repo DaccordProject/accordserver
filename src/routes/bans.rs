@@ -91,6 +91,11 @@ pub async fn create_ban(
     )
     .await?;
 
+    // `create_ban` drops the member row, so the ban also has to end any voice
+    // session the user still holds in the space — otherwise they stay in the
+    // LiveKit room, publishing and subscribing, after being banned.
+    crate::security::revoke_space_voice_access(&state, &space_id, Some(&user_id)).await;
+
     // Optional message purge. Runs after the ban so a failure here can't leave
     // the user's history deleted but the user still in the space, and only
     // needs `ban_members`: wiping a banned user's posts is part of the ban, not

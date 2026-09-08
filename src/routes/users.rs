@@ -357,6 +357,7 @@ pub async fn delete_current_user(
 
     // Reuse the admin cascade deletion logic
     db::admin::delete_user(&state.db, &auth.user_id).await?;
+    crate::security::revoke_user_voice_access(&state, &auth.user_id).await;
 
     Ok(Json(serde_json::json!({ "data": null })))
 }

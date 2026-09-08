@@ -1,5 +1,5 @@
 //! Shared, bounded admission controls and local operator utilities.
-use crate::{error::AppError, state::AppState};
+use crate::{error::AppError, models::voice::VoiceState, state::AppState};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -138,6 +138,92 @@ pub async fn bootstrap_admin(
     Ok(())
 }
 
+/// Drop a single voice session: evict the participant from LiveKit, clear the
+/// in-memory voice state, and announce the departure.
+///
+/// `old` is the session as the caller observed it. The in-memory entry is only
+/// cleared when it still matches, so a user who has since moved to a channel
+/// they are still allowed in is not pulled out of it.
+async fn drop_voice_session(state: &AppState, old: &VoiceState) {
+    let Some(channel) = old.channel_id.as_deref() else {
+        return;
+    };
+    if let Err(err) = evict_voice_participant(state, channel, &old.user_id).await {
+        tracing::warn!("voice eviction could not be queued: {err}");
+        return;
+    }
+    if state
+        .voice_states
+        .remove_if(&old.user_id, |_, current| {
+            current.channel_id == old.channel_id && current.session_id == old.session_id
+        })
+        .is_some()
+    {
+        let mut left = old.clone();
+        left.channel_id = None;
+        crate::routes::voice::broadcast_voice_state_update(
+            state,
+            channel,
+            old.space_id.as_deref(),
+            &left,
+        )
+        .await;
+    }
+}
+
+/// Revoke voice access for every live session matching `matches`.
+///
+/// Access-revocation paths call this synchronously rather than leaving the work
+/// to the periodic [`reconcile_voice_access`] sweep: until the sweep ran, a
+/// removed participant would still be publishing and subscribing media in a
+/// room they no longer have access to.
+async fn revoke_voice_sessions(state: &AppState, matches: impl Fn(&VoiceState) -> bool) {
+    let targets: Vec<VoiceState> = state
+        .voice_states
+        .iter()
+        .filter(|entry| matches(entry.value()))
+        .map(|entry| entry.value().clone())
+        .collect();
+    for old in targets {
+        drop_voice_session(state, &old).await;
+    }
+}
+
+fn targets_user(user_id: Option<&str>, candidate: &str) -> bool {
+    match user_id {
+        Some(id) => candidate == id,
+        None => true,
+    }
+}
+
+/// Revoke voice access within a space: one member for a kick, ban or leave, or
+/// every member when the space itself is deleted.
+pub async fn revoke_space_voice_access(state: &AppState, space_id: &str, user_id: Option<&str>) {
+    revoke_voice_sessions(state, |vs| {
+        vs.space_id.as_deref() == Some(space_id) && targets_user(user_id, &vs.user_id)
+    })
+    .await;
+}
+
+/// Revoke voice access within a single channel: one participant for a DM
+/// removal, or everyone when the channel is deleted.
+pub async fn revoke_channel_voice_access(
+    state: &AppState,
+    channel_id: &str,
+    user_id: Option<&str>,
+) {
+    revoke_voice_sessions(state, |vs| {
+        vs.channel_id.as_deref() == Some(channel_id) && targets_user(user_id, &vs.user_id)
+    })
+    .await;
+}
+
+/// Revoke every voice session a user holds, wherever it is — for account
+/// disable and account deletion.
+pub async fn revoke_user_voice_access(state: &AppState, user_id: &str) {
+    revoke_voice_sessions(state, |vs| vs.user_id == user_id).await;
+}
+
 /// Reconcile REST, gateway and cascaded membership changes against current voice access.
 /// Failed evictions remain in a durable queue for the periodic worker.
 pub async fn reconcile_voice_access(state: &AppState) {
@@ -176,27 +262,7 @@ pub async fn reconcile_voice_access(state: &AppState) {
         if allowed {
             continue;
         }
-        if let Err(err) = evict_voice_participant(state, channel, &old.user_id).await {
-            tracing::warn!("voice eviction could not be queued: {err}");
-            continue;
-        }
-        if state
-            .voice_states
-            .remove_if(&old.user_id, |_, current| {
-                current.channel_id == old.channel_id && current.session_id == old.session_id
-            })
-            .is_some()
-        {
-            let mut left = old.clone();
-            left.channel_id = None;
-            crate::routes::voice::broadcast_voice_state_update(
-                state,
-                channel,
-                old.space_id.as_deref(),
-                &left,
-            )
-            .await;
-        }
+        drop_voice_session(state, &old).await;
     }
 }
 
