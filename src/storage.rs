@@ -423,9 +423,9 @@ pub async fn drain_attachment_deletions(state: &crate::state::AppState) -> Resul
 pub async fn serve_attachment(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
     axum::extract::Path(path): axum::extract::Path<String>,
+    req: axum::extract::Request,
 ) -> Result<axum::response::Response, AppError> {
-    use axum::response::IntoResponse;
-    use tokio::io::AsyncReadExt;
+    use tower::ServiceExt;
     if Path::new(&path)
         .components()
         .any(|c| !matches!(c, std::path::Component::Normal(_)))
@@ -451,27 +451,21 @@ pub async fn serve_attachment(
     if !file_path.starts_with(&root) {
         return Err(AppError::NotFound("attachment not found".into()));
     }
-    let file = tokio::fs::File::open(file_path)
+    // Serve through ServeFile for the content type, range support and revalidation
+    // headers a hand-rolled stream cannot provide. Active content stays inert: the
+    // /cdn/ layer still applies nosniff, a sandbox CSP and Content-Disposition.
+    let mut response = tower_http::services::ServeFile::new(&file_path)
+        .oneshot(req)
         .await
-        .map_err(|_| AppError::NotFound("attachment not found".into()))?;
-    let stream = futures_util::stream::try_unfold(file, |mut file| async move {
-        let mut bytes = vec![0; 16384];
-        let n = file.read(&mut bytes).await?;
-        if n == 0 {
-            Ok::<_, std::io::Error>(None)
-        } else {
-            bytes.truncate(n);
-            Ok(Some((bytes, file)))
-        }
-    });
-    Ok((
-        [
-            ("Content-Type", "application/octet-stream"),
-            ("Cache-Control", "no-store"),
-        ],
-        axum::body::Body::from_stream(stream),
-    )
-        .into_response())
+        .map_err(|err| AppError::Internal(format!("attachment read failed: {err}")))?
+        .map(axum::body::Body::new);
+    // The URL carries the attachment snowflake, so a hit never changes underneath us.
+    // Private: these are readable by URL alone and should not land in shared caches.
+    response.headers_mut().insert(
+        "Cache-Control",
+        "private, max-age=31536000, immutable".parse().unwrap(),
+    );
+    Ok(response)
 }
 
 /// Remove pre-upgrade orphans. The grace period protects uploads before their DB commit.
