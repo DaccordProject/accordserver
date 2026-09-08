@@ -35,27 +35,14 @@ pub async fn accept_invite(
     Path(code): Path<String>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let invite = db::invites::use_invite(&state.db, &code).await?;
-
-    // Check if the user is banned from this space
-    if db::bans::get_ban(&state.db, &invite.space_id, &auth.user_id)
-        .await
-        .is_ok()
-    {
-        return Err(AppError::Forbidden(
-            "you are banned from this space".to_string(),
-        ));
+    if auth.is_guest {
+        return Err(AppError::Forbidden("guests cannot accept invites".into()));
     }
-
-    let (member, newly_added) = db::members::add_member(
-        &state.db,
-        &invite.space_id,
-        &auth.user_id,
-        state.db_is_postgres,
-    )
-    .await?;
+    let (invite, newly_added) = db::invites::accept_invite(&state.db, &code, &auth.user_id).await?;
 
     if newly_added {
+        let member =
+            db::members::get_member_row(&state.db, &invite.space_id, &auth.user_id).await?;
         // Broadcast member.join to the space
         let user = db::users::get_user(&state.db, &auth.user_id).await?;
         if let Some(ref dispatcher) = *state.gateway_tx.read().await {

@@ -33,27 +33,26 @@ pub async fn rate_limit_middleware(
     let req = Request::from_parts(parts, body);
 
     let now = Instant::now();
-    // Bound stale bucket growth without scanning on every request.
-    if state.rate_limits.len() >= 10_000 {
-        state
-            .rate_limits
-            .retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < WINDOW_SECS);
-        if state.rate_limits.len() >= 10_000 && !state.rate_limits.contains_key(&key) {
+    if let Err(err) = crate::security::reserve_tracker(
+        &state,
+        &state.rate_limits,
+        &key,
+        |bucket| now.duration_since(bucket.last_refill).as_secs() >= WINDOW_SECS,
+        || RateLimitBucket {
+            remaining: CAPACITY,
+            last_refill: now,
+        },
+    ) {
+        return err.into_response();
+    }
+
+    let (remaining, retry_after) = {
+        let Some(mut entry) = state.rate_limits.get_mut(&key) else {
             return AppError::RateLimited {
                 retry_after: WINDOW_SECS,
             }
             .into_response();
-        }
-    }
-
-    let (remaining, retry_after) = {
-        let mut entry = state
-            .rate_limits
-            .entry(key)
-            .or_insert_with(|| RateLimitBucket {
-                remaining: CAPACITY,
-                last_refill: now,
-            });
+        };
 
         let bucket = entry.value_mut();
 
@@ -82,7 +81,17 @@ pub async fn rate_limit_middleware(
         return AppError::RateLimited { retry_after }.into_response();
     }
 
+    let mutation = !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
     let mut response = next.run(req).await;
+    if mutation {
+        if let Err(err) = crate::storage::drain_attachment_deletions(&state).await {
+            tracing::warn!("attachment cleanup will retry: {err}");
+        }
+        crate::security::reconcile_voice_access(&state).await;
+    }
     let headers = response.headers_mut();
     headers.insert("X-RateLimit-Limit", CAPACITY.to_string().parse().unwrap());
     headers.insert(

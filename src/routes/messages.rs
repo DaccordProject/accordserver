@@ -287,45 +287,52 @@ pub async fn create_message(
     // Spawn URL unfurling in the background -- if the message has no embeds
     // already and its content contains URLs, fetch OpenGraph metadata and
     // update the message with generated embeds.
-    if input.embeds.as_ref().is_none_or(|e| e.is_empty()) {
-        let content = input.content.clone();
-        let msg_id = msg.id.clone();
-        let space_id = channel.space_id.clone();
-        let db = state.db.clone();
-        let is_postgres = state.db_is_postgres;
-        let gateway_tx = state.gateway_tx.clone();
-        tokio::spawn(async move {
-            let embeds = crate::unfurl::unfurl_message_urls(&content).await;
-            if embeds.is_empty() {
-                return;
-            }
-            let update = UpdateMessage {
-                content: None,
-                embeds: Some(embeds),
-                title: None,
-            };
-            if let Ok(updated_msg) =
-                db::messages::update_message(&db, &msg_id, &update, is_postgres).await
-            {
-                let attachments = db::attachments::get_attachments_for_message(&db, &msg_id)
-                    .await
-                    .unwrap_or_default();
-                let json = message_row_to_json_with_attachments(&updated_msg, &attachments, None);
-                if let Some(ref dispatcher) = *gateway_tx.read().await {
-                    let event = serde_json::json!({
-                        "op": 0,
-                        "type": "message.update",
-                        "data": json
-                    });
-                    let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
-                        space_id,
-                        target_user_ids: None,
-                        event,
-                        intent: "messages".to_string(),
-                    });
+    if input.embeds.as_ref().is_none_or(|e| e.is_empty())
+        && !crate::unfurl::extract_urls(&input.content).is_empty()
+    {
+        // Acquire before spawning: overload skips a preview rather than queuing tasks.
+        if let Ok(permit) = state.security.unfurls.enter(&auth.user_id) {
+            let content = input.content.clone();
+            let msg_id = msg.id.clone();
+            let space_id = channel.space_id.clone();
+            let db = state.db.clone();
+            let is_postgres = state.db_is_postgres;
+            let gateway_tx = state.gateway_tx.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let embeds = crate::unfurl::unfurl_message_urls(&content).await;
+                if embeds.is_empty() {
+                    return;
                 }
-            }
-        });
+                let update = UpdateMessage {
+                    content: None,
+                    embeds: Some(embeds),
+                    title: None,
+                };
+                if let Ok(updated_msg) =
+                    db::messages::update_message(&db, &msg_id, &update, is_postgres).await
+                {
+                    let attachments = db::attachments::get_attachments_for_message(&db, &msg_id)
+                        .await
+                        .unwrap_or_default();
+                    let json =
+                        message_row_to_json_with_attachments(&updated_msg, &attachments, None);
+                    if let Some(ref dispatcher) = *gateway_tx.read().await {
+                        let event = serde_json::json!({
+                            "op": 0,
+                            "type": "message.update",
+                            "data": json
+                        });
+                        let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+                            space_id,
+                            target_user_ids: None,
+                            event,
+                            intent: "messages".to_string(),
+                        });
+                    }
+                }
+            });
+        }
     }
 
     Ok(Json(serde_json::json!({ "data": json })))

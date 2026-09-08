@@ -9,5 +9,5 @@ pub struct GatewaySession {
     pub intents: Vec<String>,
     pub space_ids: HashSet<String>,
     pub sequence: u64,
-    pub tx: mpsc::UnboundedSender<String>,
+    pub tx: mpsc::Sender<String>,
 }

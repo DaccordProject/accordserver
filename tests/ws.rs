@@ -1096,31 +1096,28 @@ async fn test_ws_resume_rejects_another_users_session() {
 }
 
 #[tokio::test]
-async fn test_ws_heartbeats_are_not_rate_limited() {
+async fn test_ws_heartbeat_flood_is_closed() {
     let (server, ws_url) = spawn_test_server().await;
     let alice = server.create_user_with_token("alice").await;
     let mut ws = connect_and_identify(&ws_url, &alice.gateway_token()).await;
-
-    // Well past the 120-per-minute cap. A dropped heartbeat lets last_heartbeat
-    // go stale and kills the session at the next timeout check, which culls
-    // precisely the busiest clients.
-    const BEATS: usize = 200;
-    for _ in 0..BEATS {
+    for _ in 0..11 {
         ws.send(Message::Text(
             serde_json::json!({ "op": 1 }).to_string().into(),
         ))
         .await
         .unwrap();
     }
-
-    let mut acks = 0;
-    while acks < BEATS {
-        let json = next_json(&mut ws).await;
-        if json["op"] == 4 {
-            acks += 1;
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Close(Some(frame)) = msg {
+                return u16::from(frame.code);
+            }
         }
-    }
-    assert_eq!(acks, BEATS);
+        0
+    })
+    .await
+    .unwrap();
+    assert_eq!(closed, 4008);
 }
 
 #[tokio::test]
@@ -1536,4 +1533,72 @@ async fn test_ws_hidden_channel_history_is_not_in_ready_or_broadcasts() {
     let (event, _) = recv_event_type(&mut ws, "channel.delete", 5).await;
     assert_eq!(event.unwrap()["data"]["id"], deleted);
     ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn active_gateway_closes_when_token_is_revoked_or_account_disabled() {
+    for disable in [false, true] {
+        let (server, url) = spawn_test_server().await;
+        let user = server.create_user_with_token("revoked").await;
+        let mut ws = connect_and_identify(&url, &user.gateway_token()).await;
+        if disable {
+            sqlx::query(&accordserver::db::q(
+                "UPDATE users SET disabled = TRUE WHERE id = ?",
+            ))
+            .bind(&user.user.id)
+            .execute(server.pool())
+            .await
+            .unwrap();
+        } else {
+            let req = common::authenticated_request(
+                Method::POST,
+                "/api/v1/auth/logout",
+                &user.auth_header(),
+            );
+            assert_eq!(
+                server.router().oneshot(req).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+        let code = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Close(Some(frame)) = msg {
+                    return u16::from(frame.code);
+                }
+            }
+            0
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, 4004);
+        assert!(server.state.resumable_sessions.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn gateway_limits_validated_user_connections() {
+    let (server, url) = spawn_test_server().await;
+    let user = server.create_user_with_token("limited").await;
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(connect_and_identify(&url, &user.gateway_token()).await);
+    }
+    let (mut ws, _) = connect_async(format!("{url}/ws")).await.unwrap();
+    ws.next().await.unwrap().unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({"op":2,"data":{"token":user.gateway_token(),"intents":[]}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(msg, Message::Close(Some(frame)) if u16::from(frame.code) == 4008));
+    for mut ws in held {
+        let _ = ws.close(None).await;
+    }
 }

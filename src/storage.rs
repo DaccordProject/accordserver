@@ -282,19 +282,27 @@ pub async fn delete_file(storage_path: &Path, relative_path: &str) -> Result<(),
     let rel = relative_path.strip_prefix("/cdn/").unwrap_or(relative_path);
     let file_path = storage_path.join(rel);
 
-    // Canonicalize both paths to prevent directory traversal
-    let canonical_storage = storage_path
-        .canonicalize()
-        .unwrap_or_else(|_| storage_path.to_path_buf());
-    if let Ok(canonical_file) = file_path.canonicalize() {
-        if !canonical_file.starts_with(&canonical_storage) {
-            return Err(AppError::BadRequest("invalid file path".to_string()));
+    // Canonicalize both paths to prevent directory traversal. Only absence is success.
+    let canonical_file = match tokio::fs::canonicalize(&file_path).await {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(AppError::Internal(format!(
+                "failed to inspect file for deletion: {err}"
+            )))
         }
-        tokio::fs::remove_file(&canonical_file)
-            .await
-            .map_err(|e| AppError::Internal(format!("failed to delete file: {e}")))?;
+    };
+    let canonical_storage = tokio::fs::canonicalize(storage_path)
+        .await
+        .map_err(|err| AppError::Internal(format!("failed to inspect storage: {err}")))?;
+    if !canonical_file.starts_with(&canonical_storage) {
+        return Err(AppError::BadRequest("invalid file path".into()));
     }
-    Ok(())
+    match tokio::fs::remove_file(canonical_file).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(AppError::Internal(format!("failed to delete file: {err}"))),
+    }
 }
 
 fn mime_to_ext(content_type: &str) -> &'static str {
@@ -389,4 +397,136 @@ pub fn temp_storage_path() -> PathBuf {
     path.push(format!("accord-test-{}", uuid::Uuid::new_v4()));
     path.push("cdn");
     path
+}
+
+/// Retry durable deletions; a failed unlink stays queued across restarts.
+pub async fn drain_attachment_deletions(state: &crate::state::AppState) -> Result<(), AppError> {
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT url FROM attachment_deletions LIMIT 100")
+        .fetch_all(&state.db)
+        .await?;
+    for (url,) in rows {
+        // Federation can attach remote URLs; these have no local file to unlink.
+        if url.starts_with("/cdn/attachments/") {
+            delete_file(&state.storage_path, &url).await?;
+        }
+        sqlx::query(&crate::db::q(
+            "DELETE FROM attachment_deletions WHERE url = ?",
+        ))
+        .bind(&url)
+        .execute(&state.db)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Gate downloads against live metadata even when filesystem cleanup is delayed.
+pub async fn serve_attachment(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    use axum::response::IntoResponse;
+    use tokio::io::AsyncReadExt;
+    if Path::new(&path)
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(AppError::NotFound("attachment not found".into()));
+    }
+    let url = format!("/cdn/attachments/{path}");
+    let exists: (i64,) = sqlx::query_as(&crate::db::q(
+        "SELECT COUNT(*) FROM attachments WHERE url = ?",
+    ))
+    .bind(&url)
+    .fetch_one(&state.db)
+    .await?;
+    if exists.0 == 0 {
+        return Err(AppError::NotFound("attachment not found".into()));
+    }
+    let root = tokio::fs::canonicalize(state.storage_path.join("attachments"))
+        .await
+        .map_err(|_| AppError::NotFound("attachment not found".into()))?;
+    let file_path = tokio::fs::canonicalize(root.join(&path))
+        .await
+        .map_err(|_| AppError::NotFound("attachment not found".into()))?;
+    if !file_path.starts_with(&root) {
+        return Err(AppError::NotFound("attachment not found".into()));
+    }
+    let file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|_| AppError::NotFound("attachment not found".into()))?;
+    let stream = futures_util::stream::try_unfold(file, |mut file| async move {
+        let mut bytes = vec![0; 16384];
+        let n = file.read(&mut bytes).await?;
+        if n == 0 {
+            Ok::<_, std::io::Error>(None)
+        } else {
+            bytes.truncate(n);
+            Ok(Some((bytes, file)))
+        }
+    });
+    Ok((
+        [
+            ("Content-Type", "application/octet-stream"),
+            ("Cache-Control", "no-store"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
+}
+
+/// Remove pre-upgrade orphans. The grace period protects uploads before their DB commit.
+pub async fn reconcile_attachment_orphans(state: &crate::state::AppState) -> Result<(), AppError> {
+    let root = state.storage_path.join("attachments");
+    let mut pending = vec![root.clone()];
+    while let Some(dir) = pending.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(AppError::Internal(format!("orphan scan failed: {err}"))),
+        };
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+        {
+            let kind = entry
+                .file_type()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            } // Never follow symlinks.
+            let metadata = entry
+                .metadata()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            if !metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() >= 3600)
+            {
+                continue;
+            }
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(&state.storage_path)
+                .map_err(|_| AppError::Internal("invalid orphan path".into()))?;
+            let url = format!("/cdn/{}", relative.to_string_lossy());
+            let exists: (i64,) = sqlx::query_as(&crate::db::q(
+                "SELECT COUNT(*) FROM attachments WHERE url = ?",
+            ))
+            .bind(&url)
+            .fetch_one(&state.db)
+            .await?;
+            if exists.0 == 0 {
+                delete_file(&state.storage_path, &url).await?;
+            }
+        }
+    }
+    Ok(())
 }

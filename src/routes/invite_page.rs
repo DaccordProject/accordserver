@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap};
-use axum::response::Html;
+use axum::response::{Html, IntoResponse, Response};
 
 use crate::db;
 use crate::error::AppError;
@@ -27,7 +27,8 @@ pub async fn invite_page(
     State(state): State<AppState>,
     Path(code): Path<String>,
     headers: HeaderMap,
-) -> Result<Html<String>, AppError> {
+) -> Result<Response, AppError> {
+    let nonce = crate::middleware::auth::generate_token();
     let host = extract_host(&headers);
     // Validate invite code: alphanumeric only
     if !code.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -64,7 +65,7 @@ pub async fn invite_page(
             format!(
                 r#"    <meta property="og:image" content="https://{}/cdn/icons/{}">"#,
                 escape_html(&host),
-                icon
+                escape_html(icon)
             )
         })
         .unwrap_or_default();
@@ -93,7 +94,7 @@ pub async fn invite_page(
   </body>
 </html>"#
         );
-        return Ok(Html(html));
+        return Ok(secure_html(html, &nonce));
     }
 
     // For humans: try protocol redirect with JS, show fallback landing page
@@ -161,9 +162,9 @@ pub async fn invite_page(
       </div>
       <p id="status" class="status"></p>
     </div>
-    <script>
+    <script nonce="{nonce}">
       // Attempt protocol handler redirect
-      var uri = "{daccord_uri}";
+      var uri = document.getElementById("open-btn").getAttribute("href");
       var opened = false;
       window.addEventListener("blur", function() {{ opened = true; }});
       setTimeout(function() {{
@@ -186,5 +187,14 @@ pub async fn invite_page(
         code_escaped = escape_html(&code),
     );
 
-    Ok(Html(html))
+    Ok(secure_html(html, &nonce))
+}
+
+fn secure_html(html: String, nonce: &str) -> Response {
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert("Content-Security-Policy", format!("default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'").parse().unwrap());
+    response
+        .headers_mut()
+        .insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    response
 }

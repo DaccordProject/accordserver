@@ -4,6 +4,7 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::io::Read;
 
 use crate::db;
@@ -54,6 +55,8 @@ pub async fn install_plugin(
     require_permission(&state.db, &space_id, &auth, "manage_space").await?;
 
     let mut bundle_bytes: Option<Vec<u8>> = None;
+    let mut signer = String::new();
+    let mut signature = String::new();
 
     while let Some(field) = multipart
         .next_field()
@@ -74,6 +77,23 @@ pub async fn install_plugin(
                 }
                 bundle_bytes = Some(data.to_vec());
             }
+            Some("signer") | Some("signature") => {
+                let is_signer = field.name() == Some("signer");
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|_| AppError::BadRequest("invalid signature field".into()))?;
+                if bytes.len() > 256 {
+                    return Err(AppError::BadRequest("signature field too long".into()));
+                }
+                let value = String::from_utf8(bytes.to_vec())
+                    .map_err(|_| AppError::BadRequest("invalid signature field".into()))?;
+                if is_signer {
+                    signer = value;
+                } else {
+                    signature = value;
+                }
+            }
             _ => {}
         }
     }
@@ -82,16 +102,20 @@ pub async fn install_plugin(
         .ok_or_else(|| AppError::BadRequest("missing bundle file in upload".to_string()))?;
 
     // Parse the ZIP and extract plugin.json and icon
-    let parsed = parse_plugin_bundle(&zip_bytes)?;
+    let mut parsed = parse_plugin_bundle(&zip_bytes)?;
 
     // Validate manifest
     validate_manifest(&parsed.manifest)?;
 
-    // For native plugins, verify plugin.sig exists
-    if parsed.manifest.runtime == "native" && !parsed.has_signature {
-        return Err(AppError::BadRequest(
-            "native plugins must include a plugin.sig signature file".to_string(),
-        ));
+    // Trust is derived from the exact uploaded archive, never manifest assertions.
+    parsed.manifest.signed = false;
+    parsed.manifest.signature.clear();
+    parsed.manifest.bundle_hash = format!("{:x}", Sha256::digest(&zip_bytes));
+    if parsed.manifest.runtime == "native" {
+        let keys = std::env::var("ACCORD_PLUGIN_TRUSTED_KEYS").unwrap_or_else(|_| "{}".into());
+        verify_native_bundle(&zip_bytes, &signer, &signature, &keys)?;
+        parsed.manifest.signed = true;
+        parsed.manifest.signature = format!("ed25519-v1:{signer}:{signature}");
     }
 
     // Store in DB — full bundle ZIP is stored for both scripted and native plugins
@@ -188,9 +212,27 @@ pub async fn get_plugin_bundle(
     let plugin = db::plugins::get_plugin(&state.db, &plugin_id).await?;
     require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
 
+    if plugin.runtime == "native"
+        && (!plugin.signed || !plugin.signature.starts_with("ed25519-v1:"))
+    {
+        return Err(AppError::Forbidden(
+            "native bundle must be reinstalled with a trusted signature".into(),
+        ));
+    }
     let bytes = db::plugins::get_bundle_blob(&state.db, &plugin_id).await?;
     if bytes.is_empty() {
         return Err(AppError::NotFound("plugin bundle not found".to_string()));
+    }
+
+    if plugin.runtime == "native" {
+        let fields: Vec<_> = plugin.signature.splitn(3, ':').collect();
+        let keys = std::env::var("ACCORD_PLUGIN_TRUSTED_KEYS").unwrap_or_else(|_| "{}".into());
+        if fields.len() != 3 {
+            return Err(AppError::Forbidden(
+                "invalid native signature metadata".into(),
+            ));
+        }
+        verify_native_bundle(&bytes, fields[1], fields[2], &keys)?;
     }
 
     Ok((
@@ -236,6 +278,12 @@ pub async fn get_channel_active_sessions(
         .ok_or_else(|| AppError::BadRequest("channel has no space".to_string()))?;
     require_membership(&state.db, space_id, &auth.user_id).await?;
 
+    crate::middleware::permissions::require_channel_membership(
+        &state.db,
+        &channel_id,
+        &auth.user_id,
+    )
+    .await?;
     let sessions = db::plugins::get_active_sessions_for_channel(&state.db, &channel_id).await?;
     Ok(Json(serde_json::json!({ "data": sessions })))
 }
@@ -246,7 +294,15 @@ pub async fn get_space_active_sessions(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_membership(&state.db, &space_id, &auth.user_id).await?;
-    let sessions = db::plugins::get_active_sessions_for_space(&state.db, &space_id).await?;
+    let mut sessions = Vec::new();
+    for session in db::plugins::get_active_sessions_for_space(&state.db, &space_id).await? {
+        if db::plugins::require_session_access(&state.db, &session.id, &auth.user_id)
+            .await
+            .is_ok()
+        {
+            sessions.push(session);
+        }
+    }
     Ok(Json(serde_json::json!({ "data": sessions })))
 }
 
@@ -298,6 +354,7 @@ pub async fn delete_session(
     require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
 
     let session = db::plugins::get_session(&state.db, &session_id).await?;
+    db::plugins::require_session_access(&state.db, &session_id, &auth.user_id).await?;
     if session.plugin_id != plugin_id {
         return Err(AppError::NotFound(
             "session not found for this plugin".to_string(),
@@ -341,6 +398,7 @@ pub async fn update_session_state(
     require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
 
     let session = db::plugins::get_session(&state.db, &session_id).await?;
+    db::plugins::require_session_access(&state.db, &session_id, &auth.user_id).await?;
     if session.plugin_id != plugin_id {
         return Err(AppError::NotFound(
             "session not found for this plugin".to_string(),
@@ -404,6 +462,7 @@ pub async fn leave_session(
     require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
 
     let session = db::plugins::get_session(&state.db, &session_id).await?;
+    db::plugins::require_session_access(&state.db, &session_id, &auth.user_id).await?;
     if session.plugin_id != plugin_id {
         return Err(AppError::NotFound(
             "session not found for this plugin".to_string(),
@@ -453,6 +512,7 @@ pub async fn assign_role(
     require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
 
     let session = db::plugins::get_session(&state.db, &session_id).await?;
+    db::plugins::require_session_access(&state.db, &session_id, &auth.user_id).await?;
     if session.plugin_id != plugin_id {
         return Err(AppError::NotFound(
             "session not found for this plugin".to_string(),
@@ -556,6 +616,7 @@ pub async fn send_action(
     require_membership(&state.db, &plugin.space_id, &auth.user_id).await?;
 
     let session = db::plugins::get_session(&state.db, &session_id).await?;
+    db::plugins::require_session_access(&state.db, &session_id, &auth.user_id).await?;
     if session.plugin_id != plugin_id {
         return Err(AppError::NotFound(
             "session not found for this plugin".to_string(),
@@ -761,7 +822,6 @@ fn get_board_config(
 struct ParsedBundle {
     manifest: PluginManifest,
     icon_blob: Option<Vec<u8>>,
-    has_signature: bool,
 }
 
 /// Parse a `.daccord-plugin` ZIP bundle, extracting the manifest and icon.
@@ -809,7 +869,6 @@ fn parse_plugin_bundle(zip_bytes: &[u8]) -> Result<ParsedBundle, AppError> {
     }
 
     // 3. Check for plugin.sig (required for native plugins)
-    let has_signature = archive.by_name("plugin.sig").is_ok();
 
     // 4. Extract icon if present (assets/icon.png)
     let icon_blob = match archive.by_name("assets/icon.png") {
@@ -827,7 +886,6 @@ fn parse_plugin_bundle(zip_bytes: &[u8]) -> Result<ParsedBundle, AppError> {
     Ok(ParsedBundle {
         manifest,
         icon_blob,
-        has_signature,
     })
 }
 
@@ -917,5 +975,71 @@ mod security_tests {
             parse_plugin_bundle(&bytes),
             Err(AppError::PayloadTooLarge(_))
         ));
+    }
+}
+
+/// Signature payload: ASCII domain prefix followed by the SHA-256 digest of the exact ZIP.
+fn verify_native_bundle(
+    bytes: &[u8],
+    signer: &str,
+    signature: &str,
+    trust_json: &str,
+) -> Result<(), AppError> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let invalid = || {
+        AppError::BadRequest(
+            "native bundle requires a valid signature from a trusted signer".into(),
+        )
+    };
+    if signer.is_empty()
+        || !signer
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(invalid());
+    }
+    let keys: std::collections::HashMap<String, String> =
+        serde_json::from_str(trust_json).map_err(|_| invalid())?;
+    let key_bytes = data_encoding::BASE64
+        .decode(keys.get(signer).ok_or_else(invalid)?.as_bytes())
+        .map_err(|_| invalid())?;
+    let key = VerifyingKey::from_bytes(&key_bytes.try_into().map_err(|_| invalid())?)
+        .map_err(|_| invalid())?;
+    let signature = data_encoding::BASE64
+        .decode(signature.as_bytes())
+        .map_err(|_| invalid())?;
+    let signature = Signature::from_slice(&signature).map_err(|_| invalid())?;
+    let mut message = b"accord-native-plugin-v1\0".to_vec();
+    message.extend_from_slice(&Sha256::digest(bytes));
+    key.verify_strict(&message, &signature)
+        .map_err(|_| invalid())
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    #[test]
+    fn native_signatures_bind_exact_bytes_and_trusted_identity() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let zip = b"exact archive including manifest and native code";
+        let mut payload = b"accord-native-plugin-v1\0".to_vec();
+        payload.extend_from_slice(&Sha256::digest(zip));
+        let sig = data_encoding::BASE64.encode(&key.sign(&payload).to_bytes());
+        let trust = serde_json::json!({"publisher":data_encoding::BASE64.encode(key.verifying_key().as_bytes())}).to_string();
+        assert!(verify_native_bundle(zip, "publisher", &sig, &trust).is_ok());
+        for (bytes, signer, signature, trust) in [
+            (
+                b"tampered".as_slice(),
+                "publisher",
+                sig.as_str(),
+                trust.as_str(),
+            ),
+            (zip.as_slice(), "unknown", sig.as_str(), trust.as_str()),
+            (zip.as_slice(), "publisher", "garbage", trust.as_str()),
+            (zip.as_slice(), "publisher", sig.as_str(), "{}"),
+        ] {
+            assert!(verify_native_bundle(bytes, signer, signature, trust).is_err());
+        }
     }
 }

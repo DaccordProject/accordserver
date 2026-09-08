@@ -44,7 +44,9 @@ Configuration comes from environment variables, with optional CLI flags as overr
 | `DATABASE_URL` | `sqlite:data/accord.db?mode=rwc` | Database connection string (SQLite or PostgreSQL) |
 | `ACCORD_STORAGE_PATH` | `./data/cdn` | Where uploaded emoji, avatars, and attachments live |
 | `RUST_LOG` | `accordserver=debug,tower_http=debug` | Tracing log filter |
-| `TRUST_PROXY_HEADERS` | `false` | Trust proxy-supplied client IP headers for rate limiting. Enable only when direct access is blocked and your reverse proxy replaces incoming `X-Forwarded-For` / `X-Real-IP` headers. |
+| `TRUST_PROXY_HEADERS` | `false` | Enable forwarded client IPs only from peers listed in `TRUSTED_PROXY_IPS`. The proxy must replace incoming forwarding headers. |
+| `TRUSTED_PROXY_IPS` | empty | Comma-separated literal IP addresses of trusted reverse proxies. An empty list never trusts forwarded headers. |
+| `ACCORD_PLUGIN_TRUSTED_KEYS` | `{}` | JSON map of signer IDs to base64 Ed25519 public keys for native plugins. See [security operations](docs/security-operations.md). |
 | `LIVEKIT_INTERNAL_URL` | | LiveKit server URL for server communication (e.g. `http://livekit:7880`) |
 | `LIVEKIT_EXTERNAL_URL` | | LiveKit server URL for client connections (e.g. `wss://livekit.example.com`) |
 | `LIVEKIT_API_KEY` | | LiveKit API key |
@@ -54,6 +56,7 @@ Configuration comes from environment variables, with optional CLI flags as overr
 
 ```
 accordserver [--data-dir <path>] [--port <n>] [--bind <addr>]
+             [--bootstrap-admin <username>]
              [--livekit-url <url>] [--livekit-key <k>] [--livekit-secret <s>]
 ```
 
@@ -130,97 +133,19 @@ The server image is published to GHCR:
 ghcr.io/daccordproject/accordserver
 ```
 
-### Docker Compose (SQLite)
+### Docker Compose
 
-```yaml
-services:
-  accordserver:
-    image: ghcr.io/daccordproject/accordserver:latest
-    ports:
-      - "39099:39099"
-    volumes:
-      - accord-data:/app/data
-    environment:
-      DATABASE_URL: sqlite:/app/data/accord.db?mode=rwc
-      RUST_LOG: accordserver=debug,tower_http=debug
-      LIVEKIT_INTERNAL_URL: http://livekit:7880
-      LIVEKIT_EXTERNAL_URL: ws://localhost:7880
-      LIVEKIT_API_KEY: devkey
-      LIVEKIT_API_SECRET: secret
-    depends_on:
-      - livekit
+Use [docker-compose.yml](docker-compose.yml) for SQLite or [docker-compose.postgres.yml](docker-compose.postgres.yml) for PostgreSQL. Both use [livekit.yaml](livekit.yaml); replace example hostnames and configure the external `app-network` before starting.
 
-  livekit:
-    image: livekit/livekit-server:latest
-    command: --dev --keys '{"devkey": "secret"}'
-    ports:
-      - "7880:7880"
-      - "7881:7881"
-      - "7882:7882/udp"
-
-volumes:
-  accord-data:
-```
-
-### Docker Compose (PostgreSQL)
-
-A ready-to-use compose file is provided at `docker-compose.postgres.yml`:
+Set `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in an untracked `.env` file, generating each with `openssl rand -hex 32`. PostgreSQL also requires `POSTGRES_PASSWORD` and a matching, URL-encoded `DATABASE_URL`. Compose refuses to start when required values are missing; known development LiveKit credentials are rejected by the server.
 
 ```bash
+docker compose up -d
+# Or:
 docker compose -f docker-compose.postgres.yml up -d
 ```
 
-Or configure it manually:
-
-```yaml
-services:
-  accordserver:
-    image: ghcr.io/daccordproject/accordserver:latest
-    ports:
-      - "39099:39099"
-    volumes:
-      - accord-data:/app/data
-    environment:
-      DATABASE_URL: "postgres://accord:yourpassword@postgres/accord"
-      RUST_LOG: accordserver=debug,tower_http=debug
-      LIVEKIT_INTERNAL_URL: http://livekit:7880
-      LIVEKIT_EXTERNAL_URL: ws://localhost:7880
-      LIVEKIT_API_KEY: devkey
-      LIVEKIT_API_SECRET: secret
-    depends_on:
-      postgres:
-        condition: service_healthy
-      livekit:
-        condition: service_started
-
-  postgres:
-    image: postgres:17
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    environment:
-      # These only take effect on FIRST initialization (empty data directory).
-      # If you change them later, you must wipe the volume or alter the role manually.
-      POSTGRES_USER: accord
-      POSTGRES_PASSWORD: "yourpassword"
-      POSTGRES_DB: accord
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U accord -d accord"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  livekit:
-    image: livekit/livekit-server:latest
-    command: --dev --keys '{"devkey": "secret"}'
-    ports:
-      - "7880:7880"
-      - "7881:7881"
-      - "7882:7882/udp"
-
-volumes:
-  accord-data:
-  postgres-data:
-```
+Provision the administrator locally using the instructions in [security operations](docs/security-operations.md). Public registration always creates ordinary users. Existing operators should also read the credential rotation and native plugin upgrade instructions there.
 
 **Important notes:**
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` only take effect when PostgreSQL initializes a **fresh data directory**. If the volume already has data, changing these values does nothing. To reset: stop the stack, delete the postgres volume, and start again.

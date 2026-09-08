@@ -27,11 +27,14 @@ fn hash_token(token: &str) -> String {
 }
 
 async fn resolve_bot_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
-    let token_hash = hash_token(token);
+    resolve_bot_hash(pool, &hash_token(token)).await
+}
+
+async fn resolve_bot_hash(pool: &AnyPool, token_hash: &str) -> Option<AuthUser> {
     let row = sqlx::query(
         &crate::db::q("SELECT bt.user_id, u.is_admin, u.disabled FROM bot_tokens bt JOIN users u ON bt.user_id = u.id WHERE bt.token_hash = ?"),
     )
-    .bind(&token_hash)
+    .bind(token_hash)
     .fetch_optional(pool)
     .await
     .ok()??;
@@ -56,11 +59,14 @@ async fn resolve_bot_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
 }
 
 async fn resolve_bearer_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
-    let token_hash = hash_token(token);
+    resolve_bearer_hash(pool, &hash_token(token)).await
+}
+
+async fn resolve_bearer_hash(pool: &AnyPool, token_hash: &str) -> Option<AuthUser> {
     let row = sqlx::query(
         &crate::db::q("SELECT ut.user_id, ut.expires_at, u.is_admin, u.disabled FROM user_tokens ut JOIN users u ON ut.user_id = u.id WHERE ut.token_hash = ?"),
     )
-    .bind(&token_hash)
+    .bind(token_hash)
     .fetch_optional(pool)
     .await
     .ok()??;
@@ -103,11 +109,14 @@ async fn resolve_bearer_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
 }
 
 async fn resolve_guest_token(pool: &AnyPool, token: &str) -> Option<AuthUser> {
-    let token_hash = hash_token(token);
+    resolve_guest_hash(pool, &hash_token(token)).await
+}
+
+async fn resolve_guest_hash(pool: &AnyPool, token_hash: &str) -> Option<AuthUser> {
     let row = sqlx::query(&crate::db::q(
         "SELECT gt.space_id, gt.expires_at FROM guest_tokens gt JOIN spaces s ON s.id = gt.space_id WHERE gt.token_hash = ? AND s.allow_guest_access = TRUE",
     ))
-    .bind(&token_hash)
+    .bind(token_hash)
     .fetch_optional(pool)
     .await
     .ok()??;
@@ -254,5 +263,21 @@ pub fn generate_token() -> String {
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// Revalidate a gateway credential without retaining the raw secret.
+pub(crate) async fn resolve_hash(
+    pool: &AnyPool,
+    hash: &str,
+    bot: bool,
+    guest: bool,
+) -> Option<AuthUser> {
+    if bot {
+        resolve_bot_hash(pool, hash).await
+    } else if guest {
+        resolve_guest_hash(pool, hash).await
+    } else {
+        resolve_bearer_hash(pool, hash).await
     }
 }

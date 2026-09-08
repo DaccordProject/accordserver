@@ -44,7 +44,6 @@ use crate::state::AppState;
 /// layers that need `State<AppState>` (e.g. rate limiter) can be wired up.
 pub fn router(state: AppState) -> Router {
     let api = api_routes(&state);
-    let cdn_service = ServeDir::new(&state.storage_path);
 
     let seo = Router::new()
         .route("/{space_slug}", get(seo::space_snapshot))
@@ -114,7 +113,34 @@ pub fn router(state: AppState) -> Router {
             crate::federation::dm::DM_SEND_PATH,
             post(crate::federation::dm::handle_send),
         )
-        .nest_service("/cdn", cdn_service)
+        .route(
+            "/cdn/attachments/{*path}",
+            get(crate::storage::serve_attachment),
+        )
+        .nest_service(
+            "/cdn/emojis",
+            ServeDir::new(state.storage_path.join("emojis")),
+        )
+        .nest_service(
+            "/cdn/sounds",
+            ServeDir::new(state.storage_path.join("sounds")),
+        )
+        .nest_service(
+            "/cdn/avatars",
+            ServeDir::new(state.storage_path.join("avatars")),
+        )
+        .nest_service(
+            "/cdn/icons",
+            ServeDir::new(state.storage_path.join("icons")),
+        )
+        .nest_service(
+            "/cdn/banners",
+            ServeDir::new(state.storage_path.join("banners")),
+        )
+        .nest_service(
+            "/cdn/splashes",
+            ServeDir::new(state.storage_path.join("splashes")),
+        )
         .nest("/s", seo)
         .nest("/api/v1", api);
 

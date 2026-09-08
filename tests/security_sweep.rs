@@ -267,6 +267,34 @@ async fn hidden_channels_cannot_be_used_when_send_permission_remains() {
 #[tokio::test]
 async fn uploaded_html_is_served_as_a_sandboxed_download() {
     let server = TestServer::new().await;
+    let user = server.create_user_with_token("uploader").await;
+    let space = server.create_space(&user.user.id, "space").await;
+    let channel = server.create_channel(&space, "general").await;
+    let response = server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::POST,
+            &format!("/api/v1/channels/{channel}/messages"),
+            &user.auth_header(),
+            &json!({"content":"uploaded html"}),
+        ))
+        .await
+        .unwrap();
+    let message = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    sqlx::query(&accordserver::db::q(
+        "INSERT INTO attachments (id, message_id, filename, size, url) VALUES (?, ?, ?, ?, ?)",
+    ))
+    .bind("test")
+    .bind(&message)
+    .bind("payload.html")
+    .bind(25_i64)
+    .bind("/cdn/attachments/test/payload.html")
+    .execute(server.pool())
+    .await
+    .unwrap();
     let dir = server.state.storage_path.join("attachments/test");
     tokio::fs::create_dir_all(&dir).await.unwrap();
     tokio::fs::write(dir.join("payload.html"), "<script>alert(1)</script>")

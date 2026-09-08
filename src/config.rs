@@ -37,6 +37,9 @@ pub struct LiveKitConfig {
 #[derive(Parser, Debug, Default, Clone)]
 #[command(name = "accordserver", version, about = "Accord chat & voice server")]
 pub struct Cli {
+    /// Create a local administrator and exit; password comes from ACCORD_BOOTSTRAP_PASSWORD.
+    #[arg(long)]
+    pub bootstrap_admin: Option<String>,
     /// Base directory for the SQLite database, uploads, and runtime state.
     /// If set, DATABASE_URL and ACCORD_STORAGE_PATH default to paths under
     /// this directory.
@@ -65,6 +68,7 @@ pub struct Cli {
 }
 
 pub struct Config {
+    pub bootstrap_admin: Option<String>,
     pub port: u16,
     pub bind: String,
     pub database_url: String,
@@ -133,6 +137,8 @@ impl Config {
                 .clone()
                 .or_else(|| std::env::var("LIVEKIT_API_SECRET").ok())
                 .expect("LIVEKIT_API_SECRET is required when LIVEKIT_URL is set");
+            assert!(api_key != "devkey" && !["secret", "changeme"].contains(&api_secret.as_str()),
+                "development LiveKit credentials are unsafe; configure unique LIVEKIT_API_KEY and LIVEKIT_API_SECRET");
             LiveKitConfig {
                 internal_url,
                 external_url,
@@ -213,6 +219,7 @@ impl Config {
             .unwrap_or_else(|| "0.0.0.0".to_string());
 
         Self {
+            bootstrap_admin: cli.bootstrap_admin.clone(),
             port,
             bind,
             database_url,

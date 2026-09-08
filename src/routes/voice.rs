@@ -101,7 +101,11 @@ pub async fn join_voice(
     // Clean up old LiveKit room if the user moved channels
     if let Some(ref prev_ch) = previous_channel {
         if !state.test_mode {
-            lk.remove_participant(prev_ch, &auth.user_id).await;
+            if let Err(err) =
+                crate::security::evict_voice_participant(&state, prev_ch, &auth.user_id).await
+            {
+                tracing::warn!("voice eviction could not be queued: {err}");
+            }
             lk.delete_room_if_empty(prev_ch).await;
         }
     }
@@ -156,7 +160,15 @@ pub async fn leave_voice(
             // LiveKit cleanup
             if !state.test_mode {
                 if let Some(ref lk) = state.livekit_client {
-                    lk.remove_participant(left_channel, &auth.user_id).await;
+                    if let Err(err) = crate::security::evict_voice_participant(
+                        &state,
+                        left_channel,
+                        &auth.user_id,
+                    )
+                    .await
+                    {
+                        tracing::warn!("voice eviction could not be queued: {err}");
+                    }
                     lk.delete_room_if_empty(left_channel).await;
                 }
             }

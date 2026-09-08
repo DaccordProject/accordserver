@@ -195,35 +195,62 @@ pub async fn delete_invite(pool: &AnyPool, code: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-pub async fn use_invite(pool: &AnyPool, code: &str) -> Result<Invite, AppError> {
-    let invite = get_invite(pool, code).await?;
-
-    // Check if expired
-    if let Some(ref expires_at) = invite.expires_at {
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S+00:00")
-            .to_string();
-        if *expires_at < now {
-            return Err(AppError::BadRequest("invite has expired".to_string()));
-        }
+/// Serialize finite-invite claims and commit membership and use count together.
+pub async fn accept_invite(
+    pool: &AnyPool,
+    code: &str,
+    user_id: &str,
+) -> Result<(Invite, bool), AppError> {
+    let mut tx = pool.begin().await?;
+    // A write first locks this invite on PostgreSQL and avoids SQLite snapshot upgrades.
+    let locked = sqlx::query(&super::q("UPDATE invites SET uses = uses WHERE code = ?"))
+        .bind(code)
+        .execute(&mut *tx)
+        .await?;
+    if locked.rows_affected() == 0 {
+        return Err(AppError::NotFound("invite not found".into()));
     }
-
-    // Check max uses. A max_uses of 0 (or null) means unlimited.
-    if let Some(max_uses) = invite.max_uses {
-        if max_uses > 0 && invite.uses >= max_uses {
-            return Err(AppError::BadRequest(
-                "invite has reached max uses".to_string(),
-            ));
-        }
-    }
-
-    // Increment uses
-    sqlx::query(&super::q(
-        "UPDATE invites SET uses = uses + 1 WHERE code = ?",
+    let row = sqlx::query(&super::q(&format!("{SELECT_INVITES} WHERE code = ?")))
+        .bind(code)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut invite = row_to_invite(row);
+    let banned: Option<String> = sqlx::query_scalar(&super::q(
+        "SELECT user_id FROM bans WHERE space_id = ? AND user_id = ?",
     ))
-    .bind(code)
-    .execute(pool)
+    .bind(&invite.space_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
     .await?;
-
-    get_invite(pool, code).await
+    if banned.is_some() {
+        return Err(AppError::Forbidden("you are banned from this space".into()));
+    }
+    let existing: Option<String> = sqlx::query_scalar(&super::q(
+        "SELECT user_id FROM members WHERE space_id = ? AND user_id = ?",
+    ))
+    .bind(&invite.space_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if existing.is_some() {
+        tx.commit().await?;
+        return Ok((invite, false));
+    }
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S+00:00")
+        .to_string();
+    let result = sqlx::query(&super::q("UPDATE invites SET uses = uses + 1 WHERE code = ? AND (max_uses IS NULL OR max_uses = 0 OR uses < max_uses) AND (expires_at IS NULL OR expires_at > ?)"))
+        .bind(code).bind(&now).execute(&mut *tx).await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::BadRequest("invite expired or exhausted".into()));
+    }
+    let inserted = sqlx::query(&super::q("INSERT INTO members (space_id, user_id) VALUES (?, ?) ON CONFLICT (space_id, user_id) DO NOTHING"))
+        .bind(&invite.space_id).bind(user_id).execute(&mut *tx).await?;
+    if inserted.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok((invite, false));
+    }
+    invite.uses += 1;
+    tx.commit().await?;
+    Ok((invite, true))
 }

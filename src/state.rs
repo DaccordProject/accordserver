@@ -59,6 +59,7 @@ pub struct MfaTicket {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub security: Arc<crate::security::SecurityState>,
     pub db: AnyPool,
     /// True when the runtime database is PostgreSQL; false for SQLite.
     pub db_is_postgres: bool,

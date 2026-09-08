@@ -252,6 +252,16 @@ pub async fn admin_update_user(
     }
     query = query.bind(user_id);
     query.execute(pool).await?;
+    if input.force_password_reset == Some(true) || input.disabled == Some(true) {
+        sqlx::query(&super::q("DELETE FROM user_tokens WHERE user_id = ?"))
+            .bind(user_id)
+            .execute(pool)
+            .await?;
+        sqlx::query(&super::q("DELETE FROM bot_tokens WHERE user_id = ?"))
+            .bind(user_id)
+            .execute(pool)
+            .await?;
+    }
 
     get_user(pool, user_id).await
 }

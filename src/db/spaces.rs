@@ -257,10 +257,18 @@ pub async fn update_space(
 }
 
 pub async fn delete_space(pool: &AnyPool, space_id: &str) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(&super::q(
+        "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE space_id = ?)",
+    ))
+    .bind(space_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(&super::q("DELETE FROM spaces WHERE id = ?"))
         .bind(space_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

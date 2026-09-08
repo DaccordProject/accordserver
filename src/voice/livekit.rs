@@ -43,6 +43,7 @@ impl LiveKitClient {
     ) -> Result<String, AppError> {
         let room_name = Self::room_name(channel_id);
         AccessToken::with_api_key(&self.api_key, &self.api_secret)
+            .with_ttl(std::time::Duration::from_secs(60))
             .with_identity(user_id)
             .with_name(display_name)
             .with_grants(VideoGrants {
@@ -92,19 +93,24 @@ impl LiveKitClient {
         Ok(())
     }
 
-    pub async fn remove_participant(&self, channel_id: &str, user_id: &str) {
+    pub async fn try_remove_participant(&self, channel_id: &str, user_id: &str) -> bool {
         let room_name = Self::room_name(channel_id);
-        if let Err(e) = self
-            .room_client
-            .remove_participant(&room_name, user_id)
-            .await
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.room_client.remove_participant(&room_name, user_id),
+        )
+        .await
         {
-            tracing::warn!(
-                "Failed to remove participant {} from {}: {}",
-                user_id,
-                room_name,
-                e
-            );
+            Ok(Ok(_)) => true,
+            Ok(Err(livekit_api::services::ServiceError::Twirp(
+                livekit_api::services::TwirpError::Twirp(error),
+            ))) if error.code == "not_found" => true,
+            result => {
+                tracing::warn!(
+                    "LiveKit eviction failed for {user_id} from {room_name}: {result:?}"
+                );
+                false
+            }
         }
     }
 

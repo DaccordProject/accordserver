@@ -1414,7 +1414,7 @@ async fn test_register_and_login() {
 }
 
 #[tokio::test]
-async fn test_first_registered_user_becomes_admin() {
+async fn test_public_registration_never_grants_admin() {
     let server = TestServer::new().await;
 
     // Seed a system user + default space (mirrors real server startup)
@@ -1437,8 +1437,8 @@ async fn test_first_registered_user_becomes_admin() {
     let body = parse_body(response).await;
     let first_token = body["data"]["token"].as_str().unwrap().to_string();
     assert_eq!(
-        body["data"]["user"]["is_admin"], true,
-        "first registered user should be admin"
+        body["data"]["user"]["is_admin"], false,
+        "first registered user must not become admin"
     );
 
     // Verify via /users/@me
@@ -1452,8 +1452,8 @@ async fn test_first_registered_user_becomes_admin() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = parse_body(response).await;
     assert_eq!(
-        body["data"]["is_admin"], true,
-        "first user should still be admin on @me lookup"
+        body["data"]["is_admin"], false,
+        "first user must not be admin on @me lookup"
     );
 
     // Register a second user — should NOT be admin

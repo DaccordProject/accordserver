@@ -11,8 +11,8 @@ services:
       RUST_LOG: accordserver=debug,tower_http=debug
       LIVEKIT_INTERNAL_URL: http://livekit:7880
       LIVEKIT_EXTERNAL_URL: wss://livekit.example.com
-      LIVEKIT_API_KEY: devkey
-      LIVEKIT_API_SECRET: secret
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?Set a unique LiveKit API key}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?Set a random LiveKit API secret}
       ACCORD_VOICE_BACKEND: livekit
       MASTER_SERVER_PUBLIC_URL: https://chat.example.com
       MASTER_SERVER_NAME: Accord Server
@@ -28,11 +28,13 @@ services:
     networks:
       - app-network
     command:
-      - "--dev"
+      - "--config"
+      - "/etc/livekit.yaml"
       - "--keys"
-      - "devkey: secret"
+      - "${LIVEKIT_API_KEY:?Set a unique LiveKit API key}: ${LIVEKIT_API_SECRET:?Set a random LiveKit API secret}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
     ports:
-      - "7880:7880"
       - "7881:7881"
       - "7882:7882/udp"
     labels:

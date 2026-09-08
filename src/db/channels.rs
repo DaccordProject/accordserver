@@ -165,10 +165,17 @@ pub async fn update_channel(
 }
 
 pub async fn delete_channel(pool: &AnyPool, channel_id: &str) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    // The original SQLite message FK has no ON DELETE CASCADE.
+    sqlx::query(&super::q("DELETE FROM messages WHERE channel_id = ?"))
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(&super::q("DELETE FROM channels WHERE id = ?"))
         .bind(channel_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

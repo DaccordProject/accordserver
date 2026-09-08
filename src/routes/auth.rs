@@ -15,7 +15,6 @@ use sqlx::Row;
 
 use crate::db;
 use crate::error::AppError;
-use crate::gateway::events::GatewayBroadcast;
 use crate::middleware::auth::{create_token_hash, generate_token, AuthUser};
 use crate::middleware::client_ip::ClientIp;
 use crate::snowflake;
@@ -184,6 +183,16 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
 
 fn check_totp_rate_limit(state: &AppState, user_id: &str) -> Result<(), AppError> {
     let now = Instant::now();
+    crate::security::reserve_tracker(
+        state,
+        &state.totp_attempts,
+        user_id,
+        |t| now.duration_since(t.window_start).as_secs() >= TOTP_WINDOW_SECS,
+        || TotpAttemptTracker {
+            failures: 0,
+            window_start: now,
+        },
+    )?;
     if let Some(tracker) = state.totp_attempts.get(user_id) {
         let elapsed = now.duration_since(tracker.window_start).as_secs();
         if elapsed < TOTP_WINDOW_SECS && tracker.failures >= TOTP_MAX_FAILURES {
@@ -195,24 +204,9 @@ fn check_totp_rate_limit(state: &AppState, user_id: &str) -> Result<(), AppError
 }
 
 fn record_totp_failure(state: &AppState, user_id: &str) {
-    let now = Instant::now();
-    state
-        .totp_attempts
-        .entry(user_id.to_string())
-        .and_modify(|t| {
-            let elapsed = now.duration_since(t.window_start).as_secs();
-            if elapsed >= TOTP_WINDOW_SECS {
-                // Reset window
-                t.failures = 1;
-                t.window_start = now;
-            } else {
-                t.failures += 1;
-            }
-        })
-        .or_insert(TotpAttemptTracker {
-            failures: 1,
-            window_start: now,
-        });
+    if let Some(mut tracker) = state.totp_attempts.get_mut(user_id) {
+        tracker.failures = tracker.failures.saturating_add(1);
+    }
 }
 
 fn clear_totp_failures(state: &AppState, user_id: &str) {
@@ -225,6 +219,16 @@ fn clear_totp_failures(state: &AppState, user_id: &str) {
 
 fn check_login_rate_limit(state: &AppState, username: &str) -> Result<(), AppError> {
     let now = Instant::now();
+    crate::security::reserve_tracker(
+        state,
+        &state.login_failures,
+        username,
+        |t| now.duration_since(t.window_start).as_secs() >= LOGIN_WINDOW_SECS,
+        || LoginFailureTracker {
+            failures: 0,
+            window_start: now,
+        },
+    )?;
     if let Some(tracker) = state.login_failures.get(username) {
         let elapsed = now.duration_since(tracker.window_start).as_secs();
         if elapsed < LOGIN_WINDOW_SECS && tracker.failures >= LOGIN_MAX_FAILURES {
@@ -236,23 +240,9 @@ fn check_login_rate_limit(state: &AppState, username: &str) -> Result<(), AppErr
 }
 
 fn record_login_failure(state: &AppState, username: &str) {
-    let now = Instant::now();
-    state
-        .login_failures
-        .entry(username.to_string())
-        .and_modify(|t| {
-            let elapsed = now.duration_since(t.window_start).as_secs();
-            if elapsed >= LOGIN_WINDOW_SECS {
-                t.failures = 1;
-                t.window_start = now;
-            } else {
-                t.failures += 1;
-            }
-        })
-        .or_insert(LoginFailureTracker {
-            failures: 1,
-            window_start: now,
-        });
+    if let Some(mut tracker) = state.login_failures.get_mut(username) {
+        tracker.failures = tracker.failures.saturating_add(1);
+    }
 }
 
 fn clear_login_failures(state: &AppState, username: &str) {
@@ -285,6 +275,16 @@ fn check_register_rate_limit(state: &AppState, ip: &str) -> Result<(), AppError>
 
     let ip_hash = hash_ip(ip);
     let now = Instant::now();
+    crate::security::reserve_tracker(
+        state,
+        &state.register_attempts,
+        &ip_hash,
+        |t| now.duration_since(t.window_start).as_secs() >= REGISTER_WINDOW_SECS,
+        || RegisterAttemptTracker {
+            attempts: 0,
+            window_start: now,
+        },
+    )?;
     if let Some(tracker) = state.register_attempts.get(&ip_hash) {
         let elapsed = now.duration_since(tracker.window_start).as_secs();
         if elapsed < REGISTER_WINDOW_SECS && tracker.attempts >= REGISTER_MAX_ATTEMPTS {
@@ -297,23 +297,9 @@ fn check_register_rate_limit(state: &AppState, ip: &str) -> Result<(), AppError>
 
 fn record_register_attempt(state: &AppState, ip: &str) {
     let ip_hash = hash_ip(ip);
-    let now = Instant::now();
-    state
-        .register_attempts
-        .entry(ip_hash)
-        .and_modify(|t| {
-            let elapsed = now.duration_since(t.window_start).as_secs();
-            if elapsed >= REGISTER_WINDOW_SECS {
-                t.attempts = 1;
-                t.window_start = now;
-            } else {
-                t.attempts += 1;
-            }
-        })
-        .or_insert(RegisterAttemptTracker {
-            attempts: 1,
-            window_start: now,
-        });
+    if let Some(mut tracker) = state.register_attempts.get_mut(&ip_hash) {
+        tracker.attempts = tracker.attempts.saturating_add(1);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -496,9 +482,9 @@ pub async fn register(
     let id = snowflake::generate();
     let display_name = input.display_name.as_deref().unwrap_or(username);
 
-    // First registered user becomes admin when no admins exist yet
-    let admin_count = db::admin::count_admins(&state.db).await?;
-    let is_admin = admin_count == 0;
+    // Instance administrators are provisioned explicitly by the local operator.
+    // Administrators are provisioned locally with --bootstrap-admin.
+    let is_admin = false;
 
     sqlx::query(
         &crate::db::q("INSERT INTO users (id, username, display_name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)"),
@@ -539,87 +525,6 @@ pub async fn register(
                 );
             }
         }
-
-        // First registered user (server admin) becomes the owner of the default space
-        // and receives the Admin role within it
-        if is_admin {
-            // Transfer space ownership from System user to first real user
-            let now_fn = crate::db::now_sql(state.db_is_postgres);
-            if let Err(e) = sqlx::query(&crate::db::q(&format!(
-                "UPDATE spaces SET owner_id = ?, updated_at = {now_fn} WHERE id = ?"
-            )))
-            .bind(&id)
-            .bind(&space_id)
-            .execute(&state.db)
-            .await
-            {
-                tracing::error!(
-                    "failed to transfer default space ownership to user {}: {:?}",
-                    id,
-                    e
-                );
-            } else {
-                tracing::info!(
-                    "transferred default space {} ownership to first admin user {}",
-                    space_id,
-                    id
-                );
-            }
-
-            // Assign the Admin role to the first user in the default space
-            let admin_role: Option<(String,)> = sqlx::query_as(&crate::db::q(
-                "SELECT id FROM roles WHERE space_id = ? AND name = 'Admin' LIMIT 1",
-            ))
-            .bind(&space_id)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or(None);
-
-            if let Some((admin_role_id,)) = admin_role {
-                if let Err(e) = db::members::add_role_to_member(
-                    &state.db,
-                    &space_id,
-                    &id,
-                    &admin_role_id,
-                    state.db_is_postgres,
-                )
-                .await
-                {
-                    tracing::error!(
-                        "failed to assign Admin role to user {} in default space: {:?}",
-                        id,
-                        e
-                    );
-                } else {
-                    tracing::info!(
-                        "assigned Admin role to first admin user {} in default space {}",
-                        id,
-                        space_id
-                    );
-                }
-            }
-        }
-
-        // Broadcast member.join to the space
-        if let Ok(member) = db::members::get_member_row(&state.db, &space_id, &id).await {
-            if let Some(ref dispatcher) = *state.gateway_tx.read().await {
-                let event = serde_json::json!({
-                    "op": 0,
-                    "type": "member.join",
-                    "data": {
-                        "space_id": space_id,
-                        "user": user,
-                        "joined_at": member.joined_at
-                    }
-                });
-                let _ = dispatcher.send(GatewayBroadcast {
-                    space_id: Some(space_id),
-                    target_user_ids: None,
-                    event,
-                    intent: "members".to_string(),
-                });
-            }
-        }
     }
 
     // Generate bearer token with 30-day expiry
@@ -656,6 +561,11 @@ pub async fn login(
     Json(input): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Per-username brute-force protection: max 5 failed attempts per 15 minutes
+    if input.username.len() > 32 || input.password.len() > 128 {
+        return Err(AppError::Unauthorized(
+            "invalid username or password".into(),
+        ));
+    }
     check_login_rate_limit(&state, &input.username)?;
 
     // Look up user by username (must not be a bot, must have password_hash)
@@ -712,17 +622,23 @@ pub async fn login(
         let ticket_hash = create_token_hash(&ticket);
         let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
 
-        // Invalidate any existing MFA tickets for this user to prevent concurrent
-        // brute-force via multiple independent tickets.
-        state.mfa_tickets.retain(|_, v| v.user_id != user_id);
-
-        state.mfa_tickets.insert(
-            ticket_hash,
-            MfaTicket {
-                user_id: user_id.clone(),
-                expires_at,
-            },
-        );
+        // Replace the previous ticket atomically with the global capacity check.
+        {
+            let _guard = state.security.tracker_lock.lock().unwrap();
+            state
+                .mfa_tickets
+                .retain(|_, v| v.user_id != user_id && v.expires_at > chrono::Utc::now());
+            if state.mfa_tickets.len() >= crate::security::MAX_TRACKERS {
+                return Err(AppError::RateLimited { retry_after: 60 });
+            }
+            state.mfa_tickets.insert(
+                ticket_hash,
+                MfaTicket {
+                    user_id: user_id.clone(),
+                    expires_at,
+                },
+            );
+        }
 
         return Ok(Json(serde_json::json!({
             "data": {
@@ -1413,6 +1329,16 @@ async fn find_guest_space(
 fn check_guest_rate_limit(state: &AppState, ip: &str) -> Result<(), AppError> {
     let ip_hash = hash_ip(ip);
     let now = Instant::now();
+    crate::security::reserve_tracker(
+        state,
+        &state.guest_attempts,
+        &ip_hash,
+        |t| now.duration_since(t.window_start).as_secs() >= GUEST_WINDOW_SECS,
+        || GuestAttemptTracker {
+            attempts: 0,
+            window_start: now,
+        },
+    )?;
     if let Some(tracker) = state.guest_attempts.get(&ip_hash) {
         let elapsed = now.duration_since(tracker.window_start).as_secs();
         if elapsed < GUEST_WINDOW_SECS && tracker.attempts >= GUEST_MAX_ATTEMPTS {
@@ -1425,23 +1351,9 @@ fn check_guest_rate_limit(state: &AppState, ip: &str) -> Result<(), AppError> {
 
 fn record_guest_attempt(state: &AppState, ip: &str) {
     let ip_hash = hash_ip(ip);
-    let now = Instant::now();
-    state
-        .guest_attempts
-        .entry(ip_hash)
-        .and_modify(|t| {
-            let elapsed = now.duration_since(t.window_start).as_secs();
-            if elapsed >= GUEST_WINDOW_SECS {
-                t.attempts = 1;
-                t.window_start = now;
-            } else {
-                t.attempts += 1;
-            }
-        })
-        .or_insert(GuestAttemptTracker {
-            attempts: 1,
-            window_start: now,
-        });
+    if let Some(mut tracker) = state.guest_attempts.get_mut(&ip_hash) {
+        tracker.attempts = tracker.attempts.saturating_add(1);
+    }
 }
 
 /// Minimal percent-encoding for otpauth URI values.

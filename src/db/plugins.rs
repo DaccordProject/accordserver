@@ -8,7 +8,12 @@ const SELECT_PLUGINS: &str = "SELECT id, space_id, name, plugin_type, runtime, d
 
 fn row_to_plugin(row: sqlx::any::AnyRow) -> Plugin {
     let manifest_str: String = row.get("manifest_json");
-    let manifest: PluginManifest = serde_json::from_str(&manifest_str).unwrap_or_default();
+    let mut manifest: PluginManifest = serde_json::from_str(&manifest_str).unwrap_or_default();
+    manifest.signed = crate::db::get_bool(&row, "signed");
+    manifest.bundle_hash = row.get("bundle_hash");
+    if !manifest.signed {
+        manifest.signature.clear();
+    }
     let has_icon = crate::db::get_bool(&row, "has_icon");
     let id: String = row.get("id");
     let space_id: String = row.get("space_id");
@@ -218,9 +223,19 @@ pub async fn create_session(
     host_user_id: &str,
     use_lobby: bool,
 ) -> Result<PluginSession, AppError> {
+    let plugin = get_plugin(pool, plugin_id).await?;
+    let channel = crate::db::channels::get_channel_row(pool, channel_id).await?;
+    if channel.space_id.as_deref() != Some(&plugin.space_id) {
+        return Err(AppError::Forbidden(
+            "plugin and channel must belong to the same space".into(),
+        ));
+    }
+    crate::middleware::permissions::require_channel_membership(pool, channel_id, host_user_id)
+        .await?;
     let id = snowflake::generate();
     let initial_state = if use_lobby { "lobby" } else { "running" };
 
+    let mut tx = pool.begin().await?;
     sqlx::query(&super::q(
         "INSERT INTO plugin_sessions (id, plugin_id, channel_id, host_user_id, state) VALUES (?, ?, ?, ?, ?)",
     ))
@@ -229,11 +244,13 @@ pub async fn create_session(
     .bind(channel_id)
     .bind(host_user_id)
     .bind(initial_state)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     // Add host as a participant (player by default, slot 0)
-    add_participant(pool, &id, host_user_id, "player", Some(0)).await?;
+    sqlx::query(&super::q("INSERT INTO plugin_session_participants (session_id, user_id, role, slot_index) VALUES (?, ?, 'player', 0)"))
+        .bind(&id).bind(host_user_id).execute(&mut *tx).await?;
+    tx.commit().await?;
 
     get_session(pool, &id).await
 }
@@ -297,6 +314,7 @@ pub async fn add_participant(
     role: &str,
     slot_index: Option<i64>,
 ) -> Result<(), AppError> {
+    require_session_access(pool, session_id, user_id).await?;
     sqlx::query(&super::q(
         "INSERT INTO plugin_session_participants (session_id, user_id, role, slot_index) VALUES (?, ?, ?, ?)",
     ))
@@ -316,6 +334,7 @@ pub async fn update_participant_role(
     role: &str,
     slot_index: Option<i64>,
 ) -> Result<(), AppError> {
+    require_session_access(pool, session_id, user_id).await?;
     let result = sqlx::query(&super::q(
         "UPDATE plugin_session_participants SET role = ?, slot_index = ? WHERE session_id = ? AND user_id = ?",
     ))
@@ -430,4 +449,23 @@ pub async fn get_session_user_ids(
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Apply the same space and channel boundaries at every participant mutation.
+pub async fn require_session_access(
+    pool: &AnyPool,
+    session_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let session = get_session(pool, session_id).await?;
+    let plugin = get_plugin(pool, &session.plugin_id).await?;
+    let channel = crate::db::channels::get_channel_row(pool, &session.channel_id).await?;
+    if channel.space_id.as_deref() != Some(&plugin.space_id) {
+        return Err(AppError::Forbidden(
+            "plugin session crosses space boundary".into(),
+        ));
+    }
+    crate::middleware::permissions::require_channel_membership(pool, &session.channel_id, user_id)
+        .await?;
+    Ok(())
 }

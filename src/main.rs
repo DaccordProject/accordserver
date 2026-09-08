@@ -62,22 +62,6 @@ async fn main() {
     run_main_server(config).await;
 }
 
-fn redact_database_url(url: &str) -> String {
-    if url.starts_with("sqlite:") {
-        return url.to_string();
-    }
-    match reqwest::Url::parse(url) {
-        Ok(mut parsed) => {
-            if parsed.password().is_some() {
-                let _ = parsed.set_password(Some("REDACTED"));
-            }
-            parsed.set_query(None);
-            parsed.to_string()
-        }
-        Err(_) => "[database URL redacted]".into(),
-    }
-}
-
 fn print_banner(config: &Config) {
     let version = env!("CARGO_PKG_VERSION");
     let voice = match &config.livekit {
@@ -105,7 +89,7 @@ fn print_banner(config: &Config) {
     status_line(format!("  \x1b[2mport\x1b[0m         {}", config.port));
     status_line(format!(
         "  \x1b[2mdatabase\x1b[0m     {}",
-        redact_database_url(&config.database_url)
+        accordserver::security::redact_database_url(&config.database_url)
     ));
     status_line(format!("  \x1b[2mvoice\x1b[0m        {voice}"));
     status_line(format!("  \x1b[2mmaster\x1b[0m       {master}"));
@@ -140,6 +124,26 @@ async fn run_main_server(config: Config) {
     let db = accordserver::db::create_pool(&config.database_url)
         .await
         .expect("failed to create database pool");
+
+    if let Some(username) = config.bootstrap_admin.as_deref() {
+        let password = std::env::var("ACCORD_BOOTSTRAP_PASSWORD")
+            .expect("set ACCORD_BOOTSTRAP_PASSWORD for local admin provisioning");
+        accordserver::security::bootstrap_admin(&db, username, &password)
+            .await
+            .expect("could not create admin (existing usernames are never overwritten)");
+        status_line(
+            "  administrator created; remove ACCORD_BOOTSTRAP_PASSWORD before starting the server"
+                .into(),
+        );
+        return;
+    }
+    if accordserver::db::admin::count_admins(&db)
+        .await
+        .unwrap_or(0)
+        == 0
+    {
+        status_line("  no administrator configured; use --bootstrap-admin with ACCORD_BOOTSTRAP_PASSWORD locally".into());
+    }
 
     let (dispatcher, gateway_tx) = Dispatcher::new();
 
@@ -214,6 +218,7 @@ async fn run_main_server(config: Config) {
     };
 
     let state = AppState {
+        security: Arc::new(accordserver::security::SecurityState::default()),
         db,
         db_is_postgres: accordserver::db::url_is_postgres(&config.database_url),
         voice_states: Arc::new(DashMap::new()),
@@ -265,6 +270,31 @@ async fn run_main_server(config: Config) {
         tokio::spawn(accordserver::federation::run(state.clone()));
     }
 
+    let orphan_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            if let Err(err) =
+                accordserver::storage::reconcile_attachment_orphans(&orphan_state).await
+            {
+                tracing::warn!("attachment orphan scan will retry: {err}");
+            }
+        }
+    });
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            accordserver::security::reconcile_voice_access(&cleanup_state).await;
+            if let Err(err) =
+                accordserver::storage::drain_attachment_deletions(&cleanup_state).await
+            {
+                tracing::warn!("attachment cleanup will retry: {err}");
+            }
+        }
+    });
     let app = accordserver::routes::router(state);
 
     let listener = TcpListener::bind((config.bind.as_str(), config.port))

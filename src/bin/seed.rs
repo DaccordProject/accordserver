@@ -69,7 +69,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/accord.db?mode=rwc".into());
 
-    println!("accord-seed: connecting to {database_url}");
+    println!(
+        "accord-seed: connecting to {}",
+        accordserver::security::redact_database_url(&database_url)
+    );
     // Ensure data directory exists (matches server startup behaviour)
     std::fs::create_dir_all("data").ok();
     let is_postgres = db::url_is_postgres(&database_url);

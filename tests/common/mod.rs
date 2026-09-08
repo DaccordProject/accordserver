@@ -63,6 +63,8 @@ impl TestServer {
             // Truncate all application tables (order doesn't matter with CASCADE).
             // server_settings is re-created by get_settings() below.
             for table in &[
+                "voice_evictions",
+                "attachment_deletions",
                 "read_states",
                 "reactions",
                 "pinned_messages",
@@ -125,6 +127,7 @@ impl TestServer {
         let settings = db::settings::get_settings(&pool).await.unwrap_or_default();
 
         let state = AppState {
+            security: Arc::new(accordserver::security::SecurityState::default()),
             db: pool,
             db_is_postgres: is_postgres,
             voice_states: Arc::new(DashMap::new()),

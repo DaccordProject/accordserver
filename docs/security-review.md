@@ -39,3 +39,15 @@ Regression coverage is in `tests/security_sweep.rs`, `tests/ws.rs`, and unit tes
 - `cargo audit --json`: one remaining inactive RSA advisory described above; no other warnings.
 
 PostgreSQL integration tests require a PostgreSQL instance and were not run in this environment.
+
+## Follow-up sweep — 2026-09-08
+
+The follow-up addresses #59, #62–#67, #69 and #71–#75 with explicit local admin provisioning, atomic invite acceptance, HTML escaping and invite-page CSP, trusted proxy allowlists, bounded authentication/preview/socket work, live gateway credential revalidation, actual native-plugin signature verification, plugin channel/participant boundaries, and durable attachment deletion. Seed output now shares database URL redaction. SQLite channel and space deletion explicitly removes dependent messages within the same transaction.
+
+For #68, active voice access is reconciled after API mutations and periodically. A durable eviction queue calls LiveKit with a timeout and retries failures, including after a restart. New join tokens expire after 60 seconds. The self-hosted LiveKit cached-token reconnection limitation remains: removal does not revoke an already issued JWT. Keep #68 open for deployment-level validation and stronger reconnection control; the active-participant and retry fixes are covered by a mocked Twirp test.
+
+Operational changes, signing format, credential rotation, administrator provisioning, proxy configuration and old attachment cleanup are documented in [security operations](security-operations.md). Existing native bundles must be reinstalled with a trusted detached signature. No new release tag is part of this follow-up.
+
+Regression coverage adds `tests/security_followup.rs`, gateway revocation and admission/flood tests, trusted proxy tests, and Ed25519 positive/tampering/unknown-signer tests. The attachment tests cover metadata gating before unlink, channel/space/account/message deletion, encoded-path bypasses, and old orphan cleanup. The previous heartbeat flood test now expects an explicit rate-limit close; normal heartbeat tests remain.
+
+Follow-up local validation: `cargo test --locked --all-targets` passed all 420 tests; `cargo clippy --locked --all-targets -- -D warnings`, `cargo fmt --check` and `git diff --check` passed. PostgreSQL and Docker Compose are unavailable locally; PostgreSQL is covered by the repository's push CI.

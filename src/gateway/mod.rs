@@ -7,7 +7,7 @@ pub mod session;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashSet, VecDeque};
@@ -34,10 +34,21 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 /// Status values a client may ask for.
 const VALID_STATUSES: [&str; 4] = ["online", "idle", "dnd", "invisible"];
 
-pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+pub async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    crate::middleware::client_ip::ClientIp(ip): crate::middleware::client_ip::ClientIp,
+) -> Response {
+    let permit = match state.security.sockets.enter(&ip) {
+        Ok(permit) => permit,
+        Err(err) => return err.into_response(),
+    };
     ws.max_message_size(256 * 1024)
         .max_frame_size(256 * 1024)
-        .on_upgrade(move |socket| handle_socket(socket, state))
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            handle_socket(socket, state).await;
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +99,7 @@ async fn await_handshake(
 ) -> Option<Handshake> {
     let timeout = tokio::time::sleep(HANDSHAKE_TIMEOUT);
     tokio::pin!(timeout);
+    let mut frames = 0;
 
     loop {
         tokio::select! {
@@ -96,6 +108,11 @@ async fn await_handshake(
                 return None;
             }
             msg = stream.next() => {
+                frames += 1;
+                if frames > 10 {
+                    send_close(sink, events::close_code::RATE_LIMITED, "handshake rate exceeded").await;
+                    return None;
+                }
                 let text = match msg {
                     Some(Ok(Message::Text(text))) => text,
                     // A broken stream can keep yielding errors, so treat the
@@ -269,6 +286,37 @@ async fn classify_broadcast(
         .get("type")
         .and_then(|t| t.as_str())
         .unwrap_or("");
+    if event_type.starts_with("plugin.") {
+        if let Some(space_id) = broadcast.space_id.as_deref() {
+            if crate::middleware::permissions::require_membership(&state.db, space_id, user_id)
+                .await
+                .is_err()
+            {
+                return Delivery::Skip;
+            }
+        }
+        let data = &broadcast.event["data"];
+        let channel = if let Some(id) = data["channel_id"].as_str() {
+            Some(id.to_string())
+        } else if let Some(id) = data["session_id"].as_str() {
+            db::plugins::get_session(&state.db, id)
+                .await
+                .ok()
+                .map(|s| s.channel_id)
+        } else {
+            None
+        };
+        if let Some(channel) = channel {
+            if crate::middleware::permissions::require_channel_membership(
+                &state.db, &channel, user_id,
+            )
+            .await
+            .is_err()
+            {
+                return Delivery::Skip;
+            }
+        }
+    }
 
     // Our own membership changing is checked *before* the space filter below.
     // On a join the space isn't in `space_ids` yet, so the filter would drop
@@ -776,7 +824,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     // Channel for sending messages to this client
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(64);
 
     let Some(handshake) = await_handshake(&state, &mut ws_sink, &mut ws_stream).await else {
         return;
@@ -830,9 +878,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
+    let _user_permit = match state.security.gateway_users.enter(&auth.user_id) {
+        Ok(permit) => permit,
+        Err(_) => {
+            send_close(
+                &mut ws_sink,
+                events::close_code::RATE_LIMITED,
+                "too many sessions",
+            )
+            .await;
+            return;
+        }
+    };
+    let token_hash = auth.token_hash;
+    let guest = auth.is_guest;
+    let mut auth_interval = tokio::time::interval(std::time::Duration::from_secs(2));
     let user_id = auth.user_id;
     let is_bot = auth.is_bot;
-    let is_admin = auth.is_admin;
 
     // Memberships and mutes are reloaded on RESUME too — they can change while
     // a client is away — and `space_ids` is additionally refreshed mid-session
@@ -989,10 +1051,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         const WS_RATE_LIMIT: u32 = 120;
         const WS_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
         let mut ws_msg_count: u32 = 0;
+        let mut control_count = 0;
+        let mut heartbeat_count = 0;
+        let mut control_window = tokio::time::Instant::now();
         let mut ws_rate_window_start = tokio::time::Instant::now();
 
         loop {
             tokio::select! {
+                _ = auth_interval.tick() => {
+                    let Some(_current) = auth_resolve::resolve_hash(&state.db, &token_hash, is_bot, guest).await else {
+                        resumable = false;
+                        send_close(&mut ws_sink, 4004, "credential revoked or expired").await;
+                        break;
+                    };
+                }
                 // Outgoing messages from the session channel
                 Some(msg) = rx.recv() => {
                     if ws_sink.send(Message::Text(msg.into())).await.is_err() {
@@ -1008,6 +1080,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 } => {
                     if let Some(broadcast) = broadcast {
+                        if auth_resolve::resolve_hash(&state.db, &token_hash, is_bot, guest).await.is_none() {
+                            resumable = false;
+                            break;
+                        }
                         match classify_broadcast(&state, &broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents).await {
                             Delivery::Skip => {}
                             Delivery::RefreshMutes => {
@@ -1050,15 +1126,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
                 // Incoming messages
                 msg = ws_stream.next() => {
+                    if control_window.elapsed() >= std::time::Duration::from_secs(10) {
+                        control_window = tokio::time::Instant::now();
+                        control_count = 0;
+                        heartbeat_count = 0;
+                    }
+                    // Cap all frames, including protocol ping/pong and heartbeat floods.
+                    control_count += 1;
+                    if control_count > 150 {
+                        resumable = false;
+                        send_close(&mut ws_sink, events::close_code::RATE_LIMITED, "frame rate exceeded").await;
+                        break;
+                    }
+                    let Some(current) = auth_resolve::resolve_hash(&state.db, &token_hash, is_bot, guest).await else {
+                        resumable = false;
+                        send_close(&mut ws_sink, 4004, "credential revoked or expired").await;
+                        break;
+                    };
+                    let is_admin = current.is_admin;
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             let parsed = serde_json::from_str::<GatewayMessage>(&text).ok();
 
-                            // Keepalives are never throttled. Dropping a heartbeat
-                            // lets `last_heartbeat` go stale and kills the session
-                            // at the next timeout check, which selectively culls
-                            // the busiest clients — exactly the ones least likely
-                            // to deserve it.
+                            // Keepalives have a separate flood budget from application messages.
                             let is_heartbeat =
                                 parsed.as_ref().map(|m| m.op) == Some(events::opcode::HEARTBEAT);
                             if !is_heartbeat {
@@ -1085,6 +1175,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                             match gw_msg.op {
                                 op if op == events::opcode::HEARTBEAT => {
+                                    heartbeat_count += 1;
+                                    if heartbeat_count > 10 {
+                                        resumable = false;
+                                        send_close(&mut ws_sink, events::close_code::RATE_LIMITED, "heartbeat rate exceeded").await;
+                                        break;
+                                    }
                                     last_heartbeat = tokio::time::Instant::now();
                                     let ack = serde_json::json!({
                                         "op": events::opcode::HEARTBEAT_ACK
@@ -1218,7 +1314,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     if let Some(ref prev_ch) = prev {
                                                         if !state.test_mode {
                                                             if let Some(ref lk) = state.livekit_client {
-                                                                lk.remove_participant(prev_ch, &user_id).await;
+                                                                if let Err(err) = crate::security::evict_voice_participant(&state, prev_ch, &user_id).await { tracing::warn!("voice eviction could not be queued: {err}"); }
                                                                 lk.delete_room_if_empty(prev_ch).await;
                                                             }
                                                         }
@@ -1261,7 +1357,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                                 }
                                                             }),
                                                         };
-                                                        let _ = tx.send(server_update.to_string());
+                                                        let _ = tx.try_send(server_update.to_string());
                                                     }
                                                 }
                                             } else {
@@ -1292,7 +1388,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                         // LiveKit cleanup
                                                         if !state.test_mode {
                                                             if let Some(ref lk) = state.livekit_client {
-                                                                lk.remove_participant(left_channel, &user_id).await;
+                                                                if let Err(err) = crate::security::evict_voice_participant(&state, left_channel, &user_id).await { tracing::warn!("voice eviction could not be queued: {err}"); }
                                                                 lk.delete_room_if_empty(left_channel).await;
                                                             }
                                                         }
@@ -1354,7 +1450,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             // LiveKit cleanup on disconnect
             if !state.test_mode {
                 if let Some(ref lk) = state.livekit_client {
-                    lk.remove_participant(ch_id, &user_id).await;
+                    if let Err(err) =
+                        crate::security::evict_voice_participant(&state, ch_id, &user_id).await
+                    {
+                        tracing::warn!("voice eviction could not be queued: {err}");
+                    }
                     lk.delete_room_if_empty(ch_id).await;
                 }
             }
@@ -1429,7 +1529,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut claim: Option<oneshot::Sender<Handover>> = None;
     loop {
         tokio::select! {
+            _ = auth_interval.tick() => {
+                if auth_resolve::resolve_hash(&state.db, &token_hash, is_bot, guest).await.is_none() { break; }
+            }
             reply = claim_rx.recv() => {
+                if auth_resolve::resolve_hash(&state.db, &token_hash, is_bot, guest).await.is_none() { break; }
                 claim = reply;
                 break;
             }
@@ -1442,6 +1546,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             } => {
                 let Some(broadcast) = broadcast else { continue };
+                if auth_resolve::resolve_hash(&state.db, &token_hash, is_bot, guest).await.is_none() { break; }
                 match classify_broadcast(&state, &broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents).await {
                     Delivery::Skip => {}
                     Delivery::RefreshMutes => {
@@ -1512,77 +1617,33 @@ async fn end_dm_call_if_empty(
 }
 
 struct ResolvedAuth {
+    token_hash: String,
     user_id: String,
     is_bot: bool,
-    is_admin: bool,
     is_guest: bool,
     guest_space_id: Option<String>,
 }
 
 async fn resolve_token(state: &AppState, token: &str) -> Option<ResolvedAuth> {
-    // Token format: "Bot xxx" or "Bearer xxx"
-    let (user_id, is_bot) = if let Some(tok) = token.strip_prefix("Bot ") {
-        let token_hash = auth_resolve::create_token_hash(tok);
-        let row = sqlx::query_as::<_, (String,)>(&crate::db::q(
-            "SELECT user_id FROM bot_tokens WHERE token_hash = ?",
-        ))
-        .bind(&token_hash)
-        .fetch_optional(&state.db)
-        .await
-        .ok()??;
-        (row.0, true)
-    } else {
-        // Neither prefix means the token is unusable — `?` bails the same way
-        // the old trailing `else { return None }` did.
-        let tok = token.strip_prefix("Bearer ")?;
-        let token_hash = auth_resolve::create_token_hash(tok);
-        let now_fn = crate::db::now_sql(state.db_is_postgres);
-        let sql = crate::db::q(&format!(
-            "SELECT user_id FROM user_tokens WHERE token_hash = ? AND expires_at > {now_fn}",
-        ));
-        let row = sqlx::query_as::<_, (String,)>(&sql)
-            .bind(&token_hash)
-            .fetch_optional(&state.db)
-            .await
-            .ok()?;
-
-        if let Some(row) = row {
-            (row.0, false)
-        } else {
-            // Try guest token lookup
-            let now_fn2 = crate::db::now_sql(state.db_is_postgres);
-            let guest_sql = crate::db::q(&format!(
-                "SELECT gt.space_id FROM guest_tokens gt JOIN spaces s ON s.id = gt.space_id WHERE gt.token_hash = ? AND gt.expires_at > {now_fn2} AND s.allow_guest_access = TRUE",
-            ));
-            let guest_row = sqlx::query_as::<_, (String,)>(&guest_sql)
-                .bind(&token_hash)
-                .fetch_optional(&state.db)
-                .await
-                .ok()??;
-
-            let guest_user_id = format!("guest:{}", &token_hash[..16]);
-            return Some(ResolvedAuth {
-                user_id: guest_user_id,
-                is_bot: false,
-                is_admin: false,
-                is_guest: true,
-                guest_space_id: Some(guest_row.0),
-            });
-        }
-    };
-
-    let user = crate::db::users::get_user(&state.db, &user_id).await.ok()?;
-
-    // Disabled users cannot connect to the gateway
-    if user.disabled {
+    if token.len() > 256 {
         return None;
     }
-
+    let (raw, bot) = if let Some(raw) = token.strip_prefix("Bot ") {
+        (raw, true)
+    } else {
+        (token.strip_prefix("Bearer ")?, false)
+    };
+    let hash = auth_resolve::create_token_hash(raw);
+    let user = match auth_resolve::resolve_hash(&state.db, &hash, bot, false).await {
+        Some(user) => user,
+        None if !bot => auth_resolve::resolve_hash(&state.db, &hash, false, true).await?,
+        None => return None,
+    };
     Some(ResolvedAuth {
-        user_id,
-        is_bot,
-        is_admin: user.is_admin,
-        is_guest: false,
-        guest_space_id: None,
+        token_hash: hash,
+        user_id: user.user_id,
+        is_bot: user.is_bot,
+        is_guest: user.is_guest,
+        guest_space_id: user.guest_space_id,
     })
 }
