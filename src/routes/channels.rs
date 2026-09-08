@@ -126,6 +126,9 @@ pub async fn delete_channel(
         // For DM channels, "delete" means remove the caller from participants
         require_dm_access(&state.db, &channel_id, &auth.user_id).await?;
         db::dm_participants::remove_participant(&state.db, &channel_id, &auth.user_id).await?;
+        // Leaving the DM ends any call the caller still has open in it.
+        crate::security::revoke_channel_voice_access(&state, &channel_id, Some(&auth.user_id))
+            .await;
 
         let remaining = db::dm_participants::count_participants(&state.db, &channel_id).await?;
         if remaining <= 0 {
@@ -206,6 +209,8 @@ pub async fn delete_channel(
     }
 
     db::channels::delete_channel(&state.db, &channel_id).await?;
+    // The room no longer belongs to anything; disconnect whoever is still in it.
+    crate::security::revoke_channel_voice_access(&state, &channel_id, None).await;
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
@@ -422,11 +427,14 @@ pub async fn remove_recipient(
     }
 
     db::dm_participants::remove_participant(&state.db, &channel_id, &user_id).await?;
+    // Removal from the group revokes the call along with the channel.
+    crate::security::revoke_channel_voice_access(&state, &channel_id, Some(&user_id)).await;
 
     let remaining = db::dm_participants::count_participants(&state.db, &channel_id).await?;
     if remaining <= 1 {
         // Not enough participants — delete the channel
         db::channels::delete_channel(&state.db, &channel_id).await?;
+        crate::security::revoke_channel_voice_access(&state, &channel_id, None).await;
         // Broadcast channel.delete to remaining participant if any
         let remaining_ids =
             db::dm_participants::list_participant_ids(&state.db, &channel_id).await?;

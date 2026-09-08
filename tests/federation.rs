@@ -859,6 +859,48 @@ async fn inbound_member_join_and_leave_applied() {
     assert_eq!(member_count(&server, &space_id, "carol@b.test").await, 0);
 }
 
+/// A remote departure has to take the replica's voice session with it. The
+/// inbox is mounted outside `/api/v1`, so nothing here goes through the layer
+/// that opportunistically reconciles voice access.
+#[tokio::test]
+async fn inbound_member_leave_clears_voice_state() {
+    let mut server = TestServer::new().await;
+    server.enable_federation("a.test");
+    let bob = peer_identity("b");
+    register_peer(&server, "b.test", &bob, "trusted").await;
+    let (space_id, _channel_id) = server.mirror_remote_space("b.test").await;
+
+    let join = json!({
+        "event_id": "evt-join-voice", "origin": "b.test", "space_id": space_id,
+        "type": "m.member.join",
+        "payload": { "user": { "id": "carol@b.test", "username": "carol", "display_name": "Carol" } }
+    });
+    let req = signed_request(&bob, "b.test", "a.test", INBOX, &join);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+
+    let voice_channel = server.create_voice_channel(&space_id, "voice").await;
+    accordserver::voice::state::join_voice_channel(
+        &server.state,
+        "carol@b.test",
+        Some(&space_id),
+        &voice_channel,
+        "session",
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let leave = json!({
+        "event_id": "evt-leave-voice", "origin": "b.test", "space_id": space_id,
+        "type": "m.member.leave",
+        "payload": { "user_id": "carol@b.test" }
+    });
+    let req = signed_request(&bob, "b.test", "a.test", INBOX, &leave);
+    assert_eq!(status_of(&server, req).await, StatusCode::OK);
+    assert!(!server.state.voice_states.contains_key("carol@b.test"));
+}
+
 #[tokio::test]
 async fn inbound_message_update_and_delete_applied() {
     let mut server = TestServer::new().await;

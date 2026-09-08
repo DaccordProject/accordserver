@@ -274,6 +274,10 @@ pub async fn kick_member(
 
     db::members::remove_member(&state.db, &space_id, &user_id).await?;
 
+    // Losing membership has to take voice with it: a kicked member who stays in
+    // a LiveKit room keeps sending and receiving media from the space.
+    crate::security::revoke_space_voice_access(&state, &space_id, Some(&user_id)).await;
+
     // Broadcast member.leave to the space
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
@@ -339,6 +343,7 @@ pub async fn leave_space(
         let actor = db::users::get_user(&state.db, &auth.user_id).await?;
         crate::federation::forward::forward_leave(&state, &home, &space_id, &actor).await?;
         db::members::remove_member(&state.db, &space_id, &auth.user_id).await?;
+        crate::security::revoke_space_voice_access(&state, &space_id, Some(&auth.user_id)).await;
         if let Some(ref dispatcher) = *state.gateway_tx.read().await {
             let event = serde_json::json!({
                 "op": 0,
@@ -366,6 +371,8 @@ pub async fn leave_space(
     } else {
         db::members::remove_member(&state.db, &space_id, &auth.user_id).await?;
     }
+
+    crate::security::revoke_space_voice_access(&state, &space_id, Some(&auth.user_id)).await;
 
     // Broadcast member.leave to the space
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {

@@ -371,6 +371,7 @@ async fn serve_leave(
         .unwrap_or_default();
 
     crate::db::members::remove_member(&state.db, &req.space_id, &req.actor.id).await?;
+    crate::security::revoke_space_voice_access(state, &req.space_id, Some(&req.actor.id)).await;
 
     // Broadcast locally and fan the departure out to remaining interested peers.
     crate::federation::broadcast_space(

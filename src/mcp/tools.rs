@@ -536,6 +536,7 @@ async fn tool_delete_channel(state: &AppState, args: &Value) -> Result<String, S
     db::channels::delete_channel(&state.db, channel_id)
         .await
         .map_err(map_err)?;
+    crate::security::revoke_channel_voice_access(state, channel_id, None).await;
     Ok(format!("Channel {channel_id} deleted"))
 }
 
@@ -545,6 +546,7 @@ async fn tool_kick_member(state: &AppState, args: &Value) -> Result<String, Stri
     db::members::remove_member(&state.db, space_id, user_id)
         .await
         .map_err(map_err)?;
+    crate::security::revoke_space_voice_access(state, space_id, Some(user_id)).await;
 
     broadcast_member_leave(state, space_id, user_id).await;
 
@@ -573,6 +575,7 @@ async fn tool_ban_user(state: &AppState, args: &Value) -> Result<String, String>
     )
     .await
     .map_err(map_err)?;
+    crate::security::revoke_space_voice_access(state, space_id, Some(user_id)).await;
 
     if member_removed {
         broadcast_member_leave(state, space_id, user_id).await;

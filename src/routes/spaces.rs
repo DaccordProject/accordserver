@@ -181,6 +181,9 @@ pub async fn delete_space(
     }
 
     db::spaces::delete_space(&state.db, &space_id).await?;
+    // The space's voice channels are gone with it; clear out anyone still in
+    // one of their LiveKit rooms.
+    crate::security::revoke_space_voice_access(&state, &space_id, None).await;
     Ok(Json(serde_json::json!({ "data": null })))
 }
 
