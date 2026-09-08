@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "multipart"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "any", "migrate"] }
 serde = { version = "1", features = ["derive"] }
@@ -46,7 +47,6 @@ path = "src/bin/migrate_to_postgres.rs"
 test-seed = []
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.28"
 http = "1"
 serial_test = "3"

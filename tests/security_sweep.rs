@@ -426,3 +426,73 @@ async fn guest_tokens_are_scoped_and_stop_working_when_guest_access_is_disabled(
         StatusCode::UNAUTHORIZED
     );
 }
+
+#[tokio::test]
+async fn attachments_are_served_with_media_metadata_and_range_support() {
+    let server = TestServer::new().await;
+    let user = server.create_user_with_token("uploader").await;
+    let space = server.create_space(&user.user.id, "space").await;
+    let channel = server.create_channel(&space, "general").await;
+    let response = server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::POST,
+            &format!("/api/v1/channels/{channel}/messages"),
+            &user.auth_header(),
+            &json!({"content":"uploaded clip"}),
+        ))
+        .await
+        .unwrap();
+    let message = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    sqlx::query(&accordserver::db::q(
+        "INSERT INTO attachments (id, message_id, filename, size, url) VALUES (?, ?, ?, ?, ?)",
+    ))
+    .bind("clip")
+    .bind(&message)
+    .bind("clip.mp3")
+    .bind(8_i64)
+    .bind("/cdn/attachments/clip/clip.mp3")
+    .execute(server.pool())
+    .await
+    .unwrap();
+    let dir = server.state.storage_path.join("attachments/clip");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("clip.mp3"), b"0123456789")
+        .await
+        .unwrap();
+
+    let req = http::Request::builder()
+        .uri("/cdn/attachments/clip/clip.mp3")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // The real media type, not a blanket application/octet-stream.
+    assert_eq!(response.headers()["content-type"], "audio/mpeg");
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    // Cacheable, so scrolling a channel does not re-download every attachment.
+    assert!(response.headers()["cache-control"]
+        .to_str()
+        .unwrap()
+        .contains("max-age=31536000"));
+    // Inert content guarantees still hold.
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(response.headers()["content-disposition"], "attachment");
+
+    // Seeking works, which inline audio/video playback depends on.
+    let req = http::Request::builder()
+        .uri("/cdn/attachments/clip/clip.mp3")
+        .header("Range", "bytes=2-5")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()["content-range"], "bytes 2-5/10");
+    let body = axum::body::to_bytes(response.into_body(), 64)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"2345");
+}
