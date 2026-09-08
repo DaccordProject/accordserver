@@ -2199,3 +2199,283 @@ async fn test_report_unknown_category_rejected() {
     let response = server.router().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+/// A report filed from a DM has no space to belong to: it is stored without
+/// one, so it can reach the instance operator instead of a moderator team that
+/// does not exist for that conversation.
+#[tokio::test]
+async fn test_direct_report_from_a_dm_has_no_space() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let dm_id = server.create_dm(&bob.user.id, &alice.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{dm_id}/messages"),
+        &bob.auth_header(),
+        &serde_json::json!({ "content": "you are a waste of space" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let msg_id = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/reports",
+        &alice.auth_header(),
+        &serde_json::json!({
+            "target_type": "message",
+            "target_id": msg_id,
+            "channel_id": dm_id,
+            "category": "harassment",
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = parse_body(response).await;
+    assert!(
+        body["data"]["space_id"].is_null(),
+        "a DM report must not be attributed to a space: {}",
+        body["data"]
+    );
+    assert_eq!(body["data"]["status"], "pending");
+    assert_eq!(body["data"]["reporter_id"], alice.user.id);
+}
+
+/// Reporting a user with no channel at all — the "Report user" action from a
+/// profile opened outside any space.
+#[tokio::test]
+async fn test_direct_report_of_a_user_without_a_channel() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/reports",
+        &alice.auth_header(),
+        &serde_json::json!({
+            "target_type": "user",
+            "target_id": bob.user.id,
+            "category": "harassment",
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(body["data"]["space_id"].is_null());
+    assert_eq!(body["data"]["target_id"], bob.user.id);
+}
+
+/// Membership cannot gate this route, so channel read access does: naming
+/// someone else's DM must not file a report about it.
+#[tokio::test]
+async fn test_direct_report_rejects_a_channel_the_reporter_cannot_read() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let carol = server.create_user_with_token("carol").await;
+    let dm_id = server.create_dm(&bob.user.id, &alice.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{dm_id}/messages"),
+        &bob.auth_header(),
+        &serde_json::json!({ "content": "private" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let msg_id = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/reports",
+        &carol.auth_header(),
+        &serde_json::json!({
+            "target_type": "message",
+            "target_id": msg_id,
+            "channel_id": dm_id,
+            "category": "harassment",
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// A channel that turns out to belong to a space routes to that space's
+/// moderators rather than disappearing into the operator queue.
+#[tokio::test]
+async fn test_direct_report_of_a_space_channel_is_attributed_to_the_space() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &serde_json::json!({ "content": "message to report" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let msg_id = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/reports",
+        &alice.auth_header(),
+        &serde_json::json!({
+            "target_type": "message",
+            "target_id": msg_id,
+            "channel_id": channel_id,
+            "category": "spam",
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(parse_body(response).await["data"]["space_id"], space_id);
+}
+
+#[tokio::test]
+async fn test_direct_report_rejects_an_unknown_category() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/reports",
+        &alice.auth_header(),
+        &serde_json::json!({
+            "target_type": "user",
+            "target_id": bob.user.id,
+            "category": "not_a_category",
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// The queue that makes a space-less report actionable. Per-space queues cannot
+/// show one, so without this the client's promise that the report reaches the
+/// server operator would be empty.
+#[tokio::test]
+async fn test_admin_report_queue_serves_space_less_reports() {
+    let server = TestServer::new().await;
+    let admin = server.create_admin_with_token("root").await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let dm_id = server.create_dm(&bob.user.id, &alice.user.id).await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{dm_id}/messages"),
+        &bob.auth_header(),
+        &serde_json::json!({ "content": "abuse" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let msg_id = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/reports",
+        &alice.auth_header(),
+        &serde_json::json!({
+            "target_type": "message",
+            "target_id": msg_id,
+            "channel_id": dm_id,
+            "category": "harassment",
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let report_id = parse_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A space report, to prove the scope filter separates the two.
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/reports"),
+        &alice.auth_header(),
+        &serde_json::json!({
+            "target_type": "user",
+            "target_id": bob.user.id,
+            "category": "spam",
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let req = authenticated_request(
+        Method::GET,
+        "/api/v1/admin/reports?scope=direct",
+        &admin.auth_header(),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = parse_body(response).await;
+    let ids: Vec<String> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![report_id.clone()],
+        "scope=direct must return only the report with no space"
+    );
+
+    let req = authenticated_request(Method::GET, "/api/v1/admin/reports", &admin.auth_header());
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(
+        parse_body(response).await["data"].as_array().unwrap().len(),
+        2
+    );
+
+    // Resolving it is the operator's half of the promise.
+    let req = authenticated_json_request(
+        Method::PATCH,
+        &format!("/api/v1/admin/reports/{report_id}"),
+        &admin.auth_header(),
+        &serde_json::json!({ "status": "actioned", "action_taken": "account suspended" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["status"], "actioned");
+    assert_eq!(body["data"]["actioned_by"], admin.user.id);
+}
+
+#[tokio::test]
+async fn test_admin_report_queue_refuses_a_non_admin() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+
+    let req = authenticated_request(Method::GET, "/api/v1/admin/reports", &alice.auth_header());
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let req = authenticated_json_request(
+        Method::PATCH,
+        "/api/v1/admin/reports/123",
+        &alice.auth_header(),
+        &serde_json::json!({ "status": "dismissed" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}

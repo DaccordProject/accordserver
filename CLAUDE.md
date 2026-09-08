@@ -78,6 +78,7 @@ All REST endpoints are under `/api/v1` with a rate-limit middleware layer. The r
 - **Reactions** — Add/remove per-user, list by emoji, bulk remove
 - **Emojis** — CRUD with role restrictions
 - **Reports** — File/list/get/resolve moderation reports per space. `GET /api/v1/reports/categories` (public) returns the accepted `category` values with display labels; `REPORT_CATEGORIES` in `src/routes/reports.rs` is the single source of truth and must stay in sync with the `reports.category` CHECK constraint.
+  `POST /api/v1/reports` files a report that belongs to **no** space — a direct message, or a user reported from outside any space — storing it with a NULL `space_id`. Membership cannot authorize that route, so channel read access does: naming a `channel_id` requires being able to read it, and a channel that turns out to belong to a space is attributed to that space so its moderators see it. Space-less reports are visible only through `GET /api/v1/admin/reports` (admin-only, instance-wide, `scope=all|direct|space`), resolved via `PATCH /api/v1/admin/reports/{report_id}`; per-space queues cannot show them.
 - **Voice** — Join/leave channels, voice regions, voice status, voice info (`GET /voice/info` returns `{ "backend": "livekit" }`)
 - **Applications** — Bot app CRUD, token reset
 - **Interactions** — Slash command stubs

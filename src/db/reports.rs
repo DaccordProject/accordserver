@@ -6,7 +6,10 @@ use crate::snowflake;
 #[derive(Debug, Clone)]
 pub struct ReportRow {
     pub id: String,
-    pub space_id: String,
+    /// `None` for a report that belongs to no space — a direct message, or a
+    /// user reported from outside any space. Those are the instance operator's
+    /// to action, not a space moderator's.
+    pub space_id: Option<String>,
     pub reporter_id: String,
     pub target_type: String,
     pub target_id: String,
@@ -23,7 +26,7 @@ pub struct ReportRow {
 #[allow(clippy::too_many_arguments)]
 pub async fn create_report(
     pool: &AnyPool,
-    space_id: &str,
+    space_id: Option<&str>,
     reporter_id: &str,
     target_type: &str,
     target_id: &str,
@@ -50,7 +53,7 @@ pub async fn create_report(
 }
 
 pub async fn get_report(pool: &AnyPool, report_id: &str) -> Result<ReportRow, AppError> {
-    let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>, String, Option<String>, String, Option<String>, Option<String>, String, Option<String>)>(
+    let row = sqlx::query_as::<_, (String, Option<String>, String, String, String, Option<String>, String, Option<String>, String, Option<String>, Option<String>, String, Option<String>)>(
         &super::q("SELECT id, space_id, reporter_id, target_type, target_id, channel_id, category, description, status, actioned_by, action_taken, created_at, resolved_at FROM reports WHERE id = ?")
     )
     .bind(report_id)
@@ -97,7 +100,7 @@ pub async fn list_reports(
         _,
         (
             String,
-            String,
+            Option<String>,
             String,
             String,
             String,
@@ -112,6 +115,95 @@ pub async fn list_reports(
         ),
     >(&query)
     .bind(space_id);
+
+    if let Some(s) = status_filter {
+        q = q.bind(s);
+    }
+    if let Some(b) = before {
+        q = q.bind(b);
+    }
+    q = q.bind(limit);
+
+    let rows = q.fetch_all(pool).await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| ReportRow {
+            id: row.0,
+            space_id: row.1,
+            reporter_id: row.2,
+            target_type: row.3,
+            target_id: row.4,
+            channel_id: row.5,
+            category: row.6,
+            description: row.7,
+            status: row.8,
+            actioned_by: row.9,
+            action_taken: row.10,
+            created_at: row.11,
+            resolved_at: row.12,
+        })
+        .collect())
+}
+
+/// Which reports the instance-wide operator queue should return.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReportScope {
+    /// Everything on the instance, space-scoped or not.
+    All,
+    /// Only reports with no space — the ones no space moderator can see.
+    Direct,
+    /// Only reports that belong to a space.
+    Space,
+}
+
+/// Instance-wide report list for a server admin, newest first.
+///
+/// The per-space [`list_reports`] cannot serve this: a report filed from a DM
+/// has no space, so it appears in no space's queue. Clients that aggregate
+/// per-space queues (the admin panel fans out over the spaces it knows) would
+/// never show it.
+pub async fn list_all_reports(
+    pool: &AnyPool,
+    scope: ReportScope,
+    status_filter: Option<&str>,
+    limit: i64,
+    before: Option<&str>,
+) -> Result<Vec<ReportRow>, AppError> {
+    let mut query = String::from("SELECT id, space_id, reporter_id, target_type, target_id, channel_id, category, description, status, actioned_by, action_taken, created_at, resolved_at FROM reports WHERE 1 = 1");
+
+    match scope {
+        ReportScope::All => {}
+        ReportScope::Direct => query.push_str(" AND space_id IS NULL"),
+        ReportScope::Space => query.push_str(" AND space_id IS NOT NULL"),
+    }
+    if status_filter.is_some() {
+        query.push_str(" AND status = ?");
+    }
+    if before.is_some() {
+        query.push_str(" AND id < ?");
+    }
+    query.push_str(" ORDER BY created_at DESC LIMIT ?");
+
+    let query = super::q(&query);
+    let mut q = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        ),
+    >(&query);
 
     if let Some(s) = status_filter {
         q = q.bind(s);

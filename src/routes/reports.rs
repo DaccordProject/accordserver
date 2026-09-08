@@ -5,7 +5,9 @@ use serde::Deserialize;
 use crate::db;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::middleware::permissions::require_permission;
+use crate::middleware::permissions::{
+    require_channel_read_access, require_permission, require_server_admin,
+};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -15,6 +17,15 @@ pub struct CreateReportBody {
     pub channel_id: Option<String>,
     pub category: String,
     pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AdminListReportsQuery {
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub before: Option<String>,
+    /// `direct` (no space), `space`, or omitted for everything.
+    pub scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,12 +88,8 @@ pub async fn list_report_categories() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "data": data }))
 }
 
-pub async fn create_report(
-    state: State<AppState>,
-    Path(space_id): Path<String>,
-    auth: AuthUser,
-    Json(body): Json<CreateReportBody>,
-) -> Result<Json<serde_json::Value>, AppError> {
+/// Validation every report shares, whatever route it arrived on.
+fn validate_report(body: &CreateReportBody) -> Result<&'static str, AppError> {
     let category = canonical_category(&body.category)
         .ok_or_else(|| AppError::BadRequest(format!("invalid category: {}", body.category)))?;
     if body.target_type != "message" && body.target_type != "user" {
@@ -90,7 +97,6 @@ pub async fn create_report(
             "target_type must be 'message' or 'user'".into(),
         ));
     }
-
     if let Some(ref desc) = body.description {
         if desc.len() > 4000 {
             return Err(AppError::BadRequest(
@@ -98,6 +104,153 @@ pub async fn create_report(
             ));
         }
     }
+    Ok(category)
+}
+
+/// File a report that is not scoped to a space: a direct message, or a user
+/// reported from outside any space.
+///
+/// A DM has no moderators, so there is nobody the space-scoped route could
+/// route this to — it belongs to the instance operator, and is stored with a
+/// NULL space_id for `GET /admin/reports` to serve. Without this route a client
+/// reporting DM abuse has nowhere to send it, which is the gap App Store
+/// guideline 1.2 rejects an app for (DaccordProject/daccord#290).
+///
+/// Membership cannot be the authorization check here, because the whole point
+/// is that there is no space to be a member of. Instead: when the report names
+/// a channel, the reporter must be able to read that channel — for a DM that
+/// means being one of its recipients, so this cannot be used to file reports
+/// about conversations you are not in. When the channel belongs to a space
+/// after all, the report is stored against that space so the moderators who can
+/// actually act on it see it in their own queue.
+pub async fn create_direct_report(
+    state: State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<CreateReportBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let category = validate_report(&body)?;
+
+    if auth.is_guest {
+        return Err(AppError::Forbidden(
+            "guests cannot file reports".to_string(),
+        ));
+    }
+
+    let mut space_id: Option<String> = None;
+    if let Some(ref channel_id) = body.channel_id {
+        let channel = db::channels::get_channel_row(&state.db, channel_id).await?;
+        require_channel_read_access(&state.db, &channel, Some(&auth), true).await?;
+        space_id = channel.space_id.clone();
+    }
+
+    let report = db::reports::create_report(
+        &state.db,
+        space_id.as_deref(),
+        &auth.user_id,
+        &body.target_type,
+        &body.target_id,
+        body.channel_id.as_deref(),
+        category,
+        body.description.as_deref(),
+    )
+    .await?;
+
+    let json = report_to_json(&report);
+
+    // A report that landed in a space still belongs on that space's moderation
+    // feed. One with no space has no such audience: the operator queue is a
+    // REST read, so there is nothing to broadcast to.
+    if let Some(ref space) = report.space_id {
+        if let Some(ref dispatcher) = *state.gateway_tx.read().await {
+            let event = serde_json::json!({
+                "op": 0,
+                "type": "report.create",
+                "data": json
+            });
+            let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
+                space_id: Some(space.clone()),
+                target_user_ids: None,
+                event,
+                intent: "moderation".to_string(),
+            });
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "data": json })))
+}
+
+/// Instance-wide report queue for a server admin.
+///
+/// This is the surface that makes a space-less report actionable: the client's
+/// admin panel aggregates per-space queues, so without it a DM report would be
+/// filed and then seen by nobody.
+pub async fn list_all_reports(
+    state: State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<AdminListReportsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+    let scope = match query.scope.as_deref() {
+        None | Some("") | Some("all") => db::reports::ReportScope::All,
+        Some("direct") => db::reports::ReportScope::Direct,
+        Some("space") => db::reports::ReportScope::Space,
+        Some(other) => {
+            return Err(AppError::BadRequest(format!(
+                "scope must be 'all', 'direct', or 'space', not '{other}'"
+            )))
+        }
+    };
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let reports = db::reports::list_all_reports(
+        &state.db,
+        scope,
+        query.status.as_deref(),
+        limit,
+        query.before.as_deref(),
+    )
+    .await?;
+    let data: Vec<serde_json::Value> = reports.iter().map(report_to_json).collect();
+    Ok(Json(serde_json::json!({ "data": data })))
+}
+
+/// Resolve any report on the instance, including one with no space.
+pub async fn resolve_any_report(
+    state: State<AppState>,
+    Path(report_id): Path<String>,
+    auth: AuthUser,
+    Json(body): Json<ResolveReportBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+
+    if body.status != "actioned" && body.status != "dismissed" {
+        return Err(AppError::BadRequest(
+            "status must be 'actioned' or 'dismissed'".into(),
+        ));
+    }
+
+    // 404s an unknown id rather than reporting success for nothing.
+    db::reports::get_report(&state.db, &report_id).await?;
+
+    let report = db::reports::resolve_report(
+        &state.db,
+        &report_id,
+        &auth.user_id,
+        &body.status,
+        body.action_taken.as_deref(),
+        state.db_is_postgres,
+    )
+    .await?;
+
+    Ok(Json(serde_json::json!({ "data": report_to_json(&report) })))
+}
+
+pub async fn create_report(
+    state: State<AppState>,
+    Path(space_id): Path<String>,
+    auth: AuthUser,
+    Json(body): Json<CreateReportBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let category = validate_report(&body)?;
 
     // Verify user is a member of the space
     db::members::get_member_row(&state.db, &space_id, &auth.user_id)
@@ -106,7 +259,7 @@ pub async fn create_report(
 
     let report = db::reports::create_report(
         &state.db,
-        &space_id,
+        Some(space_id.as_str()),
         &auth.user_id,
         &body.target_type,
         &body.target_id,
@@ -163,7 +316,7 @@ pub async fn get_report(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_permission(&state.db, &space_id, &auth, "moderate_members").await?;
     let report = db::reports::get_report(&state.db, &report_id).await?;
-    if report.space_id != space_id {
+    if report.space_id.as_deref() != Some(space_id.as_str()) {
         return Err(AppError::NotFound("report not found".to_string()));
     }
     Ok(Json(serde_json::json!({ "data": report_to_json(&report) })))
@@ -185,7 +338,7 @@ pub async fn resolve_report(
 
     // Verify report belongs to this space
     let existing = db::reports::get_report(&state.db, &report_id).await?;
-    if existing.space_id != space_id {
+    if existing.space_id.as_deref() != Some(space_id.as_str()) {
         return Err(AppError::NotFound("report not found".to_string()));
     }
 

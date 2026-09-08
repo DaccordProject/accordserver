@@ -260,6 +260,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         )
         // Reports
         .route("/reports/categories", get(reports::list_report_categories))
+        // Reports that belong to no space (a DM, or a user reported from
+        // outside a space): they go to the instance operator, not to space
+        // moderators who do not exist for that content.
+        .route("/reports", post(reports::create_direct_report))
         .route(
             "/spaces/{space_id}/reports",
             get(reports::list_reports).post(reports::create_report),
@@ -516,6 +520,13 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             post(interactions::interaction_callback),
         )
         // Admin
+        // The instance-wide report queue — the only place a space-less report
+        // is visible, since per-space queues cannot show one.
+        .route("/admin/reports", get(reports::list_all_reports))
+        .route(
+            "/admin/reports/{report_id}",
+            patch(reports::resolve_any_report),
+        )
         .route("/admin/spaces", get(admin::list_spaces))
         .route("/admin/spaces/{space_id}", patch(admin::update_space))
         .route("/admin/users", get(admin::list_users))
