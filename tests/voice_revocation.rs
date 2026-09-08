@@ -410,9 +410,10 @@ async fn a_failed_eviction_stays_queued_for_retry() {
     .await;
 
     assert!(!server.state.voice_states.contains_key(&member.user.id));
-    let queued: i64 = sqlx::query_scalar(
+    // `db::q` rewrites the `?` placeholders for Postgres.
+    let queued: i64 = sqlx::query_scalar(&accordserver::db::q(
         "SELECT COUNT(*) FROM voice_evictions WHERE channel_id = ? AND user_id = ?",
-    )
+    ))
     .bind(&channel)
     .bind(&member.user.id)
     .fetch_one(server.pool())
