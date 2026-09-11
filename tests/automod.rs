@@ -833,3 +833,25 @@ async fn real_video_sampler_extracts_five_spaced_frames() {
     }
     assert_eq!(hashes.len(), 5);
 }
+
+#[tokio::test]
+async fn existing_system_username_cannot_stall_or_impersonate_automod() {
+    let (server, _, member, _, channel, _) = setup(0.1, false).await;
+    let named_system = server.create_user_with_token("System").await;
+    let (_, body) = upload(&server, &member, &channel, b"allowed").await;
+    automod::process_one(&server.state).await.unwrap();
+    assert_eq!(
+        automod::get(&server.state, id(&body)).await.unwrap().status,
+        "published"
+    );
+    assert!(
+        !db::users::get_user(server.pool(), &named_system.user.id)
+            .await
+            .unwrap()
+            .system
+    );
+    let actor = db::users::get_or_create_system_user(server.pool())
+        .await
+        .unwrap();
+    assert_ne!(actor, named_system.user.id);
+}
