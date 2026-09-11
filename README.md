@@ -31,6 +31,10 @@ cargo test
 
 The server creates a SQLite database by default and runs migrations automatically on startup. Set `DATABASE_URL` to a `postgres://` connection string to use PostgreSQL instead (see [Database](#database)).
 
+## Attachment moderation
+
+Optional local CPU moderation scans images and five sampled video frames before publication, with per-space policies and moderator review. See [setup, rules, and API documentation](docs/automod.md).
+
 ## Configuration
 
 Configuration comes from environment variables, with optional CLI flags as overrides (handy when launching from a wrapper like the [desktop tray app](desktop/README.md)).

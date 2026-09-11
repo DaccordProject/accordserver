@@ -401,13 +401,24 @@ pub fn temp_storage_path() -> PathBuf {
 
 /// Retry durable deletions; a failed unlink stays queued across restarts.
 pub async fn drain_attachment_deletions(state: &crate::state::AppState) -> Result<(), AppError> {
+    // Release may reuse an attachment ID after a moderator withdraws it. Do
+    // not unlink a newly released copy using a stale deletion queue entry.
+    let _automod_guard = state.automod.processing.lock().await;
     let rows: Vec<(String,)> = sqlx::query_as("SELECT url FROM attachment_deletions LIMIT 100")
         .fetch_all(&state.db)
         .await?;
     for (url,) in rows {
         // Federation can attach remote URLs; these have no local file to unlink.
         if url.starts_with("/cdn/attachments/") {
-            delete_file(&state.storage_path, &url).await?;
+            let (live,): (i64,) = sqlx::query_as(&crate::db::q(
+                "SELECT COUNT(*) FROM attachments WHERE url=?",
+            ))
+            .bind(&url)
+            .fetch_one(&state.db)
+            .await?;
+            if live == 0 {
+                delete_file(&state.storage_path, &url).await?;
+            }
         }
         sqlx::query(&crate::db::q(
             "DELETE FROM attachment_deletions WHERE url = ?",
@@ -434,7 +445,7 @@ pub async fn serve_attachment(
     }
     let url = format!("/cdn/attachments/{path}");
     let exists: (i64,) = sqlx::query_as(&crate::db::q(
-        "SELECT COUNT(*) FROM attachments WHERE url = ?",
+        "SELECT COUNT(*) FROM attachments a WHERE url = ? AND NOT EXISTS (SELECT 1 FROM automod_uploads u WHERE u.id=a.id AND u.status <> 'published')",
     ))
     .bind(&url)
     .fetch_one(&state.db)
@@ -459,12 +470,11 @@ pub async fn serve_attachment(
         .await
         .map_err(|err| AppError::Internal(format!("attachment read failed: {err}")))?
         .map(axum::body::Body::new);
-    // The URL carries the attachment snowflake, so a hit never changes underneath us.
-    // Private: these are readable by URL alone and should not land in shared caches.
-    response.headers_mut().insert(
-        "Cache-Control",
-        "private, max-age=31536000, immutable".parse().unwrap(),
-    );
+    // Moderation can withdraw an attachment after publication. Require a fresh
+    // server check on every download, including Range/conditional requests.
+    response
+        .headers_mut()
+        .insert("Cache-Control", "private, no-cache".parse().unwrap());
     Ok(response)
 }
 

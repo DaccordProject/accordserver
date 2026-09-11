@@ -346,7 +346,7 @@ pub async fn create_message_multipart(
     Path(channel_id): Path<String>,
     auth: AuthUser,
     mut multipart: Multipart,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
     let space_id =
         require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
     if !space_id.is_empty() {
@@ -391,6 +391,11 @@ pub async fn create_message_multipart(
                 .bytes()
                 .await
                 .map_err(|e| AppError::BadRequest(format!("failed to read file: {e}")))?;
+            if bytes.len() > max_attachment_size {
+                return Err(AppError::PayloadTooLarge(
+                    "attachment exceeds maximum size".into(),
+                ));
+            }
             files.push((filename, content_type, bytes.to_vec()));
         }
     }
@@ -405,6 +410,8 @@ pub async fn create_message_multipart(
     }
 
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    let _admission = state.automod.admission.lock().await;
+    let automod_policy = crate::automod::preflight(&state, &channel, &auth, &files).await?;
     let msg = db::messages::create_message(
         &state.db,
         &channel_id,
@@ -414,6 +421,21 @@ pub async fn create_message_multipart(
     )
     .await?;
 
+    let mut pending_ids = Vec::new();
+    if let Some(policy) = &automod_policy {
+        match crate::automod::enqueue(&state, &channel, &msg.id, &auth.user_id, policy, &files)
+            .await
+        {
+            Ok(ids) => pending_ids = ids,
+            Err(error) => {
+                sqlx::query(&db::q("DELETE FROM messages WHERE id = ?"))
+                    .bind(&msg.id)
+                    .execute(&state.db)
+                    .await?;
+                return Err(error);
+            }
+        }
+    }
     apply_mention_counts(&state, &msg).await;
 
     // Save files and create attachment records.
@@ -423,7 +445,7 @@ pub async fn create_message_multipart(
     // to the client, the URL stored in the database, and the file path on
     // disk are all derived from the same stable identifier and cannot drift.
     let mut attachments: Vec<Attachment> = Vec::new();
-    for (filename, content_type, bytes) in &files {
+    for (filename, content_type, bytes) in files.iter().filter(|_| automod_policy.is_none()) {
         let attachment_id = crate::snowflake::generate();
 
         let (url, size) = storage::save_attachment(
@@ -475,7 +497,15 @@ pub async fn create_message_multipart(
         });
     }
 
-    Ok(Json(serde_json::json!({ "data": json })))
+    let status = if pending_ids.is_empty() {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::ACCEPTED
+    };
+    Ok((
+        status,
+        Json(serde_json::json!({ "data": json, "pending_attachments": pending_ids })),
+    ))
 }
 
 pub async fn update_message(

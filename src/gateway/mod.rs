@@ -330,6 +330,38 @@ async fn classify_broadcast(
         );
     }
 
+    // Moderation intent alone is not an authorization grant. Recheck current
+    // permissions at delivery so revoked moderators lose access immediately.
+    if event_type == "automod.upload_update" {
+        let auth = crate::middleware::auth::AuthUser {
+            user_id: user_id.to_string(),
+            is_admin: false,
+            is_bot: false,
+            is_guest: false,
+            guest_space_id: None,
+        };
+        let admin = crate::db::users::get_user(&state.db, user_id)
+            .await
+            .map(|u| u.is_admin && !u.disabled)
+            .unwrap_or(false);
+        let allowed = if let Some(space) = &broadcast.space_id {
+            admin
+                || crate::middleware::permissions::require_permission(
+                    &state.db,
+                    space,
+                    &auth,
+                    "moderate_members",
+                )
+                .await
+                .is_ok()
+        } else {
+            admin
+        };
+        if !allowed {
+            return Delivery::Skip;
+        }
+    }
+
     let should_receive = match (&broadcast.target_user_ids, &broadcast.space_id) {
         (Some(targets), _) => targets.iter().any(|t| t == user_id),
         (None, Some(sid)) => space_ids.contains(sid),

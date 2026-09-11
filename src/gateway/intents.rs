@@ -45,7 +45,10 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
         "call.ring" | "call.accept" | "call.decline" | "call.cancel" | "call.end" => {
             Some("voice_states")
         }
-        "ban.create" | "ban.delete" | "audit_log.create" => Some("moderation"),
+        "ban.create" | "ban.delete" | "audit_log.create" | "automod.upload_update" => {
+            Some("moderation")
+        }
+        "automod.upload_status" => Some("messages"),
         "invite.create" | "invite.delete" => Some("spaces"),
         "emoji.create" | "emoji.update" | "emoji.delete" => Some("emojis"),
         "soundboard.create" | "soundboard.update" | "soundboard.delete" | "soundboard.play" => {

@@ -63,6 +63,11 @@ impl TestServer {
             // Truncate all application tables (order doesn't matter with CASCADE).
             // server_settings is re-created by get_settings() below.
             for table in &[
+                "automod_events",
+                "automod_uploads",
+                "automod_cache",
+                "automod_hashes",
+                "automod_policies",
                 "voice_evictions",
                 "attachment_deletions",
                 "read_states",
@@ -127,6 +132,7 @@ impl TestServer {
         let settings = db::settings::get_settings(&pool).await.unwrap_or_default();
 
         let state = AppState {
+            automod: Arc::new(accordserver::automod::AutoMod::default()),
             security: Arc::new(accordserver::security::SecurityState::default()),
             db: pool,
             db_is_postgres: is_postgres,

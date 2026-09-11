@@ -55,7 +55,7 @@ pub async fn get_attachments_for_message(
 ) -> Result<Vec<Attachment>, AppError> {
     let rows = sqlx::query(&super::q(
         "SELECT id, filename, description, content_type, size, url, width, height \
-         FROM attachments WHERE message_id = ?",
+         FROM attachments a WHERE message_id = ? AND NOT EXISTS (SELECT 1 FROM automod_uploads u WHERE u.id=a.id AND u.status <> 'published')",
     ))
     .bind(message_id)
     .fetch_all(pool)
@@ -76,7 +76,7 @@ pub async fn get_attachments_for_messages(
     let in_clause = placeholders.join(", ");
     let sql = format!(
         "SELECT id, message_id, filename, description, content_type, size, url, width, height \
-         FROM attachments WHERE message_id IN ({in_clause}) ORDER BY id ASC"
+         FROM attachments a WHERE message_id IN ({in_clause}) AND NOT EXISTS (SELECT 1 FROM automod_uploads u WHERE u.id=a.id AND u.status <> 'published') ORDER BY id ASC"
     );
 
     let sql = super::q(&sql);

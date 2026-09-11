@@ -473,11 +473,11 @@ async fn attachments_are_served_with_media_metadata_and_range_support() {
     // The real media type, not a blanket application/octet-stream.
     assert_eq!(response.headers()["content-type"], "audio/mpeg");
     assert_eq!(response.headers()["accept-ranges"], "bytes");
-    // Cacheable, so scrolling a channel does not re-download every attachment.
+    // Revalidate cached media so moderation withdrawal cannot be bypassed.
     assert!(response.headers()["cache-control"]
         .to_str()
         .unwrap()
-        .contains("max-age=31536000"));
+        .contains("no-cache"));
     // Inert content guarantees still hold.
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
     assert_eq!(response.headers()["content-disposition"], "attachment");
