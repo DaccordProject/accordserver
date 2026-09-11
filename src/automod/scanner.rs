@@ -124,19 +124,64 @@ pub fn decode(bytes: &[u8]) -> Result<image::RgbImage, String> {
         .map(|i| i.into_rgb8())
         .map_err(|e| e.to_string())
 }
-fn input(bytes: &[u8]) -> Result<Vec<f32>, String> {
+struct ModelInput {
+    data: Vec<f32>,
+    width: u32,
+    height: u32,
+}
+fn input(bytes: &[u8]) -> Result<ModelInput, String> {
     let rgb = decode(bytes)?;
-    let side = rgb.width().max(rgb.height());
-    let mut padded = image::RgbImage::new(side, side);
-    image::imageops::replace(&mut padded, &rgb, 0, 0);
-    let resized = image::imageops::resize(&padded, 320, 320, image::imageops::FilterType::Triangle);
+    let (width, height) = rgb.dimensions();
+    let side = width.max(height);
+    // Match NudeNet's OpenCV path: top-left square padding, INTER_LINEAR
+    // resize, BGR planar channels, and [0,1] normalization. The reference
+    // converts OpenCV BGR to RGB and blobFromImage swaps it back to BGR.
+    // Sample the virtual padded square directly to avoid a second full image.
+    let scale = f64::from(side) / 320.0;
     let mut data = vec![0.0; 3 * 320 * 320];
-    for (i, p) in resized.pixels().enumerate() {
-        for c in 0..3 {
-            data[c * 320 * 320 + i] = f32::from(p[c]) / 255.0;
+    if side == 320 {
+        for (x, y, pixel) in rgb.enumerate_pixels() {
+            for c in 0..3 {
+                data[c * 320 * 320 + y as usize * 320 + x as usize] =
+                    f32::from(pixel[2 - c]) / 255.0;
+            }
+        }
+        return Ok(ModelInput {
+            data,
+            width,
+            height,
+        });
+    }
+    for y in 0..320 {
+        let sy = ((y as f64 + 0.5) * scale - 0.5).clamp(0.0, f64::from(side - 1));
+        let y0 = sy.floor() as u32;
+        let y1 = (y0 + 1).min(side - 1);
+        let fy = sy - f64::from(y0);
+        for x in 0..320 {
+            let sx = ((x as f64 + 0.5) * scale - 0.5).clamp(0.0, f64::from(side - 1));
+            let x0 = sx.floor() as u32;
+            let x1 = (x0 + 1).min(side - 1);
+            let fx = sx - f64::from(x0);
+            for c in 0..3 {
+                let pixel = |px, py| {
+                    if px < rgb.width() && py < rgb.height() {
+                        f64::from(rgb.get_pixel(px, py)[2 - c])
+                    } else {
+                        0.0
+                    }
+                };
+                let upper = pixel(x0, y0) * (1.0 - fx) + pixel(x1, y0) * fx;
+                let lower = pixel(x0, y1) * (1.0 - fx) + pixel(x1, y1) * fx;
+                data[c * 320 * 320 + y * 320 + x] =
+                    ((upper * (1.0 - fy) + lower * fy).round() / 255.0) as f32;
+            }
         }
     }
-    Ok(data)
+    Ok(ModelInput {
+        data,
+        width,
+        height,
+    })
 }
 pub struct Local {
     version: String,
@@ -151,7 +196,7 @@ impl Local {
         let weights =
             std::fs::read(model).map_err(|e| format!("cannot read automod model: {e}"))?;
         let version = format!(
-            "nudenet320n:{:x}:rgb-triangle-nms-v1",
+            "nudenet320n:{:x}:bgr-bilinear-clipped-nms-v2",
             Sha256::digest(&weights)
         );
         // ort 2.0 rc10 panics on a missing/incompatible dynamic library.
@@ -192,9 +237,9 @@ impl Scanner for Local {
             tokio::task::spawn_blocking(move || {
                 // This permit stays inside the blocking task even if the caller times out.
                 let _permit = permit;
-                let tensor =
-                    ort::value::Tensor::from_array(([1usize, 3, 320, 320], input(&bytes)?))
-                        .map_err(|e| e.to_string())?;
+                let input = input(&bytes)?;
+                let tensor = ort::value::Tensor::from_array(([1usize, 3, 320, 320], input.data))
+                    .map_err(|e| e.to_string())?;
                 let mut session = session.lock().map_err(|e| e.to_string())?;
                 let outputs = session
                     .run(ort::inputs![tensor])
@@ -205,7 +250,7 @@ impl Scanner for Local {
                 if shape.len() != 3 || shape[0] != 1 || shape[1] != 22 || shape[2] != 2100 {
                     return Err("expected NudeNet 320n output [1,22,2100]".into());
                 }
-                let scores = postprocess(data, 2100)?;
+                let scores = postprocess(data, 2100, input.width, input.height)?;
                 Ok(ScanResult {
                     sampled_timestamps_ms: vec![],
                     model_version: version,
@@ -218,7 +263,12 @@ impl Scanner for Local {
     }
 }
 /// NudeNet's top class per box, confidence cutoff and class-agnostic NMS.
-fn postprocess(data: &[f32], n: usize) -> Result<BTreeMap<String, f32>, String> {
+fn postprocess(
+    data: &[f32],
+    n: usize,
+    width: u32,
+    height: u32,
+) -> Result<BTreeMap<String, f32>, String> {
     if data.len() != 22 * n || data.iter().any(|v| !v.is_finite()) {
         return Err("invalid model output".into());
     }
@@ -232,14 +282,18 @@ fn postprocess(data: &[f32], n: usize) -> Result<BTreeMap<String, f32>, String> 
             return Err("invalid model score".into());
         }
         if score > 0.25 {
+            let bound_x = width as f32 / width.max(height) as f32 * 320.0;
+            let bound_y = height as f32 / width.max(height) as f32 * 320.0;
+            let x = (data[i] - data[2 * n + i] / 2.0).clamp(0.0, bound_x);
+            let y = (data[n + i] - data[3 * n + i] / 2.0).clamp(0.0, bound_y);
             boxes.push((
                 class,
                 score,
                 [
-                    data[i] - data[2 * n + i] / 2.0,
-                    data[n + i] - data[3 * n + i] / 2.0,
-                    data[2 * n + i].max(0.0),
-                    data[3 * n + i].max(0.0),
+                    x,
+                    y,
+                    data[2 * n + i].max(0.0).min(bound_x - x),
+                    data[3 * n + i].max(0.0).min(bound_y - y),
                 ],
             ));
         }
@@ -333,5 +387,48 @@ impl Scanner for Http {
             }
             Ok(result)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[derive(Deserialize)]
+    struct Reference {
+        width: u32,
+        height: u32,
+        samples: Vec<(usize, usize, [f32; 3])>,
+    }
+    #[test]
+    fn preprocessing_matches_opencv_reference_channels_padding_and_resize() {
+        // Generated with NudeNet v3's OpenCV 4.10 preprocessing. Differences
+        // up to one 8-bit level account for OpenCV's fixed-point rounding.
+        let fixtures: Vec<Reference> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/nudenet_preprocessing.json"
+        ))
+        .unwrap();
+        for reference in fixtures {
+            let rgb = image::RgbImage::from_fn(reference.width, reference.height, |x, y| {
+                image::Rgb([
+                    ((x * 13 + y * 3) % 256) as u8,
+                    ((x * 7 + y * 11) % 256) as u8,
+                    ((x * 5 + y * 17) % 256) as u8,
+                ])
+            });
+            let mut bytes = Cursor::new(Vec::new());
+            rgb.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            let actual = input(bytes.get_ref()).unwrap().data;
+            for (x, y, expected) in reference.samples {
+                for c in 0..3 {
+                    assert!(
+                        (actual[c * 320 * 320 + y * 320 + x] - expected[c]).abs()
+                            <= 1.0 / 255.0 + 1e-6,
+                        "{}x{} ({x},{y}) channel {c}",
+                        reference.width,
+                        reference.height
+                    );
+                }
+            }
+        }
     }
 }

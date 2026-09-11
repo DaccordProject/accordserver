@@ -44,7 +44,7 @@ pub async fn create_entry(
 
     // Return the row we just inserted
     let row = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, String)>(
-        &super::q("SELECT id, space_id, user_id, action_type, target_id, target_type, reason, changes, created_at FROM audit_log WHERE id = ?"),
+        &super::q("SELECT id, space_id, user_id, action_type, target_id, target_type, reason, changes, CAST(created_at AS TEXT) AS created_at FROM audit_log WHERE id = ?"),
     )
     .bind(&id)
     .fetch_one(pool)
@@ -71,7 +71,7 @@ pub async fn list_entries(
     before: Option<&str>,
     limit: i64,
 ) -> Result<Vec<AuditLogRow>, AppError> {
-    let mut query = String::from("SELECT id, space_id, user_id, action_type, target_id, target_type, reason, changes, created_at FROM audit_log WHERE space_id = ?");
+    let mut query = String::from("SELECT id, space_id, user_id, action_type, target_id, target_type, reason, changes, CAST(created_at AS TEXT) AS created_at FROM audit_log WHERE space_id = ?");
 
     if action_type.is_some() {
         query.push_str(" AND action_type = ?");

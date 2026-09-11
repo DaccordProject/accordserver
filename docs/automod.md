@@ -264,6 +264,10 @@ media rule will hold rather than skip a scan if no scanner is available.
 
 ## Validation
 
+Native preprocessing has reference fixtures generated with OpenCV 4.10 and
+[NudeNet v3’s preprocessing](https://github.com/notAI-tech/NudeNet/blob/v3/nudenet/nudenet.py), covering BGR channel order, square padding, up/downscaling and
+fixed 320-pixel inputs. The server does not depend on OpenCV.
+
 `cargo test --test automod` exercises quarantine, release/withdrawal, authorization,
 queue capacity, cache policy changes, scanner failures, retention, and restart
 recovery with a deterministic scanner. Run the real CPU backend explicitly:
