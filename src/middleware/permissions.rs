@@ -390,6 +390,30 @@ pub async fn require_not_timed_out(
     Ok(())
 }
 
+/// Effective slowmode cooldown for `auth` posting in `channel`, in milliseconds.
+/// Zero means no cooldown applies. Instance admins, and members who can manage
+/// messages or channels (which includes the owner), are exempt, matching the
+/// moderator exemption for pins and bulk deletes. Callers pass the result to
+/// `db::messages::create_message`, which enforces it atomically.
+pub async fn slowmode_cooldown_ms(
+    pool: &AnyPool,
+    channel: &crate::models::channel::ChannelRow,
+    auth: &AuthUser,
+) -> Result<i64, AppError> {
+    let cooldown_ms = channel.rate_limit.clamp(0, 21600) * 1000;
+    if cooldown_ms == 0 || auth.is_admin {
+        return Ok(0);
+    }
+    let Some(space_id) = channel.space_id.as_deref() else {
+        return Ok(cooldown_ms);
+    };
+    let perms = resolve_channel_permissions(pool, &channel.id, space_id, &auth.user_id).await?;
+    if has_permission(&perms, "manage_messages") || has_permission(&perms, "manage_channels") {
+        return Ok(0);
+    }
+    Ok(cooldown_ms)
+}
+
 /// Check that a user is a participant in a DM channel.
 pub async fn require_dm_access(
     pool: &AnyPool,

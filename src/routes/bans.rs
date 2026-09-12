@@ -121,6 +121,7 @@ pub async fn create_ban(
             target_user_ids: None,
             event: leave,
             intent: "members".to_string(),
+            required_permission: None,
         });
 
         // And the moderation event the intent table already anticipates
@@ -142,6 +143,7 @@ pub async fn create_ban(
             target_user_ids: None,
             event: created,
             intent: "moderation".to_string(),
+            required_permission: None,
         });
 
         // One `message.delete` per purged message, so open clients drop them
@@ -162,6 +164,7 @@ pub async fn create_ban(
                 target_user_ids: None,
                 event,
                 intent: "messages".to_string(),
+                required_permission: None,
             });
         }
     }
@@ -253,6 +256,7 @@ pub async fn delete_ban(
             target_user_ids: None,
             event,
             intent: "moderation".to_string(),
+            required_permission: None,
         });
     }
 

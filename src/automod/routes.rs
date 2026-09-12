@@ -118,13 +118,7 @@ pub async fn status(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let upload = super::get(&state, &id).await?;
     if auth.user_id != upload.author_id {
-        authorize(
-            &state,
-            upload.space_id.as_deref().unwrap_or("*"),
-            &auth,
-            false,
-        )
-        .await?;
+        authorize(&state, upload.scope(), &auth, false).await?;
     }
     Ok(Json(
         serde_json::json!({"data":{"id":upload.id,"message_id":upload.message_id,"status":upload.status,"reason":upload.reason,"rule_id":upload.rule_id,"expires_at":upload.expires_at}}),
@@ -160,13 +154,7 @@ pub async fn review(
     }
     let _guard = state.automod.processing.lock().await;
     let upload = super::get(&state, &id).await?;
-    authorize(
-        &state,
-        upload.space_id.as_deref().unwrap_or("*"),
-        &auth,
-        false,
-    )
-    .await?;
+    authorize(&state, upload.scope(), &auth, false).await?;
     if upload.status == "removed"
         || (upload.status != "published" && upload.expires_at <= super::now())
     {
@@ -208,9 +196,10 @@ pub async fn review(
         &upload,
         next,
         &review.reason,
-        None,
-        None,
-        Some(&auth.user_id),
+        super::Decision {
+            reviewer: Some(&auth.user_id),
+            ..Default::default()
+        },
     )
     .await?;
     if next == "pending" {
@@ -234,13 +223,7 @@ pub async fn content(
 ) -> Result<axum::response::Response, AppError> {
     use tower::ServiceExt;
     let upload = super::get(&state, &id).await?;
-    authorize(
-        &state,
-        upload.space_id.as_deref().unwrap_or("*"),
-        &auth,
-        false,
-    )
-    .await?;
+    authorize(&state, upload.scope(), &auth, false).await?;
     if !matches!(
         upload.status.as_str(),
         "pending" | "quarantined" | "rejected"
@@ -254,23 +237,21 @@ pub async fn content(
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?
             .map(axum::body::Body::new);
+    // Held originals are evidence: never cached, never rendered inline, and
+    // always inert regardless of what the bytes actually are.
     for (header, value) in [
-        ("Cache-Control", "no-store"),
-        ("Content-Type", "application/octet-stream"),
-        ("Content-Disposition", "attachment"),
-        ("X-Content-Type-Options", "nosniff"),
-        ("Content-Security-Policy", "sandbox; default-src 'none'"),
+        (axum::http::header::CACHE_CONTROL, "no-store"),
+        (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+        (axum::http::header::CONTENT_DISPOSITION, "attachment"),
+        (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            "sandbox; default-src 'none'",
+        ),
     ] {
-        response.headers_mut().insert(
-            axum::http::HeaderName::from_static(match header {
-                "Cache-Control" => "cache-control",
-                "Content-Type" => "content-type",
-                "Content-Disposition" => "content-disposition",
-                "X-Content-Type-Options" => "x-content-type-options",
-                _ => "content-security-policy",
-            }),
-            value.parse().unwrap(),
-        );
+        response
+            .headers_mut()
+            .insert(header, value.parse().unwrap());
     }
     Ok(response)
 }
@@ -328,8 +309,7 @@ async fn store_block(
             .await?;
     }
     let details = serde_json::json!({"hash":hash,"reason":reason,"attachment_id":attachment});
-    sqlx::query(&db::q("INSERT INTO automod_events (id,scope_id,actor_id,action,details,created_at) VALUES (?,?,?,'hash_blocked',?,?)"))
-        .bind(crate::snowflake::generate()).bind(scope).bind(actor).bind(details.to_string()).bind(now).execute(&mut *tx).await?;
+    super::record_event_in(&mut tx, None, scope, Some(actor), "hash_blocked", details).await?;
     tx.commit().await?;
     Ok(())
 }

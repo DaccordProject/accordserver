@@ -34,6 +34,42 @@ pub async fn create_report(
     category: &str,
     description: Option<&str>,
 ) -> Result<ReportRow, AppError> {
+    let mut conn = pool.acquire().await?;
+    let id = create_report_in(
+        &mut conn,
+        space_id,
+        reporter_id,
+        target_type,
+        target_id,
+        channel_id,
+        category,
+        description,
+    )
+    .await?;
+    drop(conn);
+    get_report(pool, &id).await
+}
+
+/// Insert a report on an explicit connection (pass `&mut *tx` to commit it
+/// with related changes) and return its ID. `category` must be one of
+/// `routes::reports::REPORT_CATEGORIES`, which mirrors the CHECK constraint.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_report_in(
+    conn: &mut sqlx::AnyConnection,
+    space_id: Option<&str>,
+    reporter_id: &str,
+    target_type: &str,
+    target_id: &str,
+    channel_id: Option<&str>,
+    category: &str,
+    description: Option<&str>,
+) -> Result<String, AppError> {
+    debug_assert!(
+        crate::routes::reports::REPORT_CATEGORIES
+            .iter()
+            .any(|(key, _)| *key == category),
+        "unknown report category {category}"
+    );
     let id = snowflake::generate();
     sqlx::query(
         &super::q("INSERT INTO reports (id, space_id, reporter_id, target_type, target_id, channel_id, category, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
@@ -46,10 +82,9 @@ pub async fn create_report(
     .bind(channel_id)
     .bind(category)
     .bind(description)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
-
-    get_report(pool, &id).await
+    Ok(id)
 }
 
 pub async fn get_report(pool: &AnyPool, report_id: &str) -> Result<ReportRow, AppError> {

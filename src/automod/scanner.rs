@@ -1,7 +1,6 @@
 //! Local CPU inference. No runtime or model is downloaded by the server.
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io::Cursor,
@@ -39,7 +38,8 @@ pub struct ScanResult {
 }
 impl ScanResult {
     pub fn validate(&self) -> Result<(), String> {
-        if (!self.sampled_timestamps_ms.is_empty() && self.sampled_timestamps_ms.len() != 5)
+        if (!self.sampled_timestamps_ms.is_empty()
+            && self.sampled_timestamps_ms.len() != super::video::SAMPLE_COUNT)
             || self.model_version.is_empty()
             || self.model_version.len() > 256
             || self.scores.is_empty()
@@ -196,8 +196,8 @@ impl Local {
         let weights =
             std::fs::read(model).map_err(|e| format!("cannot read automod model: {e}"))?;
         let version = format!(
-            "nudenet320n:{:x}:bgr-bilinear-clipped-nms-v2",
-            Sha256::digest(&weights)
+            "nudenet320n:{}:bgr-bilinear-clipped-nms-v2",
+            crate::storage::content_hash(&weights)
         );
         // ort 2.0 rc10 panics on a missing/incompatible dynamic library.
         let session = std::panic::catch_unwind(|| -> Result<_, String> {

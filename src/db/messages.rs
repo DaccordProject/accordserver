@@ -181,6 +181,7 @@ pub async fn create_message(
     author_id: &str,
     space_id: Option<&str>,
     input: &CreateMessage,
+    cooldown_ms: i64,
 ) -> Result<MessageRow, AppError> {
     let id = snowflake::generate();
     let embeds_json = serde_json::to_string(&input.embeds.as_deref().unwrap_or(&[])).unwrap();
@@ -200,26 +201,11 @@ pub async fn create_message(
     };
     let mentions_json = serde_json::to_string(&mention_user_ids).unwrap();
 
-    let channel = super::channels::get_channel_row(pool, channel_id).await?;
-    let mut cooldown_ms = channel.rate_limit.clamp(0, 21600) * 1000;
-    if cooldown_ms > 0 {
-        let user = super::users::get_user(pool, author_id).await?;
-        let exempt = if user.is_admin {
-            true
-        } else if let Some(space) = &channel.space_id {
-            let perms = crate::middleware::permissions::resolve_channel_permissions(
-                pool, channel_id, space, author_id,
-            )
-            .await?;
-            crate::models::permission::has_permission(&perms, "manage_messages")
-                || crate::models::permission::has_permission(&perms, "manage_channels")
-        } else {
-            false
-        };
-        if exempt {
-            cooldown_ms = 0;
-        }
-    }
+    // `cooldown_ms` is the slowmode interval already resolved for this author
+    // by `middleware::permissions::slowmode_cooldown_ms` (0 = none). The
+    // last-sent timestamp is still recorded when no cooldown applies so that
+    // enabling slowmode later takes effect immediately.
+    let cooldown_ms = cooldown_ms.max(0);
     let now = chrono::Utc::now().timestamp_millis();
     let mut tx = pool.begin().await?;
     // The conditional upsert serializes concurrent sends in both databases.

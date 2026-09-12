@@ -139,6 +139,16 @@ impl Policy {
         Ok(())
     }
 }
+impl Policy {
+    /// Whether an enabled hash-denylist rule covers `channel`. When one does,
+    /// a blocked digest is handled by that rule (quarantine/timeout) rather than
+    /// rejected outright at admission.
+    pub fn has_hash_rule(&self, channel: &ChannelRow) -> bool {
+        self.rules
+            .iter()
+            .any(|r| matches!(r.trigger, Trigger::HashDenylist) && r.applies(channel))
+    }
+}
 impl Rule {
     pub fn applies(&self, channel: &ChannelRow) -> bool {
         match &self.scope {
@@ -226,11 +236,20 @@ pub async fn hash_blocked(
     channel: &ChannelRow,
     hash: &str,
 ) -> Result<bool, AppError> {
+    hash_blocked_in_scope(state, channel.space_id.as_deref(), hash).await
+}
+
+/// Whether `hash` is blocked instance-wide or in `space_id`.
+pub async fn hash_blocked_in_scope(
+    state: &AppState,
+    space_id: Option<&str>,
+    hash: &str,
+) -> Result<bool, AppError> {
     let (n,): (i64,) = sqlx::query_as(&db::q(
         "SELECT COUNT(*) FROM automod_hashes WHERE hash=? AND (scope_id='*' OR scope_id=?)",
     ))
     .bind(hash)
-    .bind(channel.space_id.as_deref().unwrap_or("*"))
+    .bind(super::scope_key(space_id))
     .fetch_one(&state.db)
     .await?;
     Ok(n > 0)

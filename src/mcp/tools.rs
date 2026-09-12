@@ -423,6 +423,7 @@ async fn tool_send_message(state: &AppState, args: &Value) -> Result<String, Str
         &system_user_id,
         channel.space_id.as_deref(),
         &input,
+        0,
     )
     .await
     .map_err(map_err)?;
@@ -447,6 +448,7 @@ async fn tool_send_message(state: &AppState, args: &Value) -> Result<String, Str
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
     }
 
@@ -496,6 +498,7 @@ async fn tool_create_channel(state: &AppState, args: &Value) -> Result<String, S
             target_user_ids: None,
             event,
             intent: "channels".to_string(),
+            required_permission: None,
         });
     }
 
@@ -529,6 +532,7 @@ async fn tool_delete_channel(state: &AppState, args: &Value) -> Result<String, S
                 target_user_ids: None,
                 event,
                 intent: "channels".to_string(),
+                required_permission: None,
             });
         }
     }
@@ -598,6 +602,7 @@ async fn tool_ban_user(state: &AppState, args: &Value) -> Result<String, String>
             target_user_ids: None,
             event,
             intent: "moderation".to_string(),
+            required_permission: None,
         });
     }
 
@@ -631,6 +636,7 @@ async fn tool_unban_user(state: &AppState, args: &Value) -> Result<String, Strin
             target_user_ids: None,
             event,
             intent: "moderation".to_string(),
+            required_permission: None,
         });
     }
 
@@ -664,6 +670,7 @@ async fn tool_delete_message(state: &AppState, args: &Value) -> Result<String, S
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
     }
 
@@ -685,6 +692,7 @@ async fn broadcast_member_leave(state: &AppState, space_id: &str, user_id: &str)
             target_user_ids: None,
             event,
             intent: "members".to_string(),
+            required_permission: None,
         });
     }
 }

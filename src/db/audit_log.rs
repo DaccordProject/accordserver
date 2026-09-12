@@ -1,4 +1,4 @@
-use sqlx::AnyPool;
+use sqlx::{AnyConnection, AnyPool};
 
 use crate::error::AppError;
 use crate::snowflake;
@@ -27,6 +27,34 @@ pub async fn create_entry(
     reason: Option<&str>,
     changes: Option<&str>,
 ) -> Result<AuditLogRow, AppError> {
+    let mut conn = pool.acquire().await?;
+    create_entry_in(
+        &mut conn,
+        space_id,
+        user_id,
+        action_type,
+        target_id,
+        target_type,
+        reason,
+        changes,
+    )
+    .await
+}
+
+/// Same as [`create_entry`] on an explicit connection, so callers can commit
+/// the entry atomically with the change it records (pass `&mut *tx`).
+/// The caller is responsible for `routes::audit_log::broadcast_entry` after commit.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_entry_in(
+    conn: &mut AnyConnection,
+    space_id: &str,
+    user_id: &str,
+    action_type: &str,
+    target_id: Option<&str>,
+    target_type: Option<&str>,
+    reason: Option<&str>,
+    changes: Option<&str>,
+) -> Result<AuditLogRow, AppError> {
     let id = snowflake::generate();
     sqlx::query(
         &super::q("INSERT INTO audit_log (id, space_id, user_id, action_type, target_id, target_type, reason, changes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
@@ -39,7 +67,7 @@ pub async fn create_entry(
     .bind(target_type)
     .bind(reason)
     .bind(changes)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     // Return the row we just inserted
@@ -47,7 +75,7 @@ pub async fn create_entry(
         &super::q("SELECT id, space_id, user_id, action_type, target_id, target_type, reason, changes, CAST(created_at AS TEXT) AS created_at FROM audit_log WHERE id = ?"),
     )
     .bind(&id)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
 
     Ok(AuditLogRow {

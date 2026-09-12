@@ -42,7 +42,8 @@ pub async fn create_sound(
     // Save audio file
     let id = crate::snowflake::generate();
     let (audio_path, content_type, size) = storage::save_base64_audio(
-        &state.storage_path,
+        &state,
+        &auth.user_id,
         &space_id,
         &id,
         &input.audio,
@@ -76,6 +77,7 @@ pub async fn create_sound(
             target_user_ids: None,
             event,
             intent: "soundboard".to_string(),
+            required_permission: None,
         });
     }
 
@@ -107,6 +109,7 @@ pub async fn update_sound(
             target_user_ids: None,
             event,
             intent: "soundboard".to_string(),
+            required_permission: None,
         });
     }
 
@@ -142,6 +145,7 @@ pub async fn delete_sound(
             target_user_ids: None,
             event,
             intent: "soundboard".to_string(),
+            required_permission: None,
         });
     }
 
@@ -174,6 +178,7 @@ pub async fn play_sound(
             target_user_ids: None,
             event,
             intent: "soundboard".to_string(),
+            required_permission: None,
         });
     }
 

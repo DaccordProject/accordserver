@@ -11,7 +11,10 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
 };
-use common::{authenticated_json_request, authenticated_request, parse_body, TestServer, TestUser};
+use common::{
+    authenticated_json_request, authenticated_request, build_multipart_upload_body, parse_body,
+    TestServer, TestUser,
+};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use std::{
@@ -112,9 +115,13 @@ async fn upload(
     channel: &str,
     bytes: &[u8],
 ) -> (StatusCode, Value) {
-    let mut body = b"--testboundary\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n\r\n{\"content\":\"hello\"}\r\n--testboundary\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n".to_vec();
-    body.extend_from_slice(bytes);
-    body.extend_from_slice(b"\r\n--testboundary--\r\n");
+    let body = build_multipart_upload_body(
+        "testboundary",
+        &json!({"content":"hello"}),
+        "image.png",
+        "image/png",
+        bytes,
+    );
     let req = Request::builder()
         .method(Method::POST)
         .uri(format!("/api/v1/channels/{channel}/messages/upload"))
@@ -645,7 +652,7 @@ async fn moderator_gateway_events_are_not_disclosed_to_ordinary_members() {
     }
     upload(&server, &member, &channel, b"explicit").await;
     automod::process_one(&server.state).await.unwrap();
-    server.state.gateway_tx.read().await.as_ref().unwrap().send(accordserver::gateway::events::GatewayBroadcast {space_id:Some(space),target_user_ids:None,intent:"message_typing".into(),event:json!({"op":0,"type":"typing.start","data":{"channel_id":channel,"user_id":owner.user.id}})}).unwrap();
+    server.state.gateway_tx.read().await.as_ref().unwrap().send(accordserver::gateway::events::GatewayBroadcast {space_id:Some(space),target_user_ids:None,intent:"message_typing".into(),event:json!({"op":0,"type":"typing.start","data":{"channel_id":channel,"user_id":owner.user.id}}),required_permission:None}).unwrap();
     for (index, mut socket) in sockets.into_iter().enumerate() {
         let saw = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             let mut saw = false;
@@ -869,4 +876,63 @@ async fn upload_response_does_not_wait_for_an_in_flight_scan() {
     .await
     .expect("upload waited for scan completion");
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+}
+
+/// An automod decision writes a space audit log entry, and moderators watching
+/// the gateway must see it live rather than only after a reload.
+#[tokio::test]
+async fn automod_decisions_broadcast_their_audit_log_entry() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    let (server, owner, member, space, channel, _) = setup(0.95, false).await;
+    let base = server.spawn().await.replace("http://", "ws://");
+    let (mut socket, _) = connect_async(format!("{base}/ws")).await.unwrap();
+    socket.next().await.unwrap().unwrap();
+    socket
+        .send(Message::Text(
+            json!({"op":2,"data":{"token":owner.gateway_token(),"intents":["moderation"]}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+            if serde_json::from_str::<Value>(&text).unwrap()["type"] == "ready" {
+                break;
+            }
+        }
+    }
+
+    upload(&server, &member, &channel, b"explicit").await;
+    automod::process_one(&server.state).await.unwrap();
+
+    let entry = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = socket.next().await {
+            if let Message::Text(text) = event.unwrap() {
+                let event: Value = serde_json::from_str(&text).unwrap();
+                if event["type"] == "audit_log.create" {
+                    return event["data"].clone();
+                }
+            }
+        }
+        panic!("gateway closed before the audit entry arrived");
+    })
+    .await
+    .expect("audit_log.create was never broadcast");
+
+    assert_eq!(entry["action_type"], "automod.quarantined");
+    assert_eq!(entry["space_id"], space);
+    assert_eq!(entry["target_type"], "attachment");
+    socket.close(None).await.unwrap();
+
+    // The broadcast reflects a row that is really there.
+    let (rows,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM audit_log WHERE space_id=? AND action_type='automod.quarantined'",
+    )
+    .bind(&space)
+    .fetch_one(server.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
 }

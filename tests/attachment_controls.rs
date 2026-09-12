@@ -6,7 +6,10 @@ use axum::{
     http::{Method, Request, StatusCode},
     response::Response,
 };
-use common::{authenticated_json_request, authenticated_request, parse_body, TestServer, TestUser};
+use common::{
+    authenticated_json_request, authenticated_request, build_multipart_upload_body, parse_body,
+    TestServer, TestUser,
+};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -32,9 +35,13 @@ async fn send(server: &TestServer, user: &TestUser, channel: &str, content: &str
         .unwrap()
 }
 async fn upload(server: &TestServer, user: &TestUser, channel: &str, bytes: &[u8]) -> Response {
-    let mut body = b"--boundary\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n\r\n{\"content\":\"file\"}\r\n--boundary\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"file.bin\"\r\n\r\n".to_vec();
-    body.extend_from_slice(bytes);
-    body.extend_from_slice(b"\r\n--boundary--\r\n");
+    let body = build_multipart_upload_body(
+        "boundary",
+        &json!({"content":"file"}),
+        "file.bin",
+        "application/octet-stream",
+        bytes,
+    );
     server
         .router()
         .oneshot(
@@ -380,4 +387,143 @@ async fn upload_byte_budget_counts_actual_payload_without_content_length() {
         upload(&server, &member, &channel, b"56").await.status(),
         StatusCode::OK
     );
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// A `data:` URI carrying `bytes`. The server validates the declared MIME type,
+/// not the payload, so any bytes exercise the admission path.
+fn data_uri(bytes: &[u8]) -> String {
+    format!("data:image/png;base64,{}", base64_encode(bytes))
+}
+async fn block_hash(server: &TestServer, user: &TestUser, scope: &str, hash: &str) -> Response {
+    server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::PUT,
+            &format!("/api/v1/automod/{scope}/hashes/{hash}"),
+            &user.auth_header(),
+            &json!({"reason":"blocked everywhere"}),
+        ))
+        .await
+        .unwrap()
+}
+async fn set_avatar(server: &TestServer, user: &TestUser, image: &str) -> Response {
+    server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::PATCH,
+            "/api/v1/users/@me",
+            &user.auth_header(),
+            &json!({"avatar":image}),
+        ))
+        .await
+        .unwrap()
+}
+
+/// A blocked digest must stay blocked on every ingest route, not just message
+/// attachments: otherwise the same bytes come straight back as an avatar,
+/// emoji, space icon or sound.
+#[tokio::test]
+async fn hash_blocks_apply_to_avatars_emoji_icons_and_sounds() {
+    let (server, owner, member, space, _) = setup().await;
+    let admin = server.create_admin_with_token("operator").await;
+    let bytes = b"blocked everywhere".to_vec();
+    let digest = automod::hash(&bytes);
+    assert_eq!(
+        block_hash(&server, &admin, "*", &digest).await.status(),
+        StatusCode::OK
+    );
+    let image = data_uri(&bytes);
+
+    assert_eq!(
+        set_avatar(&server, &member, &image).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let emoji = server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::POST,
+            &format!("/api/v1/spaces/{space}/emojis"),
+            &owner.auth_header(),
+            &json!({"name":"blocked","image":image}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(emoji.status(), StatusCode::BAD_REQUEST);
+    let icon = server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::PATCH,
+            &format!("/api/v1/spaces/{space}"),
+            &owner.auth_header(),
+            &json!({"icon":image}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(icon.status(), StatusCode::BAD_REQUEST);
+    let sound = server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::POST,
+            &format!("/api/v1/spaces/{space}/soundboard"),
+            &owner.auth_header(),
+            &json!({
+                "name":"blocked",
+                "audio":format!("data:audio/ogg;base64,{}", base64_encode(&bytes))
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sound.status(), StatusCode::BAD_REQUEST);
+
+    // An unblocked image still goes through, so the block is about the digest
+    // and not about the route being broken.
+    assert_eq!(
+        set_avatar(&server, &member, &data_uri(b"allowed"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+/// The per-user upload budget is supposed to bound upload bandwidth, so base64
+/// ingest routes have to be charged against the same bucket as attachments.
+#[tokio::test]
+async fn upload_budget_covers_base64_ingest_routes() {
+    let (server, _, member, _, channel) = setup().await;
+    configure_uploads(&server, json!({"upload_requests_per_minute":2})).await;
+    assert_eq!(
+        set_avatar(&server, &member, &data_uri(b"first"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        set_avatar(&server, &member, &data_uri(b"second"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // Budget exhausted by the two avatars: the attachment route shares it.
+    assert_limited(upload(&server, &member, &channel, b"third").await).await;
 }

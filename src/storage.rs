@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::error::AppError;
+use crate::state::AppState;
 
 pub const MAX_EMOJI_SIZE: usize = 256 * 1024; // 256 KB
 pub const MAX_AVATAR_SIZE: usize = 2 * 1024 * 1024; // 2 MB
@@ -9,6 +12,13 @@ pub const MAX_ATTACHMENT_SIZE: usize = 25 * 1024 * 1024; // 25 MB
 
 pub const ALLOWED_IMAGE_TYPES: &[&str] = &["image/png", "image/gif", "image/webp"];
 pub const ALLOWED_AUDIO_TYPES: &[&str] = &["audio/ogg", "audio/mpeg", "audio/wav"];
+
+/// Canonical lowercase SHA-256 hex digest used for every stored file. Hash
+/// denylist entries, `attachments.content_hash` and automod uploads must all
+/// agree on this format, so it lives in one place.
+pub fn content_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 /// Parse a `data:<mime>;base64,<data>` URI for images with a custom size limit.
 /// Returns `(decoded_bytes, content_type, is_animated)`.
@@ -81,19 +91,24 @@ pub fn validate_audio_data_uri(data: &str, max_size: usize) -> Result<(Vec<u8>, 
 }
 
 /// Save a base64-encoded image to disk.
-/// Returns `(relative_url, content_type, file_size)`.
+///
+/// Every direct upload is admitted through [`crate::automod::admit_direct_upload`]
+/// so the per-user upload budget and the hash denylist apply here exactly as
+/// they do to message attachments. Returns `(relative_url, content_type, file_size, is_animated)`.
 pub async fn save_base64_image(
-    storage_path: &Path,
+    state: &AppState,
+    uploader: &str,
     space_id: &str,
     file_id: &str,
     data: &str,
     max_size: usize,
 ) -> Result<(String, String, usize, bool), AppError> {
     let (bytes, content_type, is_animated) = validate_image_data_uri_with_limit(data, max_size)?;
+    crate::automod::admit_direct_upload(state, uploader, Some(space_id), &bytes).await?;
     let ext = mime_to_ext(&content_type);
     let size = bytes.len();
 
-    let dir = storage_path.join("emojis").join(space_id);
+    let dir = state.storage_path.join("emojis").join(space_id);
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| AppError::Internal(format!("failed to create emoji directory: {e}")))?;
@@ -108,20 +123,22 @@ pub async fn save_base64_image(
     Ok((relative_url, content_type, size, is_animated))
 }
 
-/// Save a base64-encoded audio file to disk.
-/// Returns `(relative_url, content_type, file_size)`.
+/// Save a base64-encoded audio file to disk. See [`save_base64_image`] for
+/// the admission rules. Returns `(relative_url, content_type, file_size)`.
 pub async fn save_base64_audio(
-    storage_path: &Path,
+    state: &AppState,
+    uploader: &str,
     space_id: &str,
     file_id: &str,
     data: &str,
     max_size: usize,
 ) -> Result<(String, String, usize), AppError> {
     let (bytes, content_type) = validate_audio_data_uri(data, max_size)?;
+    crate::automod::admit_direct_upload(state, uploader, Some(space_id), &bytes).await?;
     let ext = mime_to_ext(&content_type);
     let size = bytes.len();
 
-    let dir = storage_path.join("sounds").join(space_id);
+    let dir = state.storage_path.join("sounds").join(space_id);
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| AppError::Internal(format!("failed to create sounds directory: {e}")))?;
@@ -137,18 +154,26 @@ pub async fn save_base64_audio(
 }
 
 /// Save a base64-encoded avatar/icon/banner image to disk.
-/// `category` should be `"avatars"`, `"icons"`, or `"banners"`.
+/// `category` should be `"avatars"`, `"icons"`, or `"banners"`. `space_id` is
+/// the space whose hash denylist applies (`None` for account-level images,
+/// which are still checked against instance-wide blocks). See
+/// [`save_base64_image`] for the admission rules.
 /// Returns `(relative_url, content_type, file_size, is_animated)`.
+#[allow(clippy::too_many_arguments)]
 pub async fn save_avatar_image(
-    storage_path: &Path,
+    state: &AppState,
+    uploader: &str,
+    space_id: Option<&str>,
     category: &str,
     entity_id: &str,
     data: &str,
     max_size: usize,
 ) -> Result<(String, String, usize, bool), AppError> {
     let (bytes, content_type, is_animated) = validate_image_data_uri_with_limit(data, max_size)?;
+    crate::automod::admit_direct_upload(state, uploader, space_id, &bytes).await?;
     let ext = mime_to_ext(&content_type);
     let size = bytes.len();
+    let storage_path = state.storage_path.as_path();
 
     let dir = storage_path.join(category);
     tokio::fs::create_dir_all(&dir)
@@ -205,7 +230,8 @@ pub async fn delete_avatar(
 /// This makes the URL the single source of truth and avoids 404s if a client
 /// reconstructs URLs from a stale or mismatched message ID.
 ///
-/// Returns `(relative_url, file_size, sha256)`.
+/// Returns `(relative_url, file_size)`. Callers already hold the content
+/// digest (it is computed while the upload is read), so it is not recomputed here.
 pub async fn save_attachment(
     storage_path: &Path,
     channel_id: &str,
@@ -213,7 +239,7 @@ pub async fn save_attachment(
     filename: &str,
     bytes: &[u8],
     max_size: usize,
-) -> Result<(String, usize, String), AppError> {
+) -> Result<(String, usize), AppError> {
     if bytes.len() > max_size {
         return Err(AppError::PayloadTooLarge(format!(
             "attachment exceeds maximum size of {} MB",
@@ -237,7 +263,7 @@ pub async fn save_attachment(
         .map_err(|e| AppError::Internal(format!("failed to write attachment file: {e}")))?;
 
     let relative_url = format!("/cdn/attachments/{channel_id}/{attachment_id}/{safe_filename}");
-    Ok((relative_url, size, crate::automod::hash(bytes)))
+    Ok((relative_url, size))
 }
 
 /// Sanitize a filename to prevent directory traversal and other issues.
@@ -400,30 +426,50 @@ pub fn temp_storage_path() -> PathBuf {
 }
 
 /// Retry durable deletions; a failed unlink stays queued across restarts.
-pub async fn drain_attachment_deletions(state: &crate::state::AppState) -> Result<(), AppError> {
+pub async fn drain_attachment_deletions(state: &AppState) -> Result<(), AppError> {
+    // The mutation middleware calls this after every write. Do not touch the
+    // publication lock unless there is actually something queued.
+    let (queued,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM attachment_deletions")
+        .fetch_one(&state.db)
+        .await?;
+    if queued == 0 {
+        return Ok(());
+    }
     // Release may reuse an attachment ID after a moderator withdraws it. Do
     // not unlink a newly released copy using a stale deletion queue entry.
     let _automod_guard = state.automod.publication.lock().await;
     let rows: Vec<(String,)> = sqlx::query_as("SELECT url FROM attachment_deletions LIMIT 100")
         .fetch_all(&state.db)
         .await?;
-    for (url,) in rows {
-        // Federation can attach remote URLs; these have no local file to unlink.
-        if url.starts_with("/cdn/attachments/") {
-            let (live,): (i64,) = sqlx::query_as(&crate::db::q(
-                "SELECT COUNT(*) FROM attachments WHERE url=?",
-            ))
-            .bind(&url)
-            .fetch_one(&state.db)
-            .await?;
-            if live == 0 {
-                delete_file(&state.storage_path, &url).await?;
-            }
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // Federation can attach remote URLs; these have no local file to unlink.
+    let local: Vec<&str> = rows
+        .iter()
+        .map(|(url,)| url.as_str())
+        .filter(|url| url.starts_with("/cdn/attachments/"))
+        .collect();
+    let mut live = std::collections::HashSet::new();
+    if !local.is_empty() {
+        let placeholders = vec!["?"; local.len()].join(",");
+        let sql = crate::db::q(&format!(
+            "SELECT url FROM attachments WHERE url IN ({placeholders})"
+        ));
+        let mut query = sqlx::query_as::<_, (String,)>(&sql);
+        for url in &local {
+            query = query.bind(*url);
+        }
+        live.extend(query.fetch_all(&state.db).await?.into_iter().map(|r| r.0));
+    }
+    for (url,) in &rows {
+        if url.starts_with("/cdn/attachments/") && !live.contains(url) {
+            delete_file(&state.storage_path, url).await?;
         }
         sqlx::query(&crate::db::q(
             "DELETE FROM attachment_deletions WHERE url = ?",
         ))
-        .bind(&url)
+        .bind(url)
         .execute(&state.db)
         .await?;
     }
@@ -432,7 +478,7 @@ pub async fn drain_attachment_deletions(state: &crate::state::AppState) -> Resul
 
 /// Gate downloads against live metadata even when filesystem cleanup is delayed.
 pub async fn serve_attachment(
-    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(path): axum::extract::Path<String>,
     req: axum::extract::Request,
 ) -> Result<axum::response::Response, AppError> {
@@ -479,7 +525,7 @@ pub async fn serve_attachment(
 }
 
 /// Remove pre-upgrade orphans. The grace period protects uploads before their DB commit.
-pub async fn reconcile_attachment_orphans(state: &crate::state::AppState) -> Result<(), AppError> {
+pub async fn reconcile_attachment_orphans(state: &AppState) -> Result<(), AppError> {
     let root = state.storage_path.join("attachments");
     let mut pending = vec![root.clone()];
     while let Some(dir) = pending.pop() {
@@ -537,7 +583,6 @@ pub async fn reconcile_attachment_orphans(state: &crate::state::AppState) -> Res
 
 /// Stream a legacy local attachment's digest; never fetch a remote URL.
 pub async fn hash_local_attachment(storage_path: &Path, url: &str) -> Result<String, AppError> {
-    use sha2::{Digest, Sha256};
     use tokio::io::AsyncReadExt;
     let relative = url
         .strip_prefix("/cdn/attachments/")

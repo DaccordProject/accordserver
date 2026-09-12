@@ -91,7 +91,9 @@ pub async fn update_space(
                 let _ = storage::delete_file(&state.storage_path, old_icon).await;
             }
             let (url, _, _, _) = storage::save_avatar_image(
-                &state.storage_path,
+                &state,
+                &auth.user_id,
+                Some(&space_id),
                 "icons",
                 &space_id,
                 icon,
@@ -117,7 +119,9 @@ pub async fn update_space(
                 let _ = storage::delete_file(&state.storage_path, old_banner).await;
             }
             let (url, _, _, _) = storage::save_avatar_image(
-                &state.storage_path,
+                &state,
+                &auth.user_id,
+                Some(&space_id),
                 "banners",
                 &space_id,
                 banner,
@@ -150,6 +154,7 @@ pub async fn update_space(
             target_user_ids: None,
             event,
             intent: "spaces".to_string(),
+            required_permission: None,
         });
     }
 
@@ -177,6 +182,7 @@ pub async fn delete_space(
             target_user_ids: None,
             event,
             intent: "spaces".to_string(),
+            required_permission: None,
         });
     }
 
@@ -277,6 +283,7 @@ pub async fn create_channel(
             target_user_ids: None,
             event,
             intent: "channels".to_string(),
+            required_permission: None,
         });
     }
 
@@ -307,6 +314,7 @@ pub async fn reorder_channels(
             target_user_ids: None,
             event,
             intent: "channels".to_string(),
+            required_permission: None,
         });
     }
 
@@ -423,6 +431,7 @@ pub async fn join_public_space(
                 target_user_ids: None,
                 event,
                 intent: "members".to_string(),
+                required_permission: None,
             });
         }
 

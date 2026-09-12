@@ -1,6 +1,6 @@
 mod admin;
 mod applications;
-mod audit_log;
+pub mod audit_log;
 mod auth;
 mod bans;
 pub mod channels;
@@ -18,7 +18,7 @@ mod plugins;
 mod reactions;
 mod read_states;
 mod relationships;
-mod reports;
+pub mod reports;
 pub mod roles;
 pub mod seo;
 mod settings;

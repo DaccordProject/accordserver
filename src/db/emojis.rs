@@ -89,6 +89,7 @@ pub async fn list_emojis(pool: &AnyPool, space_id: &str) -> Result<Vec<Emoji>, A
 #[allow(clippy::too_many_arguments)]
 pub async fn create_emoji(
     pool: &AnyPool,
+    id: &str,
     space_id: &str,
     creator_id: &str,
     input: &CreateEmoji,
@@ -97,12 +98,10 @@ pub async fn create_emoji(
     image_size: Option<usize>,
     animated: bool,
 ) -> Result<Emoji, AppError> {
-    let id = snowflake::generate();
-
     sqlx::query(
         &super::q("INSERT INTO emojis (id, space_id, name, creator_id, animated, image_path, image_content_type, image_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     )
-    .bind(&id)
+    .bind(id)
     .bind(space_id)
     .bind(&input.name)
     .bind(creator_id)
@@ -113,11 +112,11 @@ pub async fn create_emoji(
     .execute(pool)
     .await?;
 
-    get_emoji(pool, &id).await
+    get_emoji(pool, id).await
 }
 
-/// Returns the emoji ID (for use in generating the ID). Used by the route
-/// to get the snowflake before saving the file.
+/// Allocate an emoji ID before saving its file, so the on-disk name and the
+/// stored `image_path` agree on the first write.
 pub fn generate_emoji_id() -> String {
     snowflake::generate()
 }

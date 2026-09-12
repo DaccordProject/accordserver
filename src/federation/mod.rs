@@ -55,6 +55,7 @@ pub(crate) async fn broadcast_space(
             target_user_ids: None,
             event,
             intent: intent.to_string(),
+            required_permission: None,
         });
     }
 }

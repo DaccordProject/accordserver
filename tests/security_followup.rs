@@ -231,7 +231,7 @@ async fn channel_space_and_account_deletion_remove_attachment_files() {
             .as_str()
             .unwrap()
             .to_string();
-        let (url, _, _) = storage::save_attachment(
+        let (url, _) = storage::save_attachment(
             &server.state.storage_path,
             &channel,
             "upload",
@@ -307,7 +307,7 @@ async fn channel_space_and_account_deletion_remove_attachment_files() {
 #[tokio::test]
 async fn orphan_cleanup_preserves_new_uploads_and_live_files() {
     let server = TestServer::new().await;
-    let (url, _, _) = storage::save_attachment(
+    let (url, _) = storage::save_attachment(
         &server.state.storage_path,
         "channel",
         "upload",

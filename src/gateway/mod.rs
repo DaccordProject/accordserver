@@ -330,38 +330,6 @@ async fn classify_broadcast(
         );
     }
 
-    // Moderation intent alone is not an authorization grant. Recheck current
-    // permissions at delivery so revoked moderators lose access immediately.
-    if event_type == "automod.upload_update" {
-        let auth = crate::middleware::auth::AuthUser {
-            user_id: user_id.to_string(),
-            is_admin: false,
-            is_bot: false,
-            is_guest: false,
-            guest_space_id: None,
-        };
-        let admin = crate::db::users::get_user(&state.db, user_id)
-            .await
-            .map(|u| u.is_admin && !u.disabled)
-            .unwrap_or(false);
-        let allowed = if let Some(space) = &broadcast.space_id {
-            admin
-                || crate::middleware::permissions::require_permission(
-                    &state.db,
-                    space,
-                    &auth,
-                    "moderate_members",
-                )
-                .await
-                .is_ok()
-        } else {
-            admin
-        };
-        if !allowed {
-            return Delivery::Skip;
-        }
-    }
-
     let should_receive = match (&broadcast.target_user_ids, &broadcast.space_id) {
         (Some(targets), _) => targets.iter().any(|t| t == user_id),
         (None, Some(sid)) => space_ids.contains(sid),
@@ -421,6 +389,35 @@ async fn classify_broadcast(
     if !intents::has_intent(intents, event_type) {
         return Delivery::Skip;
     }
+
+    // An intent is not an authorization grant. Events that carry one recheck
+    // the permission against current state, after the cheap space/intent
+    // filters, so a revoked moderator stops receiving them immediately.
+    if let Some(perm) = broadcast.required_permission {
+        let user = match crate::db::users::get_user(&state.db, user_id).await {
+            Ok(user) if !user.disabled => user,
+            _ => return Delivery::Skip,
+        };
+        let auth = crate::middleware::auth::AuthUser {
+            user_id: user_id.to_string(),
+            is_admin: user.is_admin,
+            is_bot: user.bot,
+            is_guest: false,
+            guest_space_id: None,
+        };
+        let allowed = match &broadcast.space_id {
+            Some(space) => {
+                crate::middleware::permissions::require_permission(&state.db, space, &auth, perm)
+                    .await
+                    .is_ok()
+            }
+            None => auth.is_admin,
+        };
+        if !allowed {
+            return Delivery::Skip;
+        }
+    }
+
     Delivery::Send(broadcast.event.clone())
 }
 
@@ -563,6 +560,7 @@ async fn broadcast_presence(
             target_user_ids: None,
             event: event(),
             intent: "presences".to_string(),
+            required_permission: None,
         });
     }
     // Friends who may not share any space still track each other's presence.
@@ -572,6 +570,7 @@ async fn broadcast_presence(
             target_user_ids: Some(friend_ids.iter().cloned().collect()),
             event: event(),
             intent: "presences".to_string(),
+            required_permission: None,
         });
     }
 }
@@ -1051,6 +1050,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         target_user_ids: None,
                         event,
                         intent: "members".to_string(),
+                        required_permission: None,
                     });
                 }
             }
@@ -1522,6 +1522,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     target_user_ids: None,
                     event,
                     intent: "members".to_string(),
+                    required_permission: None,
                 });
             }
         }

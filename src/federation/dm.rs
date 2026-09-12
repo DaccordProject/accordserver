@@ -466,6 +466,7 @@ async fn serve_send(
             thread_id: None,
             title: None,
         },
+        0,
     )
     .await?;
 
@@ -676,6 +677,7 @@ async fn broadcast_to_participants(
             target_user_ids: Some(participant_ids),
             event,
             intent: intent.to_string(),
+            required_permission: None,
         });
     }
 }

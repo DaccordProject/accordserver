@@ -100,6 +100,7 @@ pub async fn delete_relationship(
             target_user_ids: Some(vec![auth.user_id.clone()]),
             event: event_me,
             intent: "relationships".to_string(),
+            required_permission: None,
         });
 
         let event_target = serde_json::json!({
@@ -112,6 +113,7 @@ pub async fn delete_relationship(
             target_user_ids: Some(vec![target_id.clone()]),
             event: event_target,
             intent: "relationships".to_string(),
+            required_permission: None,
         });
     }
 
@@ -198,6 +200,7 @@ async fn handle_block(
                 target_user_ids: Some(vec![target_id.to_string()]),
                 event,
                 intent: "relationships".to_string(),
+                required_permission: None,
             });
         }
     }
@@ -245,6 +248,7 @@ async fn broadcast_relationship_event(
             target_user_ids: Some(vec![recipient_id.to_string()]),
             event,
             intent: "relationships".to_string(),
+            required_permission: None,
         });
     }
 }

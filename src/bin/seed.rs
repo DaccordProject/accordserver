@@ -550,6 +550,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 thread_id: thread_id.map(|s| s.to_string()),
                 title: None,
             },
+            0,
         )
         .await?;
         // Small delay so snowflake IDs are properly ordered

@@ -163,6 +163,7 @@ async fn serve_send(
             thread_id: None,
             title: None,
         },
+        0,
     )
     .await?;
 

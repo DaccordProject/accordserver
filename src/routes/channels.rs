@@ -95,6 +95,7 @@ pub async fn update_channel(
                 target_user_ids: Some(participant_ids),
                 event,
                 intent: "channels".to_string(),
+                required_permission: None,
             });
         }
     } else if let Some(ref space_id) = existing.space_id {
@@ -109,6 +110,7 @@ pub async fn update_channel(
                 target_user_ids: None,
                 event,
                 intent: "channels".to_string(),
+                required_permission: None,
             });
         }
     }
@@ -182,6 +184,7 @@ pub async fn delete_channel(
                     target_user_ids: Some(participant_ids),
                     event,
                     intent: "channels".to_string(),
+                    required_permission: None,
                 });
             }
         }
@@ -204,6 +207,7 @@ pub async fn delete_channel(
                 target_user_ids: None,
                 event,
                 intent: "channels".to_string(),
+                required_permission: None,
             });
         }
     }
@@ -400,6 +404,7 @@ pub async fn add_recipient(
             target_user_ids: Some(participant_ids),
             event,
             intent: "channels".to_string(),
+            required_permission: None,
         });
     }
 
@@ -450,6 +455,7 @@ pub async fn remove_recipient(
                     target_user_ids: Some(remaining_ids),
                     event,
                     intent: "channels".to_string(),
+                    required_permission: None,
                 });
             }
         }
@@ -486,6 +492,7 @@ pub async fn remove_recipient(
             target_user_ids: Some(participant_ids),
             event,
             intent: "channels".to_string(),
+            required_permission: None,
         });
     }
 

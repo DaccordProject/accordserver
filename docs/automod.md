@@ -104,6 +104,10 @@ not all forms of sexual content or every drawing style.
 One local inference runs at a time, outside Tokio's async executor. A 30-second
 scan timeout does not spawn unlimited replacement inference tasks: the blocking
 task retains its permit until it finishes. Failed scans retry after 60 seconds.
+Inference runs without the worker lock held, so moderator review calls and
+policy edits are never queued behind a running scan; the upload row and policy
+are re-read and the decision re-derived after the scan, so a review or policy
+change made while the scanner was busy always wins.
 Queue admission returns HTTP 429 before creating a message if capacity is full.
 Existing attachment size/count limits still apply. Policy retention is 1–90 days
 (default 7); expired held files are removed, while decision metadata remains in
@@ -204,7 +208,7 @@ before deciding that no rule matched. Unknown scanner categories cause a hold.
 Hash decisions run without a model when they match before a media rule.
 
 Results are cached for one day by SHA-256 and scanner/preprocessing identity
-(up to 10,000 entries). Policy is evaluated again against cached scores, so a
+(up to 10,000 entries, pruned hourly). Policy is evaluated again against cached scores, so a
 changed threshold takes effect without re-running inference. Updating the
 weights changes the local cache identity. Exact hashes do not catch modified or
 re-encoded copies. Every new local attachment stores its SHA-256 as indexed
@@ -212,6 +216,14 @@ re-encoded copies. Every new local attachment stores its SHA-256 as indexed
 may have a null hash; blocking one computes and stores it from the local file
 without downloading remote URLs. Identical uploads still own separate files;
 content-addressed storage and perceptual matching are follow-up work.
+
+Hash blocks apply to every route that stores a file, not only message
+attachments: avatars, member avatars, space icons and banners, custom emoji and
+soundboard clips are checked against the same denylist before they are written.
+Account-level images (user avatar and banner) are checked against instance-wide
+blocks; images belonging to a space are checked against that space's blocks as
+well. These routes are not scanned by the model, which remains limited to
+message attachments.
 
 A moderator with `manage_messages` can block an existing attachment with:
 
@@ -275,15 +287,17 @@ Disabling policy while uploads are pending holds them for explicit review.
 Gateway events `automod.upload_update` (moderation intent) and
 `automod.upload_status` (messages intent, uploader only) contain IDs/status.
 Moderator permissions are checked when notifications are delivered, not just
-when a session subscribes. Detailed scores and rules are available through the
+when a session subscribes; the check runs after the cheaper space and intent
+filters, so sessions that would not receive the event cost nothing. Detailed scores and rules are available through the
 review/audit APIs. Automatic space decisions also appear in the existing space
-audit log under the System account.
+audit log under the System account, and are broadcast as `audit_log.create`
+like every other audit entry, so an open moderation view updates live.
 
 The queue assumes one server writer process per database/storage directory,
 matching the existing deployment. Pending work resumes after process restarts.
-Full-frame video scanning, animated-image scanning, retroactive scanning of existing uploads,
-avatars/emoji, federated remote media and the client review/configuration UI are
-outside this attachment implementation.
+Full-frame video scanning, animated-image scanning, retroactive scanning of
+existing uploads, model scanning of avatars/emoji, federated remote media and
+the client review/configuration UI are outside this attachment implementation.
 
 ## Optional HTTP scanner
 
@@ -341,8 +355,11 @@ cannot both pass. Cooldowns survive message deletion and server restart.
 Effective `manage_messages` or `manage_channels` permissions, space ownership
 and instance admin privileges exempt users from slowmode.
 
-Multipart message requests also use independent per-user token buckets across
-all channels, including DMs. These apply to moderators and admins as well:
+Uploads also use independent per-user token buckets across all channels,
+including DMs. Multipart message uploads and the base64 ingest routes (avatars,
+member avatars, space icons and banners, emoji and soundboard clips) share one
+bucket, so the budget bounds a user's total upload bandwidth rather than one
+endpoint's. These apply to moderators and admins as well:
 
 | Server setting | Default | Accepted values |
 |---|---|---|
@@ -351,8 +368,9 @@ all channels, including DMs. These apply to moderators and admins as well:
 
 Configure them through `PATCH /api/v1/admin/settings`. Both are exposed in
 client-facing settings. Capacity starts full and refills continuously over one
-minute. File bytes are charged while reading each multipart chunk, independent
-of `Content-Length`, before disk writes or publication. Failed attempts retain
+minute. Multipart file bytes are charged while reading each chunk, independent
+of `Content-Length`, before disk writes or publication; base64 routes are
+charged once the payload is decoded, also before any disk write. Failed attempts retain
 charges for requests and bytes already accepted. Each request must fit the byte
 budget; keep it at least as large as the largest upload you intend to allow.
 Upload buckets are bounded in memory and reset on restart; slowmode uses the

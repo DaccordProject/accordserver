@@ -52,6 +52,7 @@ pub async fn broadcast_entry(state: &AppState, entry: &db::audit_log::AuditLogRo
             target_user_ids: None,
             event,
             intent: "moderation".to_string(),
+            required_permission: None,
         });
     }
 }
