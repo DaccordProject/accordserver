@@ -2,6 +2,8 @@
 
 A self-hosted Discord-like chat and voice server backend, built in Rust with [Axum](https://github.com/tokio-rs/axum). It powers the [Daccord chat client](https://github.com/DaccordProject/daccord), built with Flutter and Dart, and supports any client that implements the Accord protocol.
 
+See the [changelog](CHANGELOG.md) for release highlights and upgrade notes.
+
 ## Features
 
 - **User Registration & Login** — Register with username/password, login to get bearer tokens, logout to revoke tokens. Passwords hashed with Argon2id.
