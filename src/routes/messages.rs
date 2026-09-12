@@ -353,6 +353,7 @@ pub async fn create_message_multipart(
         require_not_timed_out(&state.db, &space_id, &auth).await?;
     }
 
+    crate::middleware::rate_limit::charge_upload(&state, &auth.user_id, 1, 0)?;
     let settings = state.settings.load();
     let max_attachments = settings.max_attachments_per_message as usize;
     let max_attachment_size = settings.max_attachment_size as usize;
@@ -360,7 +361,7 @@ pub async fn create_message_multipart(
     let mut payload_json: Option<CreateMessage> = None;
     let mut files: Vec<(String, String, Vec<u8>)> = Vec::new(); // (filename, content_type, bytes)
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to read multipart field: {e}")))?
@@ -387,16 +388,26 @@ pub async fn create_message_multipart(
                 .content_type()
                 .unwrap_or("application/octet-stream")
                 .to_string();
-            let bytes = field
-                .bytes()
+            let mut bytes = Vec::new();
+            while let Some(chunk) = field
+                .chunk()
                 .await
-                .map_err(|e| AppError::BadRequest(format!("failed to read file: {e}")))?;
-            if bytes.len() > max_attachment_size {
-                return Err(AppError::PayloadTooLarge(
-                    "attachment exceeds maximum size".into(),
-                ));
+                .map_err(|e| AppError::BadRequest(format!("failed to read file: {e}")))?
+            {
+                if bytes.len().saturating_add(chunk.len()) > max_attachment_size {
+                    return Err(AppError::PayloadTooLarge(
+                        "attachment exceeds maximum size".into(),
+                    ));
+                }
+                crate::middleware::rate_limit::charge_upload(
+                    &state,
+                    &auth.user_id,
+                    0,
+                    chunk.len(),
+                )?;
+                bytes.extend_from_slice(&chunk);
             }
-            files.push((filename, content_type, bytes.to_vec()));
+            files.push((filename, content_type, bytes));
         }
     }
 
@@ -448,7 +459,7 @@ pub async fn create_message_multipart(
     for (filename, content_type, bytes) in files.iter().filter(|_| automod_policy.is_none()) {
         let attachment_id = crate::snowflake::generate();
 
-        let (url, size) = storage::save_attachment(
+        let (url, size, content_hash) = storage::save_attachment(
             &state.storage_path,
             &channel_id,
             &attachment_id,
@@ -475,6 +486,7 @@ pub async fn create_message_multipart(
             &url,
             width,
             height,
+            &content_hash,
         )
         .await?;
         attachments.push(attachment);

@@ -33,6 +33,8 @@ pub async fn get_public_settings(
             "max_sound_size": settings.max_sound_size,
             "max_attachment_size": settings.max_attachment_size,
             "max_attachments_per_message": settings.max_attachments_per_message,
+            "upload_requests_per_minute": settings.upload_requests_per_minute,
+            "upload_bytes_per_minute": settings.upload_bytes_per_minute,
             "server_name": settings.server_name,
             "registration_policy": settings.registration_policy,
             "motd": settings.motd,
@@ -51,6 +53,17 @@ pub async fn update_settings(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_server_admin(&auth)?;
 
+    if input
+        .upload_requests_per_minute
+        .is_some_and(|v| !(1..=600).contains(&v))
+        || input
+            .upload_bytes_per_minute
+            .is_some_and(|v| !(1..=1_099_511_627_776).contains(&v))
+    {
+        return Err(AppError::BadRequest(
+            "upload limits must be 1–600 requests/minute and 1–1099511627776 bytes/minute".into(),
+        ));
+    }
     let old_public_listing = state.settings.load().public_listing;
 
     let updated = db::settings::update_settings(&state.db, &input, state.db_is_postgres).await?;

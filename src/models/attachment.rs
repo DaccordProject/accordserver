@@ -7,6 +7,8 @@ pub struct Attachment {
     pub description: Option<String>,
     pub content_type: Option<String>,
     pub size: i64,
+    #[serde(default)]
+    pub content_hash: Option<String>,
     pub url: String,
     pub width: Option<i64>,
     pub height: Option<i64>,

@@ -131,7 +131,22 @@ pub async fn preflight(
         return Ok(None);
     }
     let policy = policy::load(state, channel.space_id.as_deref()).await?;
-    if !policy.enabled || policy::exempt(state, &policy, channel, auth).await? {
+    let enabled = policy.enabled && !policy::exempt(state, &policy, channel, auth).await?;
+    // Explicit blocks are useful without a model or an enabled scanning policy.
+    // A matching enabled hash rule may instead quarantine/timeout the upload.
+    let hash_rule = enabled
+        && policy
+            .rules
+            .iter()
+            .any(|r| matches!(r.trigger, Trigger::HashDenylist) && r.applies(channel));
+    if !hash_rule {
+        for (_, _, bytes) in files {
+            if policy::hash_blocked(state, channel, &hash(bytes)).await? {
+                return Err(AppError::BadRequest("attachment hash is blocked".into()));
+            }
+        }
+    }
+    if !enabled {
         return Ok(None);
     }
     let (count,size): (i64,i64) = sqlx::query_as("SELECT COUNT(*), CAST(COALESCE(SUM(size),0) AS BIGINT) FROM automod_uploads WHERE status IN ('pending','quarantined','rejected')").fetch_one(&state.db).await?;
@@ -332,6 +347,24 @@ pub async fn process_one(state: &AppState) -> Result<bool, AppError> {
         .await?;
         return Ok(true);
     }
+    if policy::hash_blocked(state, &channel, &upload.hash).await?
+        && !policy
+            .rules
+            .iter()
+            .any(|r| matches!(r.trigger, Trigger::HashDenylist) && r.applies(&channel))
+    {
+        finish(
+            state,
+            &upload,
+            "quarantined",
+            "attachment hash is blocked",
+            None,
+            None,
+            None,
+        )
+        .await?;
+        return Ok(true);
+    }
     let user = db::users::get_user(&state.db, &upload.author_id).await;
     let author = match user {
         Ok(u) if !u.disabled => AuthUser {
@@ -491,7 +524,7 @@ pub async fn finish(
                 if hash(&bytes) != upload.hash {
                     return Err(AppError::Internal("stored upload hash mismatch".into()));
                 }
-                let (url, _) = crate::storage::save_attachment(
+                let (url, _, _) = crate::storage::save_attachment(
                     &state.storage_path,
                     &upload.channel_id,
                     &upload.id,
@@ -547,8 +580,8 @@ pub async fn finish(
             .await?;
     }
     if let Some(url) = &public_file {
-        sqlx::query(&db::q("INSERT INTO attachments (id,message_id,filename,content_type,size,url,width,height) SELECT ?,id,?,?,?,?,?,? FROM messages WHERE id=? AND channel_id=?"))
-            .bind(&upload.id).bind(&upload.filename).bind(&upload.content_type).bind(upload.size).bind(url).bind(dimensions.0).bind(dimensions.1).bind(&upload.message_id).bind(&upload.channel_id).execute(&mut *tx).await?.rows_affected().eq(&1).then_some(()).ok_or_else(||AppError::Conflict("original message was deleted".into()))?;
+        sqlx::query(&db::q("INSERT INTO attachments (id,message_id,filename,content_type,size,url,width,height,content_hash) SELECT ?,id,?,?,?,?,?,?,? FROM messages WHERE id=? AND channel_id=?"))
+            .bind(&upload.id).bind(&upload.filename).bind(&upload.content_type).bind(upload.size).bind(url).bind(dimensions.0).bind(dimensions.1).bind(&upload.hash).bind(&upload.message_id).bind(&upload.channel_id).execute(&mut *tx).await?.rows_affected().eq(&1).then_some(()).ok_or_else(||AppError::Conflict("original message was deleted".into()))?;
     }
     sqlx::query(&db::q("INSERT INTO automod_events (id,upload_id,scope_id,actor_id,action,details,created_at) VALUES (?,?,?,?,?,?,?)"))
         .bind(crate::snowflake::generate()).bind(&upload.id).bind(upload.space_id.as_deref().unwrap_or("*")).bind(&actor).bind(status).bind(details.to_string()).bind(now()).execute(&mut *tx).await?;

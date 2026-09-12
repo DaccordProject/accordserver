@@ -522,6 +522,10 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         // Attachment moderation: authenticated and rate-limited with the API.
         .route("/automod/health", get(crate::automod::routes::health))
         .route(
+            "/automod/{scope}/attachments/{id}/block",
+            post(crate::automod::routes::block_attachment),
+        )
+        .route(
             "/automod/{scope}/policy",
             get(crate::automod::routes::get_policy)
                 .put(crate::automod::routes::set_policy)

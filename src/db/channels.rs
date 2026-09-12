@@ -58,6 +58,7 @@ pub async fn create_channel(
     space_id: &str,
     input: &CreateChannel,
 ) -> Result<ChannelRow, AppError> {
+    validate_rate_limit(input.rate_limit)?;
     let id = snowflake::generate();
     let position = input.position.unwrap_or(0);
 
@@ -88,6 +89,7 @@ pub async fn update_channel(
     input: &UpdateChannel,
     is_postgres: bool,
 ) -> Result<ChannelRow, AppError> {
+    validate_rate_limit(input.rate_limit)?;
     let now_fn = crate::db::now_sql(is_postgres);
     let mut sets = Vec::new();
     let mut str_values: Vec<Option<String>> = Vec::new();
@@ -193,6 +195,15 @@ pub async fn reorder_channels(
         .bind(space_id)
         .execute(pool)
         .await?;
+    }
+    Ok(())
+}
+
+fn validate_rate_limit(value: Option<i64>) -> Result<(), AppError> {
+    if value.is_some_and(|v| !(0..=21600).contains(&v)) {
+        return Err(AppError::BadRequest(
+            "rate_limit must be 0–21600 seconds".into(),
+        ));
     }
     Ok(())
 }

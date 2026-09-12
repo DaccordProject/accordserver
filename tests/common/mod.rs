@@ -63,6 +63,7 @@ impl TestServer {
             // Truncate all application tables (order doesn't matter with CASCADE).
             // server_settings is re-created by get_settings() below.
             for table in &[
+                "message_cooldowns",
                 "automod_events",
                 "automod_uploads",
                 "automod_cache",

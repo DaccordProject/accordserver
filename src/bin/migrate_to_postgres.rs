@@ -140,6 +140,7 @@ const TABLES: &[TableDef] = &[
     TableDef {
         name: "attachments",
         columns: &[
+            "content_hash",
             "id",
             "message_id",
             "channel_id",
@@ -256,6 +257,8 @@ const TABLES: &[TableDef] = &[
             "max_message_length",
             "max_attachment_size",
             "max_attachments_per_message",
+            "upload_requests_per_minute",
+            "upload_bytes_per_minute",
             "updated_at",
         ],
     },
@@ -300,12 +303,16 @@ const TABLES: &[TableDef] = &[
         columns: &["id", "user_id", "target_user_id", "type", "created_at"],
     },
     TableDef {
+        name: "message_cooldowns",
+        columns: &["channel_id", "user_id", "last_sent_ms"],
+    },
+    TableDef {
         name: "automod_policies",
         columns: &["scope_id", "policy"],
     },
     TableDef {
         name: "automod_hashes",
-        columns: &["scope_id", "hash", "reason"],
+        columns: &["scope_id", "hash", "reason", "added_by", "created_at"],
     },
     TableDef {
         name: "automod_uploads",

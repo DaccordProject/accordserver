@@ -21,10 +21,11 @@ pub async fn insert_attachment(
     url: &str,
     width: Option<i64>,
     height: Option<i64>,
+    content_hash: &str,
 ) -> Result<Attachment, AppError> {
     sqlx::query(
-        &super::q("INSERT INTO attachments (id, message_id, filename, content_type, size, url, width, height) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
+        &super::q("INSERT INTO attachments (id, message_id, filename, content_type, size, url, width, height, content_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
     )
     .bind(attachment_id)
     .bind(message_id)
@@ -34,6 +35,7 @@ pub async fn insert_attachment(
     .bind(url)
     .bind(width)
     .bind(height)
+    .bind(content_hash)
     .execute(pool)
     .await?;
 
@@ -43,6 +45,7 @@ pub async fn insert_attachment(
         description: None,
         content_type: content_type.map(|s| s.to_string()),
         size,
+        content_hash: Some(content_hash.to_owned()),
         url: url.to_string(),
         width,
         height,
@@ -54,7 +57,7 @@ pub async fn get_attachments_for_message(
     message_id: &str,
 ) -> Result<Vec<Attachment>, AppError> {
     let rows = sqlx::query(&super::q(
-        "SELECT id, filename, description, content_type, size, url, width, height \
+        "SELECT id, filename, description, content_type, size, url, width, height, content_hash \
          FROM attachments a WHERE message_id = ? AND NOT EXISTS (SELECT 1 FROM automod_uploads u WHERE u.id=a.id AND u.status <> 'published')",
     ))
     .bind(message_id)
@@ -75,7 +78,7 @@ pub async fn get_attachments_for_messages(
     let placeholders: Vec<&str> = message_ids.iter().map(|_| "?").collect();
     let in_clause = placeholders.join(", ");
     let sql = format!(
-        "SELECT id, message_id, filename, description, content_type, size, url, width, height \
+        "SELECT id, message_id, filename, description, content_type, size, url, width, height, content_hash \
          FROM attachments a WHERE message_id IN ({in_clause}) AND NOT EXISTS (SELECT 1 FROM automod_uploads u WHERE u.id=a.id AND u.status <> 'published') ORDER BY id ASC"
     );
 
@@ -103,6 +106,7 @@ fn row_to_attachment(row: sqlx::any::AnyRow) -> Attachment {
         description: row.get("description"),
         content_type: row.get("content_type"),
         size: row.get("size"),
+        content_hash: row.get("content_hash"),
         url: row.get("url"),
         width: row.get("width"),
         height: row.get("height"),

@@ -205,7 +205,7 @@ pub async fn delete_avatar(
 /// This makes the URL the single source of truth and avoids 404s if a client
 /// reconstructs URLs from a stale or mismatched message ID.
 ///
-/// Returns `(relative_url, file_size)`.
+/// Returns `(relative_url, file_size, sha256)`.
 pub async fn save_attachment(
     storage_path: &Path,
     channel_id: &str,
@@ -213,7 +213,7 @@ pub async fn save_attachment(
     filename: &str,
     bytes: &[u8],
     max_size: usize,
-) -> Result<(String, usize), AppError> {
+) -> Result<(String, usize, String), AppError> {
     if bytes.len() > max_size {
         return Err(AppError::PayloadTooLarge(format!(
             "attachment exceeds maximum size of {} MB",
@@ -237,7 +237,7 @@ pub async fn save_attachment(
         .map_err(|e| AppError::Internal(format!("failed to write attachment file: {e}")))?;
 
     let relative_url = format!("/cdn/attachments/{channel_id}/{attachment_id}/{safe_filename}");
-    Ok((relative_url, size))
+    Ok((relative_url, size, crate::automod::hash(bytes)))
 }
 
 /// Sanitize a filename to prevent directory traversal and other issues.
@@ -533,4 +533,38 @@ pub async fn reconcile_attachment_orphans(state: &crate::state::AppState) -> Res
         }
     }
     Ok(())
+}
+
+/// Stream a legacy local attachment's digest; never fetch a remote URL.
+pub async fn hash_local_attachment(storage_path: &Path, url: &str) -> Result<String, AppError> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+    let relative = url
+        .strip_prefix("/cdn/attachments/")
+        .ok_or_else(|| AppError::BadRequest("only local attachments can be hashed".into()))?;
+    let root = tokio::fs::canonicalize(storage_path.join("attachments"))
+        .await
+        .map_err(|_| AppError::NotFound("attachment file missing".into()))?;
+    let path = tokio::fs::canonicalize(root.join(relative))
+        .await
+        .map_err(|_| AppError::NotFound("attachment file missing".into()))?;
+    if !path.starts_with(&root) {
+        return Err(AppError::BadRequest("invalid attachment path".into()));
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| AppError::Internal(format!("cannot hash attachment: {e}")))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| AppError::Internal(format!("cannot hash attachment: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }

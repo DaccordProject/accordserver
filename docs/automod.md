@@ -3,7 +3,8 @@
 AutoMod scans uploads before publishing their attachments. It runs a specialized
 NudeNet 320n image detector on the server CPU, using ONNX Runtime from Rust. No
 Python process, GPU, or cloud account is needed. Existing installations keep
-moderation disabled until an operator enables a policy.
+model scanning disabled until an operator enables a policy. Explicit hash blocks
+and upload rate limits work independently of model scanning.
 
 The server includes the local inference code; the model and native runtime are
 optional installed assets. Neither is automatically downloaded when the server
@@ -206,7 +207,31 @@ Results are cached for one day by SHA-256 and scanner/preprocessing identity
 (up to 10,000 entries). Policy is evaluated again against cached scores, so a
 changed threshold takes effect without re-running inference. Updating the
 weights changes the local cache identity. Exact hashes do not catch modified or
-re-encoded copies; broader per-hash enforcement remains related work in #80.
+re-encoded copies. Every new local attachment stores its SHA-256 as indexed
+`content_hash`, including uploads made while scanning is disabled. Legacy rows
+may have a null hash; blocking one computes and stores it from the local file
+without downloading remote URLs. Identical uploads still own separate files;
+content-addressed storage and perceptual matching are follow-up work.
+
+A moderator with `manage_messages` can block an existing attachment with:
+
+```http
+POST /api/v1/automod/{space_id}/attachments/{attachment_id}/block
+Content-Type: application/json
+
+{"reason":"Repeated prohibited image"}
+```
+
+Use `*` instead of the space ID for an instance-wide block (instance admin only).
+The response includes `content_hash` and `scope_id`. Then use the normal
+message-delete action to remove the original. The block, moderator ID, timestamp
+and audit event survive message deletion. Scope mismatches are rejected.
+
+Explicit blocks reject identical uploads with HTTP 400 even if scanning is
+disabled, the uploader is exempt, or a policy omits the hash rule. An enabled,
+applicable hash rule can instead apply its configured action, such as quarantine.
+Space blocks apply only to that space; instance blocks apply to every space and
+DM. Removing a block uses the existing hash-delete endpoint.
 
 ## Message lifecycle and review API
 
@@ -214,7 +239,8 @@ re-encoded copies; broader per-hash enforcement remains related work in #80.
 is queued, with the ordinary message in `data` and IDs in `pending_attachments`.
 Message text can appear immediately; withheld attachment URLs and bytes cannot.
 Clients must treat 202 as accepted and can show an attachment processing state.
-Disabled/exempt uploads keep HTTP 200 and immediate attachment delivery.
+Disabled/exempt uploads keep HTTP 200 and immediate attachment delivery unless
+the file has an explicit hash block.
 
 The queue stores originals in `<storage>/automod/<id>`, outside every static
 file route. Withheld originals never have public attachment records. Safe
@@ -233,6 +259,7 @@ the existing URL-based CDN access behavior.
 | `GET /api/v1/automod/uploads/{id}/content` | Moderator only; download private original, `no-store`, sandboxed octet-stream |
 | `PATCH /api/v1/automod/uploads/{id}` | Moderator; review decision with mandatory reason |
 | `GET /api/v1/automod/{scope}/events?before=ID` | Moderator; persistent decision/configuration ledger |
+| `POST /api/v1/automod/{scope}/attachments/{id}/block` | Channel `manage_messages`, or instance admin for `*`; block a stored attachment |
 | `GET /api/v1/automod/{scope}/hashes?before=HASH` | Configurator; hash denylist, descending order |
 | `PUT /api/v1/automod/{scope}/hashes/{sha256}` | Configurator; block exact file, JSON `{"reason":"..."}` |
 | `DELETE /api/v1/automod/{scope}/hashes/{sha256}` | Configurator; unblock file |
@@ -303,3 +330,34 @@ ACCORD_AUTOMOD_FFMPEG_PATH=/absolute/path/ffmpeg \
 ACCORD_AUTOMOD_FFPROBE_PATH=/absolute/path/ffprobe \
 cargo test --test automod real_video_sampler_extracts_five_spaced_frames -- --ignored --nocapture
 ```
+
+
+## Slowmode and upload limits
+
+Channel `rate_limit` now enforces a cooldown of 0–21600 seconds (0 disables it).
+Text, thread replies and multipart messages share one cooldown per user and
+channel. Reservations and message insertion are atomic, so concurrent sends
+cannot both pass. Cooldowns survive message deletion and server restart.
+Effective `manage_messages` or `manage_channels` permissions, space ownership
+and instance admin privileges exempt users from slowmode.
+
+Multipart message requests also use independent per-user token buckets across
+all channels, including DMs. These apply to moderators and admins as well:
+
+| Server setting | Default | Accepted values |
+|---|---|---|
+| `upload_requests_per_minute` | 6 | 1–600 |
+| `upload_bytes_per_minute` | 52428800 (50 MiB) | 1–1099511627776 |
+
+Configure them through `PATCH /api/v1/admin/settings`. Both are exposed in
+client-facing settings. Capacity starts full and refills continuously over one
+minute. File bytes are charged while reading each multipart chunk, independent
+of `Content-Length`, before disk writes or publication. Failed attempts retain
+charges for requests and bytes already accepted. Each request must fit the byte
+budget; keep it at least as large as the largest upload you intend to allow.
+Upload buckets are bounded in memory and reset on restart; slowmode uses the
+database. Text messages continue to use the existing general request limiter.
+
+Both controls return HTTP 429 with a `Retry-After` header and numeric
+`error.retry_after` in seconds. The existing maximum file size and attachment
+count limits still apply.

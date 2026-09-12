@@ -299,22 +299,87 @@ pub async fn block_hash(
 ) -> Result<Json<serde_json::Value>, AppError> {
     authorize(&state, &scope, &auth, true).await?;
     validate_hash(&hash)?;
-    if body.reason.is_empty() || body.reason.len() > 2000 {
-        return Err(AppError::BadRequest("reason must be 1–2000 bytes".into()));
-    }
     let _guard = state.automod.processing.lock().await;
-    sqlx::query(&db::q("INSERT INTO automod_hashes (scope_id,hash,reason) VALUES (?,?,?) ON CONFLICT(scope_id,hash) DO UPDATE SET reason=excluded.reason")).bind(&scope).bind(&hash).bind(&body.reason).execute(&state.db).await?;
-    super::record_event(
-        &state,
-        None,
-        &scope,
-        Some(&auth.user_id),
-        "hash_blocked",
-        serde_json::json!({"hash":hash,"reason":body.reason}),
-    )
-    .await?;
+    let _admission = state.automod.admission.lock().await;
+    store_block(&state, &scope, &hash, &body.reason, &auth.user_id, None).await?;
     Ok(Json(serde_json::json!({"data":null})))
 }
+
+async fn store_block(
+    state: &AppState,
+    scope: &str,
+    hash: &str,
+    reason: &str,
+    actor: &str,
+    attachment: Option<&str>,
+) -> Result<(), AppError> {
+    if reason.trim().is_empty() || reason.len() > 2000 {
+        return Err(AppError::BadRequest("reason must be 1–2000 bytes".into()));
+    }
+    let now = super::now();
+    let mut tx = state.db.begin().await?;
+    sqlx::query(&db::q("INSERT INTO automod_hashes (scope_id,hash,reason,added_by,created_at) VALUES (?,?,?,?,?) ON CONFLICT(scope_id,hash) DO UPDATE SET reason=excluded.reason,added_by=excluded.added_by,created_at=excluded.created_at"))
+        .bind(scope).bind(hash).bind(reason).bind(actor).bind(now).execute(&mut *tx).await?;
+    if let Some(id) = attachment {
+        sqlx::query(&db::q("UPDATE attachments SET content_hash=? WHERE id=?"))
+            .bind(hash)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let details = serde_json::json!({"hash":hash,"reason":reason,"attachment_id":attachment});
+    sqlx::query(&db::q("INSERT INTO automod_events (id,scope_id,actor_id,action,details,created_at) VALUES (?,?,?,'hash_blocked',?,?)"))
+        .bind(crate::snowflake::generate()).bind(scope).bind(actor).bind(details.to_string()).bind(now).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Block an existing attachment without requiring moderators to download it.
+/// The normal message-delete action can then remove the original message.
+pub async fn block_attachment(
+    State(state): State<AppState>,
+    Path((scope, id)): Path<(String, String)>,
+    auth: AuthUser,
+    Json(body): Json<HashBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let row = sqlx::query(&db::q("SELECT a.content_hash,a.url,m.channel_id,m.space_id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?"))
+        .bind(&id).fetch_one(&state.db).await?;
+    let space: Option<String> = row.get("space_id");
+    let channel: String = row.get("channel_id");
+    if scope == "*" {
+        permissions::require_server_admin(&auth)?;
+    } else {
+        if space.as_deref() != Some(scope.as_str()) {
+            return Err(AppError::NotFound(
+                "attachment not found in this space".into(),
+            ));
+        }
+        permissions::require_channel_permission(&state.db, &channel, &auth, "manage_messages")
+            .await?;
+    }
+    let hash = match row.get::<Option<String>, _>("content_hash") {
+        Some(hash) => hash,
+        None => {
+            crate::storage::hash_local_attachment(&state.storage_path, &row.get::<String, _>("url"))
+                .await?
+        }
+    };
+    let _guard = state.automod.processing.lock().await;
+    let _admission = state.automod.admission.lock().await;
+    store_block(
+        &state,
+        &scope,
+        &hash,
+        &body.reason,
+        &auth.user_id,
+        Some(&id),
+    )
+    .await?;
+    Ok(Json(
+        serde_json::json!({"data":{"content_hash":hash,"scope_id":scope}}),
+    ))
+}
+
 pub async fn unblock_hash(
     State(state): State<AppState>,
     Path((scope, hash)): Path<(String, String)>,
@@ -348,9 +413,9 @@ pub async fn list_hashes(
     Query(query): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     authorize(&state, &scope, &auth, true).await?;
-    let rows = sqlx::query(&db::q("SELECT hash,reason FROM automod_hashes WHERE scope_id=? AND (CAST(? AS TEXT) IS NULL OR hash<?) ORDER BY hash DESC LIMIT 100")).bind(&scope).bind(&query.before).bind(&query.before).fetch_all(&state.db).await?;
+    let rows = sqlx::query(&db::q("SELECT hash,reason,added_by,created_at FROM automod_hashes WHERE scope_id=? AND (CAST(? AS TEXT) IS NULL OR hash<?) ORDER BY hash DESC LIMIT 100")).bind(&scope).bind(&query.before).bind(&query.before).fetch_all(&state.db).await?;
     Ok(Json(
-        serde_json::json!({"data":rows.iter().map(|r|serde_json::json!({"hash":r.get::<String,_>("hash"),"reason":r.get::<String,_>("reason")})).collect::<Vec<_>>()}),
+        serde_json::json!({"data":rows.iter().map(|r|serde_json::json!({"hash":r.get::<String,_>("hash"),"reason":r.get::<String,_>("reason"),"added_by":r.get::<Option<String>,_>("added_by"),"created_at":r.get::<Option<i64>,_>("created_at")})).collect::<Vec<_>>()}),
     ))
 }
 pub async fn events(

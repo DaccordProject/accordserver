@@ -200,11 +200,7 @@ pub async fn non_media_match(
     Ok(match &rule.trigger {
         Trigger::Media { .. } => false,
         Trigger::NonNsfwAttachment => !channel.nsfw,
-        Trigger::HashDenylist => {
-            let (n,): (i64,) = sqlx::query_as(&db::q("SELECT COUNT(*) FROM automod_hashes WHERE hash = ? AND (scope_id = '*' OR scope_id = ?)"))
-                .bind(hash).bind(channel.space_id.as_deref().unwrap_or("*")).fetch_one(&state.db).await?;
-            n > 0
-        }
+        Trigger::HashDenylist => hash_blocked(state, channel, hash).await?,
         Trigger::LowTrust {
             min_account_age_hours,
             min_space_age_hours,
@@ -223,4 +219,19 @@ pub async fn non_media_match(
             low
         }
     })
+}
+
+pub async fn hash_blocked(
+    state: &AppState,
+    channel: &ChannelRow,
+    hash: &str,
+) -> Result<bool, AppError> {
+    let (n,): (i64,) = sqlx::query_as(&db::q(
+        "SELECT COUNT(*) FROM automod_hashes WHERE hash=? AND (scope_id='*' OR scope_id=?)",
+    ))
+    .bind(hash)
+    .bind(channel.space_id.as_deref().unwrap_or("*"))
+    .fetch_one(&state.db)
+    .await?;
+    Ok(n > 0)
 }
