@@ -927,9 +927,9 @@ async fn automod_decisions_broadcast_their_audit_log_entry() {
     socket.close(None).await.unwrap();
 
     // The broadcast reflects a row that is really there.
-    let (rows,): (i64,) = sqlx::query_as(
+    let (rows,): (i64,) = sqlx::query_as(&db::q(
         "SELECT COUNT(*) FROM audit_log WHERE space_id=? AND action_type='automod.quarantined'",
-    )
+    ))
     .bind(&space)
     .fetch_one(server.pool())
     .await
