@@ -7,6 +7,7 @@ container="accord-automod-test-$$"
 cleanup() {
   docker logs "$container" 2>/dev/null || true
   docker rm -f "$container" >/dev/null 2>&1 || true
+  docker run --rm -v "$test_dir:/test-data" "$image" chmod -R a+rwX /test-data >/dev/null 2>&1 || true
   rm -rf "$test_dir"
 }
 trap cleanup EXIT
@@ -24,7 +25,7 @@ docker run -d --name "$container" -v "$test_dir:/app/data" \
   -e ACCORD_AUTOMOD_SCANNER=local -p 127.0.0.1::39099 "$image"
 port="$(docker port "$container" 39099/tcp | cut -d: -f2)"
 url="http://127.0.0.1:$port"
-curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 "$url/health"
+curl --fail --silent --show-error --retry 30 --retry-all-errors --retry-delay 1 --max-time 2 "$url/health"
 token="$(jq -n --arg password "$ACCORD_BOOTSTRAP_PASSWORD" \
   '{username:"docker-test",password:$password}' | \
   curl --fail --silent --show-error -H 'Content-Type: application/json' \
