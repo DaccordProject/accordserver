@@ -36,9 +36,22 @@ Set `ACCORD_AUTOMOD_RUNTIME_PATH` to the extracted `.dylib`, `.dll`, or `.so` an
 packaging and performance validation. Model/runtime licenses remain in their
 upstream distributions; the repository does not bundle the weights.
 
-For Docker, mount the installed asset directory inside the container and use
-container paths in these environment variables. The normal image contains the
-Rust backend and does not include downloaded assets. Desktop launches likewise
+The Linux amd64 Docker image includes ONNX Runtime 1.22, FFmpeg and FFprobe.
+Model weights remain optional: mount the helper's asset directory read-only at
+`/app/data/automod-model` and set `ACCORD_AUTOMOD_SCANNER=local`. The image already
+sets the model and runtime paths; do not override its runtime path with the
+helper's host path. For example, add this Compose override to your deployment:
+
+```yaml
+services:
+  accordserver:
+    volumes:
+      - ./data/automod-model:/app/data/automod-model:ro
+    environment:
+      ACCORD_AUTOMOD_SCANNER: local
+```
+
+Enable a policy after starting the container. Desktop launches likewise
 need the environment variables and locally installed assets; the client
 configuration UI is tracked in DaccordProject/daccord#322.
 
