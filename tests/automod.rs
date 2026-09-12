@@ -855,3 +855,18 @@ async fn existing_system_username_cannot_stall_or_impersonate_automod() {
         .unwrap();
     assert_ne!(actor, named_system.user.id);
 }
+
+#[tokio::test]
+async fn upload_response_does_not_wait_for_an_in_flight_scan() {
+    let (server, _, member, _, channel, _) = setup(0.1, false).await;
+    // Simulate a slow scan. Mutation middleware must not wait on its lock
+    // when it drains the independent attachment-deletion queue.
+    let _scan = server.state.automod.processing.lock().await;
+    let (status, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        upload(&server, &member, &channel, b"queued while busy"),
+    )
+    .await
+    .expect("upload waited for scan completion");
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+}

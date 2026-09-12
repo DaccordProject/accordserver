@@ -403,7 +403,7 @@ pub fn temp_storage_path() -> PathBuf {
 pub async fn drain_attachment_deletions(state: &crate::state::AppState) -> Result<(), AppError> {
     // Release may reuse an attachment ID after a moderator withdraws it. Do
     // not unlink a newly released copy using a stale deletion queue entry.
-    let _automod_guard = state.automod.processing.lock().await;
+    let _automod_guard = state.automod.publication.lock().await;
     let rows: Vec<(String,)> = sqlx::query_as("SELECT url FROM attachment_deletions LIMIT 100")
         .fetch_all(&state.db)
         .await?;

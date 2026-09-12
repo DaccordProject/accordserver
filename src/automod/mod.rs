@@ -21,6 +21,7 @@ pub struct AutoMod {
     pub video: Arc<dyn video::VideoSampler>,
     pub admission: tokio::sync::Mutex<()>,
     pub processing: tokio::sync::Mutex<()>,
+    pub publication: tokio::sync::Mutex<()>,
     pub max_held: i64,
     pub max_held_bytes: i64,
     pub scan_timeout: Duration,
@@ -37,6 +38,7 @@ impl AutoMod {
             video: Arc::new(video::Ffmpeg::default()),
             admission: tokio::sync::Mutex::new(()),
             processing: tokio::sync::Mutex::new(()),
+            publication: tokio::sync::Mutex::new(()),
             max_held: 1000,
             max_held_bytes: 1024 * 1024 * 1024,
             scan_timeout: Duration::from_secs(30),
@@ -280,7 +282,7 @@ async fn scan(state: &AppState, upload: &Upload) -> Result<ScanResult, String> {
 pub async fn process_one(state: &AppState) -> Result<bool, AppError> {
     let _guard = state.automod.processing.lock().await;
     let admission = state.automod.admission.lock().await;
-    let upload: Option<Upload> = sqlx::query_as(&db::q("SELECT * FROM automod_uploads WHERE status = 'pending' AND next_attempt <= ? ORDER BY created_at,id LIMIT 1"))
+    let upload: Option<Upload> = sqlx::query_as(&db::q("SELECT * FROM automod_uploads WHERE status = 'pending' AND next_attempt <= ? ORDER BY next_attempt,id LIMIT 1"))
         .bind(now()).fetch_optional(&state.db).await?;
     drop(admission);
     let Some(upload) = upload else {
@@ -469,6 +471,9 @@ pub async fn finish(
     result: Option<&ScanResult>,
     reviewer: Option<&str>,
 ) -> Result<(), AppError> {
+    // Serialize file publication with deletion cleanup, without holding this
+    // lock during inference (API mutation middleware also drains deletions).
+    let _publication = state.automod.publication.lock().await;
     let actor = match reviewer {
         Some(id) => id.to_string(),
         None => db::users::get_or_create_system_user(&state.db).await?,
