@@ -295,6 +295,10 @@ All REST endpoints live under `/api/v1`. The gateway WebSocket is at `/ws`.
 | Applications | Bot app CRUD, token reset |
 | Gateway | `GET /gateway`, `GET /gateway/bot` |
 
+Space objects returned by `GET /users/@me/spaces` and `GET /spaces/{id}`
+include `member_count` and `presence_count`. These aggregate fields let clients
+render complete roster totals without downloading every member record.
+
 ### Authentication
 
 Register and login to obtain a bearer token:

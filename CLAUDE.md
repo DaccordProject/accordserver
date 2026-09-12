@@ -66,7 +66,7 @@ Authentication on the gateway uses `"Bot <token>"` or `"Bearer <token>"` in the 
 All REST endpoints are under `/api/v1` with a rate-limit middleware layer. The router is built in `routes/mod.rs`. Key resource groups:
 
 - **Auth** — `POST /auth/register` (unauthenticated), `POST /auth/login` (unauthenticated), `POST /auth/logout` (authenticated). Passwords hashed with Argon2id. Returns user + bearer token on register/login.
-- **Users** — `GET/PATCH /users/@me`, `GET /users/{user_id}`, `GET /users/@me/spaces`
+- **Users** — `GET/PATCH /users/@me`, `GET /users/{user_id}`, `GET /users/@me/spaces`. Space summaries include `member_count` and `presence_count`, computed in grouped queries so clients do not need full rosters for totals.
 - **Spaces** (guilds) — CRUD + channel listing/creation/reordering. Spaces have a `public` flag; public spaces allow joining without an invite via `POST /spaces/{space_id}/join`.
 - **Channels** — CRUD (nested under spaces for creation, top-level for get/update/delete)
 - **Messages** — CRUD, bulk delete, pins, typing indicators
