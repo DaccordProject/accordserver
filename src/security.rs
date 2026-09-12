@@ -53,6 +53,7 @@ pub struct SecurityState {
     pub sockets: Admission,
     pub gateway_users: Admission,
     pub tracker_lock: Mutex<()>,
+    pub upload_limits: dashmap::DashMap<String, crate::middleware::rate_limit::UploadBucket>,
     voice_cleanup: tokio::sync::Mutex<()>,
 }
 
@@ -63,6 +64,7 @@ impl Default for SecurityState {
             sockets: Admission::new(512, 32),
             gateway_users: Admission::new(512, 8),
             tracker_lock: Mutex::new(()),
+            upload_limits: dashmap::DashMap::new(),
             voice_cleanup: tokio::sync::Mutex::new(()),
         }
     }

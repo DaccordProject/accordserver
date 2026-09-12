@@ -140,6 +140,7 @@ const TABLES: &[TableDef] = &[
     TableDef {
         name: "attachments",
         columns: &[
+            "content_hash",
             "id",
             "message_id",
             "channel_id",
@@ -256,6 +257,8 @@ const TABLES: &[TableDef] = &[
             "max_message_length",
             "max_attachment_size",
             "max_attachments_per_message",
+            "upload_requests_per_minute",
+            "upload_bytes_per_minute",
             "updated_at",
         ],
     },
@@ -298,6 +301,57 @@ const TABLES: &[TableDef] = &[
     TableDef {
         name: "relationships",
         columns: &["id", "user_id", "target_user_id", "type", "created_at"],
+    },
+    TableDef {
+        name: "message_cooldowns",
+        columns: &["channel_id", "user_id", "last_sent_ms"],
+    },
+    TableDef {
+        name: "automod_policies",
+        columns: &["scope_id", "policy"],
+    },
+    TableDef {
+        name: "automod_hashes",
+        columns: &["scope_id", "hash", "reason", "added_by", "created_at"],
+    },
+    TableDef {
+        name: "automod_uploads",
+        columns: &[
+            "id",
+            "message_id",
+            "channel_id",
+            "space_id",
+            "author_id",
+            "filename",
+            "content_type",
+            "size",
+            "hash",
+            "status",
+            "reason",
+            "result",
+            "rule_id",
+            "created_at",
+            "expires_at",
+            "next_attempt",
+            "attempts",
+            "file_removed",
+        ],
+    },
+    TableDef {
+        name: "automod_cache",
+        columns: &["hash", "scanner_version", "result", "expires_at"],
+    },
+    TableDef {
+        name: "automod_events",
+        columns: &[
+            "id",
+            "upload_id",
+            "scope_id",
+            "actor_id",
+            "action",
+            "details",
+            "created_at",
+        ],
     },
 ];
 

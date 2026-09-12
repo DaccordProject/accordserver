@@ -63,6 +63,12 @@ impl TestServer {
             // Truncate all application tables (order doesn't matter with CASCADE).
             // server_settings is re-created by get_settings() below.
             for table in &[
+                "message_cooldowns",
+                "automod_events",
+                "automod_uploads",
+                "automod_cache",
+                "automod_hashes",
+                "automod_policies",
                 "voice_evictions",
                 "attachment_deletions",
                 "read_states",
@@ -127,6 +133,7 @@ impl TestServer {
         let settings = db::settings::get_settings(&pool).await.unwrap_or_default();
 
         let state = AppState {
+            automod: Arc::new(accordserver::automod::AutoMod::default()),
             security: Arc::new(accordserver::security::SecurityState::default()),
             db: pool,
             db_is_postgres: is_postgres,
@@ -516,4 +523,39 @@ pub async fn parse_body(response: axum::response::Response) -> serde_json::Value
 pub async fn test_app() -> axum::Router {
     let server = TestServer::new().await;
     routes::router(server.state)
+}
+
+/// Build a `multipart/form-data` body for `POST /channels/{id}/messages/upload`,
+/// with a `payload_json` part and a single `files[0]` part.
+pub fn build_multipart_upload_body(
+    boundary: &str,
+    payload_json: &serde_json::Value,
+    filename: &str,
+    content_type: &str,
+    file_bytes: &[u8],
+) -> Vec<u8> {
+    let mut body: Vec<u8> = Vec::new();
+    let payload_str = serde_json::to_string(payload_json).unwrap();
+
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"payload_json\"\r\n\
+          Content-Type: application/json\r\n\r\n",
+    );
+    body.extend_from_slice(payload_str.as_bytes());
+    body.extend_from_slice(b"\r\n");
+
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"files[0]\"; filename=\"{filename}\"\r\n\
+             Content-Type: {content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(file_bytes);
+    body.extend_from_slice(b"\r\n");
+
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
 }

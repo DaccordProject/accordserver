@@ -60,6 +60,7 @@ pub async fn accept_invite(
                 target_user_ids: None,
                 event,
                 intent: "members".to_string(),
+                required_permission: None,
             });
         }
 

@@ -217,7 +217,11 @@ async fn run_main_server(config: Config) {
         _ => None,
     };
 
+    let automod = tokio::task::spawn_blocking(accordserver::automod::AutoMod::from_env)
+        .await
+        .expect("automod initialization task");
     let state = AppState {
+        automod: Arc::new(automod),
         security: Arc::new(accordserver::security::SecurityState::default()),
         db,
         db_is_postgres: accordserver::db::url_is_postgres(&config.database_url),
@@ -295,6 +299,7 @@ async fn run_main_server(config: Config) {
             }
         }
     });
+    tokio::spawn(accordserver::automod::run(state.clone()));
     let app = accordserver::routes::router(state);
 
     let listener = TcpListener::bind((config.bind.as_str(), config.port))

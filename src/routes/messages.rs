@@ -8,7 +8,7 @@ use crate::error::AppError;
 use crate::middleware::auth::{AuthUser, OptionalAuthUser};
 use crate::middleware::permissions::{
     require_channel_membership, require_channel_permission, require_channel_read_access,
-    require_not_timed_out,
+    require_not_timed_out, slowmode_cooldown_ms,
 };
 use crate::models::attachment::Attachment;
 use crate::models::message::{BulkDeleteMessages, CreateMessage, MessageRow, UpdateMessage};
@@ -192,12 +192,14 @@ pub async fn create_message(
         }
     }
 
+    let cooldown_ms = slowmode_cooldown_ms(&state.db, &channel, &auth).await?;
     let msg = db::messages::create_message(
         &state.db,
         &channel_id,
         &auth.user_id,
         channel.space_id.as_deref(),
         &input,
+        cooldown_ms,
     )
     .await?;
 
@@ -229,6 +231,7 @@ pub async fn create_message(
             target_user_ids: dm_targets.clone(),
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
 
         // When a thread reply is created, broadcast an update for the parent
@@ -258,6 +261,7 @@ pub async fn create_message(
                     target_user_ids: None,
                     event: update_event,
                     intent: "messages".to_string(),
+                    required_permission: None,
                 });
             }
         }
@@ -328,6 +332,7 @@ pub async fn create_message(
                             target_user_ids: None,
                             event,
                             intent: "messages".to_string(),
+                            required_permission: None,
                         });
                     }
                 }
@@ -346,21 +351,22 @@ pub async fn create_message_multipart(
     Path(channel_id): Path<String>,
     auth: AuthUser,
     mut multipart: Multipart,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
     let space_id =
         require_channel_permission(&state.db, &channel_id, &auth, "send_messages").await?;
     if !space_id.is_empty() {
         require_not_timed_out(&state.db, &space_id, &auth).await?;
     }
 
+    crate::middleware::rate_limit::charge_upload(&state, &auth.user_id, 1, 0)?;
     let settings = state.settings.load();
     let max_attachments = settings.max_attachments_per_message as usize;
     let max_attachment_size = settings.max_attachment_size as usize;
 
     let mut payload_json: Option<CreateMessage> = None;
-    let mut files: Vec<(String, String, Vec<u8>)> = Vec::new(); // (filename, content_type, bytes)
+    let mut files: Vec<crate::automod::UploadFile> = Vec::new();
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to read multipart field: {e}")))?
@@ -387,11 +393,32 @@ pub async fn create_message_multipart(
                 .content_type()
                 .unwrap_or("application/octet-stream")
                 .to_string();
-            let bytes = field
-                .bytes()
+            let mut bytes = Vec::new();
+            while let Some(chunk) = field
+                .chunk()
                 .await
-                .map_err(|e| AppError::BadRequest(format!("failed to read file: {e}")))?;
-            files.push((filename, content_type, bytes.to_vec()));
+                .map_err(|e| AppError::BadRequest(format!("failed to read file: {e}")))?
+            {
+                if bytes.len().saturating_add(chunk.len()) > max_attachment_size {
+                    return Err(AppError::PayloadTooLarge(
+                        "attachment exceeds maximum size".into(),
+                    ));
+                }
+                crate::middleware::rate_limit::charge_upload(
+                    &state,
+                    &auth.user_id,
+                    0,
+                    chunk.len(),
+                )?;
+                bytes.extend_from_slice(&chunk);
+            }
+            let hash = crate::storage::content_hash(&bytes);
+            files.push(crate::automod::UploadFile {
+                filename,
+                content_type,
+                bytes,
+                hash,
+            });
         }
     }
 
@@ -405,15 +432,38 @@ pub async fn create_message_multipart(
     }
 
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
-    let msg = db::messages::create_message(
-        &state.db,
-        &channel_id,
-        &auth.user_id,
-        channel.space_id.as_deref(),
-        &input,
-    )
-    .await?;
+    let cooldown_ms = slowmode_cooldown_ms(&state.db, &channel, &auth).await?;
 
+    // The admission lock covers only the hash/policy check and the queue
+    // insert, which must agree on the held-upload budget. Holding it across the
+    // file writes and the broadcast below would serialize every upload on the
+    // instance, including when automod is disabled.
+    let (msg, automod_policy, pending_ids) = {
+        let _admission = state.automod.admission.lock().await;
+        let automod_policy = crate::automod::preflight(&state, &channel, &auth, &files).await?;
+        let msg = db::messages::create_message(
+            &state.db,
+            &channel_id,
+            &auth.user_id,
+            channel.space_id.as_deref(),
+            &input,
+            cooldown_ms,
+        )
+        .await?;
+        let mut pending_ids = Vec::new();
+        if let Some(policy) = &automod_policy {
+            match crate::automod::enqueue(&state, &channel, &msg.id, &auth.user_id, policy, &files)
+                .await
+            {
+                Ok(ids) => pending_ids = ids,
+                Err(error) => {
+                    db::messages::delete_message(&state.db, &msg.id).await?;
+                    return Err(error);
+                }
+            }
+        }
+        (msg, automod_policy, pending_ids)
+    };
     apply_mention_counts(&state, &msg).await;
 
     // Save files and create attachment records.
@@ -422,40 +472,46 @@ pub async fn create_message_multipart(
     // directory name (instead of the message ID). This way the URL returned
     // to the client, the URL stored in the database, and the file path on
     // disk are all derived from the same stable identifier and cannot drift.
+    //
+    // When automod holds the batch, nothing is published here: the worker
+    // writes the public file and attachment row once it decides.
     let mut attachments: Vec<Attachment> = Vec::new();
-    for (filename, content_type, bytes) in &files {
-        let attachment_id = crate::snowflake::generate();
+    if automod_policy.is_none() {
+        for file in &files {
+            let attachment_id = crate::snowflake::generate();
 
-        let (url, size) = storage::save_attachment(
-            &state.storage_path,
-            &channel_id,
-            &attachment_id,
-            filename,
-            bytes,
-            max_attachment_size,
-        )
-        .await?;
+            let (url, size) = storage::save_attachment(
+                &state.storage_path,
+                &channel_id,
+                &attachment_id,
+                &file.filename,
+                &file.bytes,
+                max_attachment_size,
+            )
+            .await?;
 
-        // Detect image dimensions for image content types
-        let (width, height) = if content_type.starts_with("image/") {
-            detect_image_dimensions(bytes)
-        } else {
-            (None, None)
-        };
+            // Detect image dimensions for image content types
+            let (width, height) = if file.content_type.starts_with("image/") {
+                detect_image_dimensions(&file.bytes)
+            } else {
+                (None, None)
+            };
 
-        let attachment = db::attachments::insert_attachment(
-            &state.db,
-            &attachment_id,
-            &msg.id,
-            filename,
-            Some(content_type.as_str()),
-            size as i64,
-            &url,
-            width,
-            height,
-        )
-        .await?;
-        attachments.push(attachment);
+            let attachment = db::attachments::insert_attachment(
+                &state.db,
+                &attachment_id,
+                &msg.id,
+                &file.filename,
+                Some(file.content_type.as_str()),
+                size as i64,
+                &url,
+                width,
+                height,
+                &file.hash,
+            )
+            .await?;
+            attachments.push(attachment);
+        }
     }
 
     let json = message_row_to_json_with_attachments(&msg, &attachments, None);
@@ -472,10 +528,19 @@ pub async fn create_message_multipart(
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
     }
 
-    Ok(Json(serde_json::json!({ "data": json })))
+    let status = if pending_ids.is_empty() {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::ACCEPTED
+    };
+    Ok((
+        status,
+        Json(serde_json::json!({ "data": json, "pending_attachments": pending_ids })),
+    ))
 }
 
 pub async fn update_message(
@@ -540,6 +605,7 @@ pub async fn update_message(
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
     }
 
@@ -613,6 +679,7 @@ pub async fn delete_message(
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
     }
 
@@ -733,6 +800,7 @@ pub async fn typing_indicator(
             target_user_ids: None,
             event,
             intent: "message_typing".to_string(),
+            required_permission: None,
         });
     }
 
@@ -1006,7 +1074,7 @@ pub async fn messages_to_forum_json(
 }
 
 /// Try to detect image dimensions from raw bytes (PNG and JPEG).
-fn detect_image_dimensions(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
+pub(crate) fn detect_image_dimensions(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
     // PNG: bytes 16-19 = width, 20-23 = height (big-endian u32 in IHDR)
     if bytes.len() >= 24 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
         let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as i64;

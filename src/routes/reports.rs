@@ -172,6 +172,7 @@ pub async fn create_direct_report(
                 target_user_ids: None,
                 event,
                 intent: "moderation".to_string(),
+                required_permission: None,
             });
         }
     }
@@ -283,6 +284,7 @@ pub async fn create_report(
             target_user_ids: None,
             event,
             intent: "moderation".to_string(),
+            required_permission: None,
         });
     }
 

@@ -263,6 +263,7 @@ async fn apply_message_create(
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
     }
 

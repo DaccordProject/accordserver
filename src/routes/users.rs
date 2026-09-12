@@ -87,7 +87,9 @@ pub async fn update_current_user(
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
             let (url, _, _, _) = storage::save_avatar_image(
-                &state.storage_path,
+                &state,
+                &auth.user_id,
+                None,
                 "avatars",
                 &auth.user_id,
                 avatar,
@@ -114,7 +116,9 @@ pub async fn update_current_user(
                 let _ = storage::delete_file(&state.storage_path, old_banner).await;
             }
             let (url, _, _, _) = storage::save_avatar_image(
-                &state.storage_path,
+                &state,
+                &auth.user_id,
+                None,
                 "banners",
                 &auth.user_id,
                 banner,
@@ -188,6 +192,7 @@ async fn broadcast_user_update(state: &AppState, user: &crate::models::user::Use
             target_user_ids: None,
             event: event(),
             intent: "users".to_string(),
+            required_permission: None,
         });
     }
     let _ = tx.send(GatewayBroadcast {
@@ -195,6 +200,7 @@ async fn broadcast_user_update(state: &AppState, user: &crate::models::user::Use
         target_user_ids: Some(targets.into_iter().collect()),
         event: event(),
         intent: "users".to_string(),
+        required_permission: None,
     });
 }
 
@@ -334,6 +340,7 @@ pub async fn create_dm_channel(
             target_user_ids: Some(participant_ids),
             event,
             intent: "channels".to_string(),
+            required_permission: None,
         });
     }
 

@@ -72,6 +72,7 @@ pub async fn ack_channel(
             target_user_ids: Some(vec![auth.user_id.clone()]),
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
     }
 

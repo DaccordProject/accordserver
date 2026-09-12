@@ -151,14 +151,30 @@ pub async fn get_or_create_system_user(pool: &AnyPool) -> Result<String, AppErro
         return Ok(row.get("id"));
     }
 
-    let user = create_user(
+    let user = match create_user(
         pool,
         &CreateUser {
             username: "System".to_string(),
             display_name: Some("System".to_string()),
         },
     )
-    .await?;
+    .await
+    {
+        Ok(user) => user,
+        Err(AppError::Conflict(_)) => {
+            // A member may already own this username. Never promote that
+            // account, and never let the collision stall automated moderation.
+            create_user(
+                pool,
+                &CreateUser {
+                    username: format!("System_{}", snowflake::generate()),
+                    display_name: Some("System".to_string()),
+                },
+            )
+            .await?
+        }
+        Err(error) => return Err(error),
+    };
 
     sqlx::query(&super::q("UPDATE users SET system = TRUE WHERE id = ?"))
         .bind(&user.id)

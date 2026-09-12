@@ -217,7 +217,9 @@ pub async fn update_member(
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
             let (url, _, _, _) = storage::save_avatar_image(
-                &state.storage_path,
+                &state,
+                &auth.user_id,
+                Some(&space_id),
                 "avatars",
                 &entity_id,
                 avatar,
@@ -251,6 +253,7 @@ pub async fn update_member(
             target_user_ids: None,
             event,
             intent: "members".to_string(),
+            required_permission: None,
         });
     }
 
@@ -293,6 +296,7 @@ pub async fn kick_member(
             target_user_ids: None,
             event,
             intent: "members".to_string(),
+            required_permission: None,
         });
     }
 
@@ -355,6 +359,7 @@ pub async fn leave_space(
                 target_user_ids: None,
                 event,
                 intent: "members".to_string(),
+                required_permission: None,
             });
         }
         return Ok(Json(serde_json::json!({ "data": null })));
@@ -389,6 +394,7 @@ pub async fn leave_space(
             target_user_ids: None,
             event,
             intent: "members".to_string(),
+            required_permission: None,
         });
     }
 
@@ -428,7 +434,9 @@ pub async fn update_own_member(
                 let _ = storage::delete_file(&state.storage_path, old_avatar).await;
             }
             let (url, _, _, _) = storage::save_avatar_image(
-                &state.storage_path,
+                &state,
+                &auth.user_id,
+                Some(&space_id),
                 "avatars",
                 &entity_id,
                 avatar,
@@ -472,6 +480,7 @@ pub async fn update_own_member(
             target_user_ids: None,
             event,
             intent: "members".to_string(),
+            required_permission: None,
         });
     }
 
@@ -512,6 +521,7 @@ pub async fn add_role(
             target_user_ids: None,
             event,
             intent: "members".to_string(),
+            required_permission: None,
         });
     }
 
@@ -545,6 +555,7 @@ pub async fn remove_role(
             target_user_ids: None,
             event,
             intent: "members".to_string(),
+            required_permission: None,
         });
     }
 

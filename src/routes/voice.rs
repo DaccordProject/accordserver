@@ -306,6 +306,7 @@ pub(crate) async fn broadcast_call_event(
             target_user_ids: Some(participant_ids),
             event,
             intent: "voice_states".to_string(),
+            required_permission: None,
         });
     }
 }
@@ -350,6 +351,7 @@ pub(crate) async fn broadcast_voice_state_update(
             target_user_ids: targets,
             event,
             intent: "voice_states".to_string(),
+            required_permission: None,
         });
     }
 }

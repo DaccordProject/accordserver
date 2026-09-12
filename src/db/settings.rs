@@ -6,7 +6,7 @@ use crate::models::settings::{ServerSettings, UpdateServerSettings};
 pub async fn get_settings(pool: &AnyPool) -> Result<ServerSettings, AppError> {
     let row = sqlx::query(
         "SELECT max_emoji_size, max_avatar_size, max_sound_size, max_attachment_size, \
-         max_attachments_per_message, server_name, registration_policy, max_spaces, \
+         max_attachments_per_message, upload_requests_per_minute, upload_bytes_per_minute, server_name, registration_policy, max_spaces, \
          max_members_per_space, motd, public_listing, tos_enabled, tos_text, \
          tos_version, tos_url, updated_at \
          FROM server_settings WHERE id = 1",
@@ -20,6 +20,8 @@ pub async fn get_settings(pool: &AnyPool) -> Result<ServerSettings, AppError> {
         max_sound_size: row.get("max_sound_size"),
         max_attachment_size: row.get("max_attachment_size"),
         max_attachments_per_message: row.get("max_attachments_per_message"),
+        upload_requests_per_minute: row.get("upload_requests_per_minute"),
+        upload_bytes_per_minute: row.get("upload_bytes_per_minute"),
         server_name: row.get("server_name"),
         registration_policy: row.get("registration_policy"),
         max_spaces: row.get("max_spaces"),
@@ -55,6 +57,12 @@ pub async fn update_settings(
     }
     if input.max_attachments_per_message.is_some() {
         sets.push("max_attachments_per_message = ?");
+    }
+    if input.upload_requests_per_minute.is_some() {
+        sets.push("upload_requests_per_minute = ?");
+    }
+    if input.upload_bytes_per_minute.is_some() {
+        sets.push("upload_bytes_per_minute = ?");
     }
     if input.server_name.is_some() {
         sets.push("server_name = ?");
@@ -118,6 +126,12 @@ pub async fn update_settings(
         query = query.bind(v);
     }
     if let Some(v) = input.max_attachments_per_message {
+        query = query.bind(v);
+    }
+    if let Some(v) = input.upload_requests_per_minute {
+        query = query.bind(v);
+    }
+    if let Some(v) = input.upload_bytes_per_minute {
         query = query.bind(v);
     }
     if let Some(ref v) = input.server_name {

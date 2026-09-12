@@ -103,3 +103,58 @@ pub async fn rate_limit_middleware(
     headers.insert("X-RateLimit-Reset", reset.to_string().parse().unwrap());
     response
 }
+
+/// Separate per-user budgets for multipart requests and actual file bytes.
+/// Fractional refill avoids losing capacity when a client sends frequently.
+pub struct UploadBucket {
+    requests: f64,
+    bytes: f64,
+    last_refill: Instant,
+}
+
+pub fn charge_upload(
+    state: &AppState,
+    user: &str,
+    requests: u32,
+    bytes: usize,
+) -> Result<(), AppError> {
+    let settings = state.settings.load();
+    let request_limit = settings.upload_requests_per_minute as f64;
+    let byte_limit = settings.upload_bytes_per_minute as f64;
+    let now = Instant::now();
+    let map = &state.security.upload_limits;
+    // Reclaim stale entries on requests/new users, not on every file chunk.
+    if requests > 0 || !map.contains_key(user) {
+        crate::security::reserve_tracker(
+            state,
+            map,
+            user,
+            |b| now.duration_since(b.last_refill).as_secs() >= 60,
+            || UploadBucket {
+                requests: request_limit,
+                bytes: byte_limit,
+                last_refill: now,
+            },
+        )?;
+    }
+    let Some(mut bucket) = map.get_mut(user) else {
+        return Err(AppError::RateLimited { retry_after: 60 });
+    };
+    let now = Instant::now();
+    let elapsed = now.duration_since(bucket.last_refill).as_secs_f64() / 60.0;
+    bucket.requests = (bucket.requests + elapsed * request_limit).min(request_limit);
+    bucket.bytes = (bucket.bytes + elapsed * byte_limit).min(byte_limit);
+    bucket.last_refill = now;
+    let request_cost = f64::from(requests);
+    let byte_cost = bytes as f64;
+    if bucket.requests < request_cost || bucket.bytes < byte_cost {
+        let wait = ((request_cost - bucket.requests) / request_limit)
+            .max((byte_cost - bucket.bytes) / byte_limit);
+        return Err(AppError::RateLimited {
+            retry_after: (wait * 60.0).ceil().max(1.0) as u64,
+        });
+    }
+    bucket.requests -= request_cost;
+    bucket.bytes -= byte_cost;
+    Ok(())
+}

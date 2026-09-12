@@ -9,6 +9,10 @@ pub struct GatewayBroadcast {
     pub target_user_ids: Option<Vec<String>>,
     pub event: serde_json::Value,
     pub intent: String,
+    /// Space permission the recipient must currently hold, rechecked at
+    /// delivery so a revoked moderator stops receiving the event immediately.
+    /// `None` means the intent and space filters alone decide.
+    pub required_permission: Option<&'static str>,
 }
 
 /// Opcodes for gateway messages.

@@ -1,6 +1,6 @@
 mod admin;
 mod applications;
-mod audit_log;
+pub mod audit_log;
 mod auth;
 mod bans;
 pub mod channels;
@@ -18,7 +18,7 @@ mod plugins;
 mod reactions;
 mod read_states;
 mod relationships;
-mod reports;
+pub mod reports;
 pub mod roles;
 pub mod seo;
 mod settings;
@@ -518,6 +518,43 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/interactions/{interaction_id}/{token}/callback",
             post(interactions::interaction_callback),
+        )
+        // Attachment moderation: authenticated and rate-limited with the API.
+        .route("/automod/health", get(crate::automod::routes::health))
+        .route(
+            "/automod/{scope}/attachments/{id}/block",
+            post(crate::automod::routes::block_attachment),
+        )
+        .route(
+            "/automod/{scope}/policy",
+            get(crate::automod::routes::get_policy)
+                .put(crate::automod::routes::set_policy)
+                .delete(crate::automod::routes::reset_policy),
+        )
+        .route(
+            "/automod/{scope}/uploads",
+            get(crate::automod::routes::list_uploads),
+        )
+        .route(
+            "/automod/uploads/{id}",
+            get(crate::automod::routes::status).patch(crate::automod::routes::review),
+        )
+        .route(
+            "/automod/uploads/{id}/content",
+            get(crate::automod::routes::content),
+        )
+        .route(
+            "/automod/{scope}/hashes",
+            get(crate::automod::routes::list_hashes),
+        )
+        .route(
+            "/automod/{scope}/hashes/{hash}",
+            axum::routing::put(crate::automod::routes::block_hash)
+                .delete(crate::automod::routes::unblock_hash),
+        )
+        .route(
+            "/automod/{scope}/events",
+            get(crate::automod::routes::events),
         )
         // Admin
         // The instance-wide report queue — the only place a space-less report

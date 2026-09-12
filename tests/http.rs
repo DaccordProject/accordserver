@@ -1,7 +1,10 @@
 mod common;
 
 use axum::body::Body;
-use common::{authenticated_json_request, authenticated_request, parse_body, TestServer};
+use common::{
+    authenticated_json_request, authenticated_request, build_multipart_upload_body, parse_body,
+    TestServer,
+};
 use http::{Method, Request, StatusCode};
 use tower::ServiceExt;
 
@@ -145,6 +148,7 @@ async fn test_message_search_content() {
         &alice.user.id,
         Some(&space_id),
         &msg_input,
+        0,
     )
     .await
     .unwrap();
@@ -163,6 +167,7 @@ async fn test_message_search_content() {
         &alice.user.id,
         Some(&space_id),
         &msg_input2,
+        0,
     )
     .await
     .unwrap();
@@ -206,6 +211,7 @@ async fn test_message_search_author_filter() {
         &alice.user.id,
         Some(&space_id),
         &msg,
+        0,
     )
     .await
     .unwrap();
@@ -225,6 +231,7 @@ async fn test_message_search_author_filter() {
         &bob.user.id,
         Some(&space_id),
         &msg2,
+        0,
     )
     .await
     .unwrap();
@@ -268,6 +275,7 @@ async fn test_message_search_pinned_filter() {
         &alice.user.id,
         Some(&space_id),
         &msg,
+        0,
     )
     .await
     .unwrap();
@@ -286,6 +294,7 @@ async fn test_message_search_pinned_filter() {
         &alice.user.id,
         Some(&space_id),
         &msg2,
+        0,
     )
     .await
     .unwrap();
@@ -338,6 +347,7 @@ async fn test_message_search_pagination() {
             &alice.user.id,
             Some(&space_id),
             &msg,
+            0,
         )
         .await
         .unwrap();
@@ -443,6 +453,7 @@ async fn test_thread_reply_does_not_mark_channel_unread() {
             thread_id: None,
             title: None,
         },
+        0,
     )
     .await
     .unwrap();
@@ -484,6 +495,7 @@ async fn test_thread_reply_does_not_mark_channel_unread() {
             thread_id: Some(parent.id.clone()),
             title: None,
         },
+        0,
     )
     .await
     .unwrap();
@@ -1604,39 +1616,6 @@ async fn test_upload_respects_custom_limit() {
 // directory name entirely) causing the client to get a 404 when fetching
 // an image it had just successfully uploaded.
 // ---------------------------------------------------------------------------
-
-fn build_multipart_upload_body(
-    boundary: &str,
-    payload_json: &serde_json::Value,
-    filename: &str,
-    content_type: &str,
-    file_bytes: &[u8],
-) -> Vec<u8> {
-    let mut body: Vec<u8> = Vec::new();
-    let payload_str = serde_json::to_string(payload_json).unwrap();
-
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        b"Content-Disposition: form-data; name=\"payload_json\"\r\n\
-          Content-Type: application/json\r\n\r\n",
-    );
-    body.extend_from_slice(payload_str.as_bytes());
-    body.extend_from_slice(b"\r\n");
-
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"files[0]\"; filename=\"{filename}\"\r\n\
-             Content-Type: {content_type}\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(file_bytes);
-    body.extend_from_slice(b"\r\n");
-
-    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    body
-}
 
 fn tiny_png_bytes() -> Vec<u8> {
     vec![

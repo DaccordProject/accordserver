@@ -35,6 +35,7 @@ pub async fn mute_channel(
             target_user_ids: Some(vec![auth.user_id.clone()]),
             event,
             intent: "channels".to_string(),
+            required_permission: None,
         });
     }
 
@@ -60,6 +61,7 @@ pub async fn unmute_channel(
             target_user_ids: Some(vec![auth.user_id.clone()]),
             event,
             intent: "channels".to_string(),
+            required_permission: None,
         });
     }
 

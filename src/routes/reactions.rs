@@ -80,6 +80,7 @@ pub async fn add_reaction(
             target_user_ids: None,
             event,
             intent: "message_reactions".to_string(),
+            required_permission: None,
         });
     }
 
@@ -156,6 +157,7 @@ pub async fn remove_own_reaction(
             target_user_ids: None,
             event,
             intent: "message_reactions".to_string(),
+            required_permission: None,
         });
     }
 
@@ -213,6 +215,7 @@ pub async fn remove_user_reaction(
             target_user_ids: None,
             event,
             intent: "message_reactions".to_string(),
+            required_permission: None,
         });
     }
 
@@ -263,6 +266,7 @@ pub async fn remove_all_reactions(
             target_user_ids: None,
             event,
             intent: "message_reactions".to_string(),
+            required_permission: None,
         });
     }
 
@@ -299,6 +303,7 @@ pub async fn remove_all_reactions_emoji(
             target_user_ids: None,
             event,
             intent: "message_reactions".to_string(),
+            required_permission: None,
         });
     }
 

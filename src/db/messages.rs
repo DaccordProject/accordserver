@@ -181,6 +181,7 @@ pub async fn create_message(
     author_id: &str,
     space_id: Option<&str>,
     input: &CreateMessage,
+    cooldown_ms: i64,
 ) -> Result<MessageRow, AppError> {
     let id = snowflake::generate();
     let embeds_json = serde_json::to_string(&input.embeds.as_deref().unwrap_or(&[])).unwrap();
@@ -200,6 +201,30 @@ pub async fn create_message(
     };
     let mentions_json = serde_json::to_string(&mention_user_ids).unwrap();
 
+    // `cooldown_ms` is the slowmode interval already resolved for this author
+    // by `middleware::permissions::slowmode_cooldown_ms` (0 = none). The
+    // last-sent timestamp is still recorded when no cooldown applies so that
+    // enabling slowmode later takes effect immediately.
+    let cooldown_ms = cooldown_ms.max(0);
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut tx = pool.begin().await?;
+    // The conditional upsert serializes concurrent sends in both databases.
+    // A failed message insert rolls the reservation back as well.
+    let admitted = sqlx::query(&super::q("INSERT INTO message_cooldowns (channel_id,user_id,last_sent_ms) VALUES (?,?,?) ON CONFLICT(channel_id,user_id) DO UPDATE SET last_sent_ms=excluded.last_sent_ms WHERE ?=0 OR message_cooldowns.last_sent_ms <= ?"))
+        .bind(channel_id).bind(author_id).bind(now).bind(cooldown_ms).bind(now - cooldown_ms).execute(&mut *tx).await?;
+    if admitted.rows_affected() == 0 {
+        let (last,): (i64,) = sqlx::query_as(&super::q(
+            "SELECT last_sent_ms FROM message_cooldowns WHERE channel_id=? AND user_id=?",
+        ))
+        .bind(channel_id)
+        .bind(author_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        return Err(AppError::RateLimited {
+            retry_after: ((last + cooldown_ms - now).max(1) as u64).div_ceil(1000),
+        });
+    }
+
     sqlx::query(&super::q(
         "INSERT INTO messages (id, channel_id, space_id, author_id, content, tts, mention_everyone, mentions, embeds, reply_to, thread_id, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ))
@@ -215,7 +240,7 @@ pub async fn create_message(
     .bind(&input.reply_to)
     .bind(&input.thread_id)
     .bind(&input.title)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     // Only top-level messages bump channels.last_message_id. Thread replies live
@@ -227,10 +252,11 @@ pub async fn create_message(
         ))
         .bind(&id)
         .bind(channel_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
+    tx.commit().await?;
     get_message_row(pool, &id).await
 }
 

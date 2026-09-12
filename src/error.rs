@@ -71,13 +71,16 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
-        let body = json!({
+        let mut body = json!({
             "error": {
                 "code": self.code(),
                 "message": self.message()
             }
         });
 
+        if let AppError::RateLimited { retry_after } = &self {
+            body["error"]["retry_after"] = json!(retry_after);
+        }
         let mut response = (status, Json(body)).into_response();
         if let AppError::RateLimited { retry_after } = &self {
             response

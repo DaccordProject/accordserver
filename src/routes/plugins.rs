@@ -950,6 +950,7 @@ async fn broadcast_plugin_event(
             target_user_ids,
             event,
             intent: "plugins".to_string(),
+            required_permission: None,
         });
     }
 }

@@ -10,6 +10,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  docker:
+    name: Docker runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: accordserver:ci
+          cache-from: type=gha,scope=docker-test
+          cache-to: type=gha,mode=max,scope=docker-test
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+      - name: Verify native dependencies and local scanner
+        run: bash scripts/test-docker-automod.sh accordserver:ci
+
   test-sqlite:
     name: Test (SQLite)
     runs-on: ubuntu-latest

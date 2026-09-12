@@ -125,6 +125,7 @@ pub async fn broadcast_member_join_message(state: &AppState, space_id: &str, use
             target_user_ids: None,
             event,
             intent: "messages".to_string(),
+            required_permission: None,
         });
     }
 }

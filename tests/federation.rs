@@ -353,6 +353,7 @@ async fn local_message_fans_out_to_interested_peers() {
             thread_id: None,
             title: None,
         },
+        0,
     )
     .await
     .unwrap();
@@ -399,6 +400,7 @@ async fn local_message_without_remote_members_does_not_fan_out() {
             thread_id: None,
             title: None,
         },
+        0,
     )
     .await
     .unwrap();
@@ -1195,6 +1197,7 @@ async fn home_react_rejects_message_from_a_different_channel() {
             thread_id: None,
             title: None,
         },
+        0,
     )
     .await
     .unwrap();
@@ -1396,6 +1399,7 @@ async fn local_emoji_create_fans_out_to_interested_peers() {
 
     let emoji = accordserver::db::emojis::create_emoji(
         server.pool(),
+        &accordserver::db::emojis::generate_emoji_id(),
         &space_id,
         &owner.user.id,
         &accordserver::models::emoji::CreateEmoji {
