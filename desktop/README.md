@@ -43,7 +43,7 @@ state.
 1. User downloads and runs the installer for their platform.
 2. App appears in `/Applications` / Start Menu / package manager listing.
 3. Launch the app → tray icon appears.
-4. Click **Open in browser** → the Godot client (or any REST client) hits
+4. Click **Open in browser** → the Flutter web client (or any compatible REST client) hits
    `http://localhost:39099`.
 
 ## Updates
