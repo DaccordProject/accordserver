@@ -240,18 +240,20 @@ pub async fn get_current_user_spaces(
     if auth.is_guest {
         if let Some(ref space_id) = auth.guest_space_id {
             if let Ok(space) = db::spaces::get_space_row(&state.db, space_id).await {
-                return Ok(Json(serde_json::json!({ "data": [space] })));
+                let spaces = super::spaces::spaces_with_metadata(&state, vec![space]).await?;
+                return Ok(Json(serde_json::json!({ "data": spaces })));
             }
         }
         return Ok(Json(serde_json::json!({ "data": [] })));
     }
     let space_ids = db::users::get_user_spaces(&state.db, &auth.user_id).await?;
-    let mut spaces = Vec::new();
+    let mut rows = Vec::new();
     for id in space_ids {
         if let Ok(space) = db::spaces::get_space_row(&state.db, &id).await {
-            spaces.push(space);
+            rows.push(space);
         }
     }
+    let spaces = super::spaces::spaces_with_metadata(&state, rows).await?;
     Ok(Json(serde_json::json!({ "data": spaces })))
 }
 

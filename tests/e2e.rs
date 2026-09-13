@@ -140,6 +140,8 @@ async fn test_space_crud_lifecycle() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = parse_body(response).await;
     assert_eq!(body["data"]["name"], "My Space");
+    assert_eq!(body["data"]["member_count"], 1);
+    assert_eq!(body["data"]["presence_count"], 0);
 
     // PATCH (rename)
     let app = server.router();
@@ -208,10 +210,16 @@ async fn test_non_owner_cannot_delete_space() {
 async fn test_get_current_user_spaces() {
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let charlie = server.create_user_with_token("charlie").await;
 
     // Create two spaces — alice is auto-added as member/owner
-    server.create_space(&alice.user.id, "Space A").await;
+    let space_a = server.create_space(&alice.user.id, "Space A").await;
     server.create_space(&alice.user.id, "Space B").await;
+    server.add_member(&space_a, &bob.user.id).await;
+    server.add_member(&space_a, &charlie.user.id).await;
+    accordserver::presence::set_presence(&server.state, &bob.user.id, "online", Vec::new());
+    accordserver::presence::set_presence(&server.state, &charlie.user.id, "invisible", Vec::new());
 
     let app = server.router();
     let req = authenticated_request(
@@ -225,6 +233,9 @@ async fn test_get_current_user_spaces() {
     let body = parse_body(response).await;
     let spaces = body["data"].as_array().unwrap();
     assert_eq!(spaces.len(), 2);
+    let a = spaces.iter().find(|space| space["id"] == space_a).unwrap();
+    assert_eq!(a["member_count"], 3);
+    assert_eq!(a["presence_count"], 1);
 }
 
 // =========================================================================

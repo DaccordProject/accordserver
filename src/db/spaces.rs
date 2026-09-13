@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sqlx::{AnyPool, Row};
 
 use crate::error::AppError;
@@ -322,6 +324,64 @@ pub async fn list_member_ids_for_space(
             .fetch_all(pool)
             .await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Counts how many of `user_ids` belong to each space. Callers pass the
+/// in-memory presence keys, so this produces per-space online counts without
+/// loading complete rosters. IDs are chunked below SQLite's bind limit; counts
+/// from each chunk are accumulated for PostgreSQL and SQLite alike.
+pub async fn count_memberships_by_space(
+    pool: &AnyPool,
+    user_ids: &[String],
+) -> Result<HashMap<String, i64>, AppError> {
+    const CHUNK_SIZE: usize = 500;
+    let mut counts = HashMap::new();
+    for ids in user_ids.chunks(CHUNK_SIZE) {
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = super::q(&format!(
+            "SELECT m.space_id, COUNT(*) AS presence_count \
+             FROM members m INNER JOIN users u ON u.id = m.user_id \
+             WHERE u.system = FALSE AND m.user_id IN ({placeholders}) \
+             GROUP BY m.space_id"
+        ));
+        let mut query = sqlx::query(&sql);
+        for id in ids {
+            query = query.bind(id);
+        }
+        for row in query.fetch_all(pool).await? {
+            let space_id: String = row.get("space_id");
+            let count: i64 = row.get("presence_count");
+            *counts.entry(space_id).or_insert(0) += count;
+        }
+    }
+    Ok(counts)
+}
+
+/// Counts non-system members for each requested space in grouped, bounded
+/// queries. Missing space IDs naturally have a count of zero.
+pub async fn count_members_by_space(
+    pool: &AnyPool,
+    space_ids: &[String],
+) -> Result<HashMap<String, i64>, AppError> {
+    const CHUNK_SIZE: usize = 500;
+    let mut counts = HashMap::new();
+    for ids in space_ids.chunks(CHUNK_SIZE) {
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = super::q(&format!(
+            "SELECT m.space_id, COUNT(*) AS member_count \
+             FROM members m INNER JOIN users u ON u.id = m.user_id \
+             WHERE u.system = FALSE AND m.space_id IN ({placeholders}) \
+             GROUP BY m.space_id"
+        ));
+        let mut query = sqlx::query(&sql);
+        for id in ids {
+            query = query.bind(id);
+        }
+        for row in query.fetch_all(pool).await? {
+            counts.insert(row.get("space_id"), row.get("member_count"));
+        }
+    }
+    Ok(counts)
 }
 
 pub async fn get_space_by_slug(pool: &AnyPool, slug: &str) -> Result<SpaceRow, AppError> {

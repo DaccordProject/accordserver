@@ -8,9 +8,43 @@ use crate::middleware::auth::{AuthUser, OptionalAuthUser};
 use crate::middleware::permissions::{require_membership, require_permission};
 use crate::models::channel::{ChannelPositionUpdate, ChannelRow, CreateChannel};
 use crate::models::permission::PermissionOverwrite;
-use crate::models::space::{CreateSpace, UpdateSpace};
+use crate::models::space::{CreateSpace, SpaceRow, UpdateSpace};
 use crate::state::AppState;
 use crate::storage;
+
+/// Serializes space rows with live membership metadata using grouped queries.
+/// This keeps aggregate work out of ordinary database lookups and avoids
+/// loading complete rosters into the response.
+pub(crate) async fn spaces_with_metadata(
+    state: &AppState,
+    spaces: Vec<SpaceRow>,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    let space_ids: Vec<String> = spaces.iter().map(|space| space.id.clone()).collect();
+    let member_counts = db::spaces::count_members_by_space(&state.db, &space_ids).await?;
+    let online_user_ids: Vec<String> = state
+        .presences
+        .iter()
+        .filter(|entry| {
+            let status = entry.value().status.as_str();
+            status != "offline" && status != "invisible"
+        })
+        .map(|entry| entry.key().clone())
+        .collect();
+    let presence_counts =
+        db::spaces::count_memberships_by_space(&state.db, &online_user_ids).await?;
+
+    Ok(spaces
+        .into_iter()
+        .map(|space| {
+            let member_count = member_counts.get(&space.id).copied().unwrap_or(0);
+            let presence_count = presence_counts.get(&space.id).copied().unwrap_or(0);
+            let mut value = serde_json::to_value(space).unwrap_or_default();
+            value["member_count"] = serde_json::json!(member_count);
+            value["presence_count"] = serde_json::json!(presence_count);
+            value
+        })
+        .collect())
+}
 
 pub async fn create_space(
     state: State<AppState>,
@@ -40,7 +74,10 @@ pub async fn create_space(
     }
 
     let space = db::spaces::create_space(&state.db, &auth.user_id, &input).await?;
-    Ok(Json(serde_json::json!({ "data": space })))
+    let mut spaces = spaces_with_metadata(&state, vec![space]).await?;
+    Ok(Json(serde_json::json!({
+        "data": spaces.pop().unwrap_or_default()
+    })))
 }
 
 pub async fn get_space(
@@ -70,7 +107,10 @@ pub async fn get_space(
             require_membership(&state.db, &space.id, &user.user_id).await?;
         }
     }
-    Ok(Json(serde_json::json!({ "data": space })))
+    let mut spaces = spaces_with_metadata(&state, vec![space]).await?;
+    Ok(Json(serde_json::json!({
+        "data": spaces.pop().unwrap_or_default()
+    })))
 }
 
 pub async fn update_space(
@@ -141,13 +181,15 @@ pub async fn update_space(
 
     let space =
         db::spaces::update_space(&state.db, &space_id, &input, state.db_is_postgres).await?;
+    let mut spaces = spaces_with_metadata(&state, vec![space]).await?;
+    let space = spaces.pop().unwrap_or_default();
 
     // Broadcast space.update to space members
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
             "op": 0,
             "type": "space.update",
-            "data": space
+            "data": space.clone()
         });
         let _ = dispatcher.send(GatewayBroadcast {
             space_id: Some(space_id),
