@@ -15,6 +15,34 @@ unset ACCORD_BOOTSTRAP_PASSWORD
 
 Use the same `DATABASE_URL` or `--data-dir` as the server. This command creates the account and exits without starting a listener. For Compose, use `docker compose run --rm -e ACCORD_BOOTSTRAP_PASSWORD accordserver ./accordserver --bootstrap-admin operator` with the variable exported locally, then unset it. Desktop operators can run the bundled server binary with their desktop data directory.
 
+Start the server normally, then sign in through the client's usual login screen with the username and password you provisioned. Bootstrap administrators start with no space memberships; instance administration does not require joining a space. In Daccord, open **Settings → Server administration** to manage the server, or use an invite to join a space for chat. Ordinary registration's automatic default-space membership does not apply to bootstrap accounts.
+
+### Rotating the administrator password
+
+The initial password is the `ACCORD_BOOTSTRAP_PASSWORD` value you typed at provisioning. The server stores only its Argon2 hash and reads the variable only while `--bootstrap-admin` runs. Bootstrap is not a password-reset command: changing `ACCORD_BOOTSTRAP_PASSWORD` has no effect on an existing account, and rerunning `--bootstrap-admin` with the same username fails because provisioning only inserts new users.
+
+Rotate it after the first sign-in, and whenever it may have been exposed:
+
+- **Daccord:** open **Settings → Account → Password & Security**, enter the current and new passwords, then choose **Change password**.
+- **API:** send an authenticated `POST /api/v1/auth/change-password` with `{"old_password": "…", "new_password": "…"}`. Use the bearer `data.token` returned by `POST /api/v1/auth/login`. This Bash example needs `curl` 7.55 or later and `jq` 1.6 or later. It expects `ACCORD_URL` (the server base URL) and `ACCORD_TOKEN` (that token) in the environment. Both passwords stay out of shell history. The passwords and the token also stay out of process arguments, which other local users can read: `printf` is a Bash builtin, and process substitution passes the values to `jq` and `curl` as file descriptors.
+
+  ```bash
+  read -r -s -p 'Current password: ' OLD_PW; echo
+  read -r -s -p 'New password: ' NEW_PW; echo
+  jq -n --rawfile old <(printf '%s' "$OLD_PW") --rawfile new <(printf '%s' "$NEW_PW") \
+      '{old_password: $old, new_password: $new}' |
+    curl -fsS -X POST "$ACCORD_URL/api/v1/auth/change-password" \
+      -H @<(printf 'Authorization: Bearer %s\n' "$ACCORD_TOKEN") \
+      -H 'Content-Type: application/json' --data-binary @-
+  unset OLD_PW NEW_PW
+  ```
+
+The server checks the current password (a wrong one returns 401) and stores the new hash. It revokes every other bearer token for the account, while the session that made the request stays signed in. Other devices must sign in again with the new password. The route accepts 8–128 characters. Keep administrator passwords at 16 or more, as provisioning requires. Two-factor settings are unchanged.
+
+If the password is lost, another administrator can use **Server administration → Users → Reset password**, or `POST /api/v1/admin/users/{user_id}/reset-password` with `{"new_password": "…"}`. This sets a temporary password, revokes all of that user's sessions, disables its two-factor authentication and backup codes, and marks the account so the next login response includes `force_password_reset: true`. Clients should prompt for a new password; changing it clears the flag. If no other administrator exists, provision a second one locally with a new username, as described above, and reset the original account from it.
+
+If sign-in fails, first confirm that provisioning and the running server use the same database. Record the client and server versions, the exact error, and server/client logs from the attempt. Distinguish a failed `POST /api/v1/auth/login` from a gateway connection that never receives `ready`, or a client that receives `ready` but keeps displaying a loading indicator. An empty space list is a valid signed-in state; it does not require manually changing `is_admin` in the database. Remove passwords and bearer tokens before sharing logs.
+
 ## Deployment credentials and proxy addresses
 
 Both Compose configurations require `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`. Generate independent values with `openssl rand -hex 32` and store them in an untracked `.env` with mode 600. PostgreSQL additionally requires `POSTGRES_PASSWORD` and a matching `DATABASE_URL`; URL-encode its password. LiveKit's signaling endpoint is exposed through Caddy, with only media TCP/UDP ports published directly.
