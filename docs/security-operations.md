@@ -15,6 +15,10 @@ unset ACCORD_BOOTSTRAP_PASSWORD
 
 Use the same `DATABASE_URL` or `--data-dir` as the server. This command creates the account and exits without starting a listener. For Compose, use `docker compose run --rm -e ACCORD_BOOTSTRAP_PASSWORD accordserver ./accordserver --bootstrap-admin operator` with the variable exported locally, then unset it. Desktop operators can run the bundled server binary with their desktop data directory.
 
+Start the server normally, then sign in through the client's usual login screen with the username and password you provisioned. Bootstrap administrators start with no space memberships; instance administration does not require joining a space. In Daccord, open **Settings → Server administration** to manage the server, or use an invite to join a space for chat. Ordinary registration's automatic default-space membership does not apply to bootstrap accounts.
+
+If sign-in fails, first confirm that provisioning and the running server use the same database. Record the client and server versions, the exact error, and server/client logs from the attempt. Distinguish a failed `POST /api/v1/auth/login` from a gateway connection that never receives `ready`, or a client that receives `ready` but keeps displaying a loading indicator. An empty space list is a valid signed-in state; it does not require manually changing `is_admin` in the database. Remove passwords and bearer tokens before sharing logs.
+
 ## Deployment credentials and proxy addresses
 
 Both Compose configurations require `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`. Generate independent values with `openssl rand -hex 32` and store them in an untracked `.env` with mode 600. PostgreSQL additionally requires `POSTGRES_PASSWORD` and a matching `DATABASE_URL`; URL-encode its password. LiveKit's signaling endpoint is exposed through Caddy, with only media TCP/UDP ports published directly.

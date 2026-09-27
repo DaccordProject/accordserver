@@ -35,6 +35,7 @@ cargo test -- --nocapture
 |---|---|
 | `tests/http.rs` | Health endpoint, 404 handling, CORS headers, WebSocket upgrade rejection |
 | `tests/ws.rs` | Gateway HELLO, heartbeat_interval, invalid IDENTIFY, timeout, close |
+| `tests/bootstrap_gateway.rs` | Bootstrap administrator HTTP login, READY with no memberships, admin API access, and heartbeats |
 | `tests/e2e.rs` | Authenticated API: users, spaces, channels, messages, public spaces, space-level invites, gateway auth flows |
 | `tests/common/mod.rs` | Shared test infrastructure (`TestServer`, `TestUser`, request helpers) |
 
