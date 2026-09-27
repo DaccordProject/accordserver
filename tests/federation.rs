@@ -503,6 +503,61 @@ async fn cross_server_dm_round_trip() {
         2
     );
 
+    // The same recipient from another surface must reuse the channel and user
+    // row even when the domain is uppercased or surrounded by whitespace.
+    let reopened_a = accordserver::federation::dm::open_dm(
+        &a.state,
+        &alice.user,
+        &format!("  {}@B.TEST  ", bob.user.id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reopened_a.id, id_on_a);
+    // Opening from the other server exercises the signed inbound open path.
+    let reopened_b = accordserver::federation::dm::open_dm(
+        &b.state,
+        &bob.user,
+        &format!(" {}@A.TEST ", alice.user.id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reopened_b.id, id_on_b);
+    let remote_users: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE origin IS NOT NULL")
+            .fetch_one(a.pool())
+            .await
+            .unwrap();
+    assert_eq!(remote_users, 1);
+
+    // A peer may itself send differently-spelled IDs. Normalize at the signed
+    // endpoint too, before the exact-match user and participant writes.
+    let (home_server, peer_server, home_user, peer_user, peer_domain) = if home_domain == "a.test" {
+        (&a, &b, &alice.user, &bob.user, "b.test")
+    } else {
+        (&b, &a, &bob.user, &alice.user, "a.test")
+    };
+    let identity = &peer_server.state.federation.as_ref().unwrap().identity;
+    let response = home_server
+        .router()
+        .oneshot(signed_request(
+            identity,
+            peer_domain,
+            &home_domain,
+            accordserver::federation::dm::DM_OPEN_PATH,
+            &json!({
+                "opener": {
+                    "id": format!(" {}@{} ", peer_user.id, peer_domain.to_uppercase()),
+                    "username": peer_user.username,
+                },
+                "recipient_id": format!(" {}@{} ", home_user.id, home_domain.to_uppercase()),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot = common::parse_body(response).await;
+    assert_eq!(snapshot["channel_id"], format!("{dm_bare}@{home_domain}"));
+
     // Send a message from the replica side; the home persists and fans it back.
     let (replica_state, home_state, replica_pool, replica_channel, replica_user) =
         if home_domain == "a.test" {

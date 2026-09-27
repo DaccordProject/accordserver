@@ -8,6 +8,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Canonical spelling of an ID: trim surrounding whitespace and lowercase only
+/// the domain. The local part is opaque and remains case-sensitive.
+pub fn normalize_id(id: &str) -> String {
+    let id = id.trim();
+    match id.split_once('@') {
+        Some((local, domain)) => format!("{local}@{}", domain.to_ascii_lowercase()),
+        None => id.to_string(),
+    }
+}
+
+/// DM participants use bare IDs for local users and canonical qualified IDs
+/// for remote users. Never strip another server's domain.
+pub fn participant_storage_id(id: &str, our_domain: Option<&str>) -> String {
+    let id = normalize_id(id);
+    match (domain_of(&id), our_domain) {
+        (Some(domain), Some(ours)) if domain.eq_ignore_ascii_case(ours.trim()) => {
+            local_part(&id).to_string()
+        }
+        _ => id,
+    }
+}
+
 /// Qualify a bare local ID with our domain. Already-qualified IDs (containing
 /// `@`) are returned unchanged so this is idempotent.
 pub fn qualify(id: &str, domain: &str) -> String {
