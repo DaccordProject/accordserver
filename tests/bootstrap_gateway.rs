@@ -114,3 +114,70 @@ async fn bootstrap_admin_without_memberships_can_login_and_reach_ready() {
     .expect("heartbeat ACK timed out");
     ws.close(None).await.unwrap();
 }
+
+#[tokio::test]
+async fn bootstrap_admin_rotates_initial_password_with_change_password() {
+    let server = TestServer::new().await;
+    let initial = "local-admin-password-123";
+    let rotated = "rotated-admin-password-456";
+    security::bootstrap_admin(server.pool(), "operator", initial)
+        .await
+        .unwrap();
+    // Rerunning bootstrap is not a reset: the existing username is refused.
+    assert!(
+        security::bootstrap_admin(server.pool(), "operator", rotated)
+            .await
+            .is_err()
+    );
+    let base = server.spawn().await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let login = |password: &'static str| {
+        let http = http.clone();
+        let base = base.clone();
+        async move {
+            http.post(format!("{base}/api/v1/auth/login"))
+                .json(&json!({"username": "operator", "password": password}))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let token_of = |body: Value| body["data"]["token"].as_str().unwrap().to_string();
+    let current = token_of(login(initial).await.json().await.unwrap());
+    let other = token_of(login(initial).await.json().await.unwrap());
+
+    let response = http
+        .post(format!("{base}/api/v1/auth/change-password"))
+        .bearer_auth(&current)
+        .json(&json!({"old_password": initial, "new_password": rotated}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let me = |token: String| {
+        let http = http.clone();
+        let base = base.clone();
+        async move {
+            http.get(format!("{base}/api/v1/users/@me"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(me(current.clone()).await, reqwest::StatusCode::OK);
+    assert_eq!(me(other).await, reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        login(initial).await.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let response = login(rotated).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["data"]["user"]["is_admin"], true);
+}

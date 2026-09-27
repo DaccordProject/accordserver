@@ -17,6 +17,28 @@ Use the same `DATABASE_URL` or `--data-dir` as the server. This command creates 
 
 Start the server normally, then sign in through the client's usual login screen with the username and password you provisioned. Bootstrap administrators start with no space memberships; instance administration does not require joining a space. In Daccord, open **Settings → Server administration** to manage the server, or use an invite to join a space for chat. Ordinary registration's automatic default-space membership does not apply to bootstrap accounts.
 
+### Rotating the administrator password
+
+The initial password is the `ACCORD_BOOTSTRAP_PASSWORD` value you typed at provisioning. The server stores only its Argon2 hash and reads the variable only while `--bootstrap-admin` runs. Bootstrap is not a password-reset command: changing `ACCORD_BOOTSTRAP_PASSWORD` has no effect on an existing account, and rerunning `--bootstrap-admin` with the same username fails because provisioning only inserts new users.
+
+Rotate it after the first sign-in, and whenever it may have been exposed:
+
+- **Daccord:** open **Settings → Account → Password & Security**, enter the current and new passwords, then choose **Change password**.
+- **API:** send an authenticated `POST /api/v1/auth/change-password` with `{"old_password": "…", "new_password": "…"}`. Use the bearer `data.token` returned by `POST /api/v1/auth/login`:
+
+  ```bash
+  read -r -s -p 'Current password: ' OLD_PW; echo
+  read -r -s -p 'New password: ' NEW_PW; echo
+  jq -n --arg old "$OLD_PW" --arg new "$NEW_PW" '{old_password: $old, new_password: $new}' |
+    curl -fsS -X POST "$ACCORD_URL/api/v1/auth/change-password" \
+      -H "Authorization: Bearer $ACCORD_TOKEN" -H 'Content-Type: application/json' --data-binary @-
+  unset OLD_PW NEW_PW
+  ```
+
+The server checks the current password (a wrong one returns 401) and stores the new hash. It revokes every other bearer token for the account, while the session that made the request stays signed in. Other devices must sign in again with the new password. The route accepts 8–128 characters. Keep administrator passwords at 16 or more, as provisioning requires. Two-factor settings are unchanged.
+
+If the password is lost, another administrator can use **Server administration → Users → Reset password**, or `POST /api/v1/admin/users/{user_id}/reset-password` with `{"new_password": "…"}`. This sets a temporary password, revokes all of that user's sessions, disables its two-factor authentication and backup codes, and marks the account so the next login response includes `force_password_reset: true`. Clients should prompt for a new password; changing it clears the flag. If no other administrator exists, provision a second one locally with a new username, as described above, and reset the original account from it.
+
 If sign-in fails, first confirm that provisioning and the running server use the same database. Record the client and server versions, the exact error, and server/client logs from the attempt. Distinguish a failed `POST /api/v1/auth/login` from a gateway connection that never receives `ready`, or a client that receives `ready` but keeps displaying a loading indicator. An empty space list is a valid signed-in state; it does not require manually changing `is_admin` in the database. Remove passwords and bearer tokens before sharing logs.
 
 ## Deployment credentials and proxy addresses
