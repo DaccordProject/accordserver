@@ -24,7 +24,7 @@ The initial password is the `ACCORD_BOOTSTRAP_PASSWORD` value you typed at provi
 Rotate it after the first sign-in, and whenever it may have been exposed:
 
 - **Daccord:** open **Settings → Account → Password & Security**, enter the current and new passwords, then choose **Change password**.
-- **API:** send an authenticated `POST /api/v1/auth/change-password` with `{"old_password": "…", "new_password": "…"}`. Use the bearer `data.token` returned by `POST /api/v1/auth/login`:
+- **API:** send an authenticated `POST /api/v1/auth/change-password` with `{"old_password": "…", "new_password": "…"}`. Use the bearer `data.token` returned by `POST /api/v1/auth/login`. This example needs `curl` and `jq`, expects `ACCORD_URL` (the server base URL) and `ACCORD_TOKEN` (that token) in the environment, and keeps both passwords out of shell history:
 
   ```bash
   read -r -s -p 'Current password: ' OLD_PW; echo
