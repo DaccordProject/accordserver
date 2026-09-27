@@ -24,14 +24,16 @@ The initial password is the `ACCORD_BOOTSTRAP_PASSWORD` value you typed at provi
 Rotate it after the first sign-in, and whenever it may have been exposed:
 
 - **Daccord:** open **Settings → Account → Password & Security**, enter the current and new passwords, then choose **Change password**.
-- **API:** send an authenticated `POST /api/v1/auth/change-password` with `{"old_password": "…", "new_password": "…"}`. Use the bearer `data.token` returned by `POST /api/v1/auth/login`. This example needs `curl` and `jq`, expects `ACCORD_URL` (the server base URL) and `ACCORD_TOKEN` (that token) in the environment, and keeps both passwords out of shell history:
+- **API:** send an authenticated `POST /api/v1/auth/change-password` with `{"old_password": "…", "new_password": "…"}`. Use the bearer `data.token` returned by `POST /api/v1/auth/login`. This Bash example needs `curl` 7.55 or later and `jq` 1.6 or later. It expects `ACCORD_URL` (the server base URL) and `ACCORD_TOKEN` (that token) in the environment. Both passwords stay out of shell history. The passwords and the token also stay out of process arguments, which other local users can read: `printf` is a Bash builtin, and process substitution passes the values to `jq` and `curl` as file descriptors.
 
   ```bash
   read -r -s -p 'Current password: ' OLD_PW; echo
   read -r -s -p 'New password: ' NEW_PW; echo
-  jq -n --arg old "$OLD_PW" --arg new "$NEW_PW" '{old_password: $old, new_password: $new}' |
+  jq -n --rawfile old <(printf '%s' "$OLD_PW") --rawfile new <(printf '%s' "$NEW_PW") \
+      '{old_password: $old, new_password: $new}' |
     curl -fsS -X POST "$ACCORD_URL/api/v1/auth/change-password" \
-      -H "Authorization: Bearer $ACCORD_TOKEN" -H 'Content-Type: application/json' --data-binary @-
+      -H @<(printf 'Authorization: Bearer %s\n' "$ACCORD_TOKEN") \
+      -H 'Content-Type: application/json' --data-binary @-
   unset OLD_PW NEW_PW
   ```
 
