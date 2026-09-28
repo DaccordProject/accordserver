@@ -3,6 +3,19 @@
 Release highlights and upgrade notes for Accord Server. Earlier releases are
 documented in [GitHub Releases](https://github.com/DaccordProject/accordserver/releases).
 
+## [0.2.2] - 2026-09-28
+
+### Fixed
+
+- Direct messages now use canonical user identities across local and federated
+  accounts, avoiding duplicate conversations when the same users reconnect or
+  message each other through different servers.
+
+### Documentation
+
+- Documented how administrators can rotate a bootstrap account password and
+  recover access when the password is lost.
+
 ## [0.2.1] - 2026-09-23
 
 ### Added
@@ -49,5 +62,6 @@ Changes since 0.1.35.
 - Clients must handle HTTP 202 for uploads awaiting moderation and HTTP 429 with
   `Retry-After` for slowmode or upload limits.
 
+[0.2.2]: https://github.com/DaccordProject/accordserver/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/DaccordProject/accordserver/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/DaccordProject/accordserver/compare/v0.1.35...v0.2.0
