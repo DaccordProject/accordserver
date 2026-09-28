@@ -522,12 +522,21 @@ async fn cross_server_dm_round_trip() {
     .await
     .unwrap();
     assert_eq!(reopened_b.id, id_on_b);
-    let remote_users: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE origin IS NOT NULL")
-            .fetch_one(a.pool())
-            .await
-            .unwrap();
-    assert_eq!(remote_users, 1);
+    // PostgreSQL tests share one database between the simulated servers, so
+    // count this participant's canonical and mixed-case IDs specifically.
+    let bob_alias = format!("{}@B.TEST", bob.user.id);
+    let bob_rows: i64 = sqlx::query_scalar(&accordserver::db::q(
+        "SELECT COUNT(*) FROM users WHERE id = ? OR id = ?",
+    ))
+    .bind(&bob_q)
+    .bind(&bob_alias)
+    .fetch_one(a.pool())
+    .await
+    .unwrap();
+    assert_eq!(bob_rows, 1);
+    accordserver::db::users::get_user(a.pool(), &bob_q)
+        .await
+        .unwrap();
 
     // A peer may itself send differently-spelled IDs. Normalize at the signed
     // endpoint too, before the exact-match user and participant writes.
