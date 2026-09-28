@@ -273,6 +273,12 @@ pub async fn create_dm_channel(
         }
     };
 
+    let our_domain = state.federation.as_ref().map(|fed| fed.domain.as_str());
+    let recipient_ids: Vec<String> = recipient_ids
+        .iter()
+        .map(|id| crate::federation::mapping::participant_storage_id(id, our_domain))
+        .collect();
+
     if recipient_ids.is_empty() {
         return Err(AppError::BadRequest(
             "at least one recipient is required".into(),

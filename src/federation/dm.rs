@@ -82,12 +82,23 @@ pub async fn open_dm(
         .federation
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("federation is not enabled".to_string()))?;
-    let our_domain = fed.domain.clone();
+    let our_domain = fed.domain.trim().to_ascii_lowercase();
+    let recipient_id = mapping::normalize_id(recipient_id);
+    let recipient_id = recipient_id.as_str();
 
     let opener_qualified = mapping::qualify(&opener.id, &our_domain);
     authority::require_remote_target(recipient_id)?; // must be a qualified remote ID
     let recipient_domain = mapping::domain_of(recipient_id)
         .ok_or_else(|| AppError::BadRequest("recipient must be a qualified id".to_string()))?;
+
+    // Reopening an established conversation needs no new federation handshake.
+    // Besides avoiding duplicate rows, this avoids replay rejection when two
+    // opens produce the same signed announcement within one second.
+    if let Some(channel) =
+        crate::db::dm_participants::find_existing_dm(&state.db, &opener.id, recipient_id).await?
+    {
+        return Ok(channel);
+    }
 
     let home = home_domain_for(&opener_qualified, recipient_id);
 
@@ -191,7 +202,8 @@ async fn open_dm_as_replica(
         .map_err(|e| AppError::Internal(format!("invalid dm snapshot: {e}")))?;
 
     mirror_dm(state, our_domain, &snapshot).await?;
-    crate::db::channels::get_channel_row(&state.db, &snapshot.channel_id).await
+    crate::db::channels::get_channel_row(&state.db, &mapping::normalize_id(&snapshot.channel_id))
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +239,11 @@ async fn serve_open(
     peer: &str,
     req: &DmOpenRequest,
 ) -> Result<DmSnapshot, AppError> {
+    // Normalize before consent checks, user caching, and participant writes.
+    let req = DmOpenRequest {
+        opener: normalized_user_ref(&req.opener),
+        recipient_id: mapping::normalize_id(&req.recipient_id),
+    };
     // Authority (S1): the opener must be homed on the signing peer.
     authority::require_homed_on(&req.opener.id, peer, "opener")?;
 
@@ -312,6 +329,14 @@ pub async fn handle_announce(
 /// for any local participant that is not the opener, upserts remote participants,
 /// stores the replica channel + membership, and notifies local sessions.
 async fn mirror_dm(state: &AppState, our_domain: &str, snap: &DmSnapshot) -> Result<(), AppError> {
+    let snap = DmSnapshot {
+        channel_id: mapping::normalize_id(&snap.channel_id),
+        home: snap.home.trim().to_ascii_lowercase(),
+        channel_type: snap.channel_type.clone(),
+        opener_id: mapping::normalize_id(&snap.opener_id),
+        owner_id: mapping::normalize_id(&snap.owner_id),
+        participants: snap.participants.iter().map(normalized_user_ref).collect(),
+    };
     // First pass: validate consent and ensure every participant user row exists.
     for p in &snap.participants {
         if mapping::is_local(&p.id, our_domain) {
@@ -382,11 +407,7 @@ async fn mirror_dm(state: &AppState, our_domain: &str, snap: &DmSnapshot) -> Res
 /// The id under which a (possibly qualified) participant is stored locally:
 /// the bare snowflake for our own users, the qualified id for remote users.
 fn participant_storage_id(qualified_id: &str, our_domain: &str) -> String {
-    if mapping::is_local(qualified_id, our_domain) {
-        mapping::local_part(qualified_id).to_string()
-    } else {
-        qualified_id.to_string()
-    }
+    mapping::participant_storage_id(qualified_id, Some(our_domain))
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +446,12 @@ async fn serve_send(
     peer: &str,
     req: &DmSendRequest,
 ) -> Result<serde_json::Value, AppError> {
+    let req = DmSendRequest {
+        actor: normalized_user_ref(&req.actor),
+        channel_id: mapping::normalize_id(&req.channel_id),
+        content: req.content.clone(),
+        reply_to: req.reply_to.clone(),
+    };
     authority::require_homed_on(&req.actor.id, peer, "actor")?;
     if req.content.chars().count() > MAX_CONTENT_CHARS {
         return Err(AppError::BadRequest("message content too long".to_string()));
@@ -542,9 +569,13 @@ pub async fn apply_message_create(
     peer: &str,
     env: &mapping::FederationEnvelope,
 ) -> Result<(), AppError> {
-    let payload: crate::federation::apply::RemoteMessagePayload =
+    let mut payload: crate::federation::apply::RemoteMessagePayload =
         serde_json::from_value(env.payload.clone())
             .map_err(|e| AppError::BadRequest(format!("invalid dm message payload: {e}")))?;
+
+    payload.author = normalized_user_ref(&payload.author);
+    payload.channel_id = mapping::normalize_id(&payload.channel_id);
+    payload.id = mapping::normalize_id(&payload.id);
 
     // Authority: channel + message are homed on the signing peer; the author may
     // be remote but must be a qualified id (never a bare local row — S2).
@@ -610,9 +641,20 @@ pub fn is_dm(channel_type: &str) -> bool {
     channel_type == "dm" || channel_type == "group_dm"
 }
 
+/// Keep the same canonical user ID in profile and participant rows. Normalizing
+/// only the participant would break the users(id) foreign key.
+fn normalized_user_ref(user: &RemoteUserRef) -> RemoteUserRef {
+    RemoteUserRef {
+        id: mapping::normalize_id(&user.id),
+        username: user.username.as_deref().map(mapping::normalize_id),
+        display_name: user.display_name.clone(),
+        avatar: user.avatar.clone(),
+    }
+}
+
 fn actor_ref(domain: &str, user: &User) -> RemoteUserRef {
     RemoteUserRef {
-        id: mapping::qualify(&user.id, domain),
+        id: mapping::normalize_id(&mapping::qualify(&user.id, domain)),
         username: Some(user.username.clone()),
         display_name: user.display_name.clone(),
         avatar: user.avatar.clone(),
