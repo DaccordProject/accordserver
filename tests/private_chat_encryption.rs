@@ -90,7 +90,7 @@ async fn private_messages_require_encryption_and_keys_are_immutable() {
     let channel = db::dm_participants::create_dm_channel(
         server.pool(),
         &alice.user.id,
-        &[bob.user.id.clone()],
+        std::slice::from_ref(&bob.user.id),
         server.state.db_is_postgres,
     )
     .await
@@ -177,7 +177,7 @@ async fn signed_ciphertext_roundtrips_edits_and_replays_are_rejected() {
     let channel = db::dm_participants::create_dm_channel(
         server.pool(),
         &alice.user.id,
-        &[bob.user.id.clone()],
+        std::slice::from_ref(&bob.user.id),
         server.state.db_is_postgres,
     )
     .await
