@@ -45,6 +45,47 @@ async fn ok(
     value["data"].clone()
 }
 
+async fn start_chess(server: &TestServer, owner: &TestUser, black: &TestUser, base: &str) -> Value {
+    let mut session = ok(
+        server,
+        owner,
+        Method::POST,
+        &format!("{base}/arcade/sessions"),
+        json!({"game_id":"chess"}),
+    )
+    .await;
+    let path = format!(
+        "{base}/arcade/sessions/{}/members",
+        session["id"].as_str().unwrap()
+    );
+    session = ok(
+        server,
+        black,
+        Method::POST,
+        &path,
+        json!({"operation":"join","revision":session["revision"]}),
+    )
+    .await;
+    for user in [owner, black] {
+        session = ok(
+            server,
+            user,
+            Method::POST,
+            &path,
+            json!({"operation":"ready","ready":true,"revision":session["revision"]}),
+        )
+        .await;
+    }
+    ok(
+        server,
+        owner,
+        Method::POST,
+        &path,
+        json!({"operation":"start","revision":session["revision"]}),
+    )
+    .await
+}
+
 fn release(game: &str) -> Release {
     let payload = if game == "chess" {
         include_bytes!("fixtures/chess.json").as_slice()
@@ -352,6 +393,161 @@ async fn directory_lobbies_chess_authority_resume_and_revocation() {
         .unwrap()
         .iter()
         .all(|s| s["id"] != lobby["id"]));
+    // Starting requires two ready players. Player capacity is enforced while
+    // spectators remain separate, and departing hosts transfer lobby ownership.
+    let mut transfer = ok(
+        &server,
+        &owner,
+        Method::POST,
+        &format!("{base}/arcade/sessions"),
+        json!({"game_id":"chess"}),
+    )
+    .await;
+    let transfer_path = format!(
+        "{base}/arcade/sessions/{}",
+        transfer["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        call(
+            &server,
+            &owner,
+            Method::POST,
+            &format!("{transfer_path}/members"),
+            json!({"operation":"start","revision":transfer["revision"]})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    transfer = ok(
+        &server,
+        &black,
+        Method::POST,
+        &format!("{transfer_path}/members"),
+        json!({"operation":"join","revision":transfer["revision"]}),
+    )
+    .await;
+    assert_eq!(
+        call(
+            &server,
+            &spectator,
+            Method::POST,
+            &format!("{transfer_path}/members"),
+            json!({"operation":"join","revision":transfer["revision"]})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    transfer = ok(
+        &server,
+        &spectator,
+        Method::POST,
+        &format!("{transfer_path}/members"),
+        json!({"operation":"join","spectator":true,"revision":transfer["revision"]}),
+    )
+    .await;
+    assert_eq!(
+        call(
+            &server,
+            &spectator,
+            Method::POST,
+            &format!("{transfer_path}/members"),
+            json!({"operation":"ready","ready":true,"revision":transfer["revision"]})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    transfer = ok(
+        &server,
+        &owner,
+        Method::POST,
+        &format!("{transfer_path}/members"),
+        json!({"operation":"leave","revision":transfer["revision"]}),
+    )
+    .await;
+    assert_eq!(transfer["host_user_id"], black.user.id);
+    transfer = ok(
+        &server,
+        &black,
+        Method::POST,
+        &format!("{transfer_path}/members"),
+        json!({"operation":"leave","revision":transfer["revision"]}),
+    )
+    .await;
+    transfer = ok(
+        &server,
+        &spectator,
+        Method::POST,
+        &format!("{transfer_path}/members"),
+        json!({"operation":"leave","revision":transfer["revision"]}),
+    )
+    .await;
+    assert_eq!(transfer["state"], "ended");
+
+    // Checkmate is calculated by the server from legal moves, never client state.
+    let mut mate = start_chess(&server, &owner, &black, &base).await;
+    let mate_path = format!("{base}/arcade/sessions/{}", mate["id"].as_str().unwrap());
+    for (user, a, b) in [
+        (&owner, 13, 21),
+        (&black, 52, 36),
+        (&owner, 14, 30),
+        (&black, 59, 31),
+    ] {
+        mate = ok(
+            &server,
+            user,
+            Method::POST,
+            &format!("{mate_path}/actions"),
+            json!({"kind":"move","a":a,"b":b,"revision":mate["revision"]}),
+        )
+        .await;
+    }
+    assert_eq!(mate["state"], "ended");
+    assert_eq!(mate["result"]["winner_user_id"], black.user.id);
+    assert_eq!(mate["result"]["reason"], "checkmate");
+    assert!(mate["turn_user_id"].is_null());
+
+    // Maintenance records turn timeouts without any connected game client.
+    let timed = start_chess(&server, &owner, &black, &base).await;
+    let timed_id = timed["id"].as_str().unwrap();
+    let mut expired = accordserver::db::experiences::load(server.pool(), &space, timed_id)
+        .await
+        .unwrap();
+    expired.deadline = Some(chrono::Utc::now().timestamp() - 1);
+    accordserver::db::experiences::save(server.pool(), &mut expired)
+        .await
+        .unwrap();
+    accordserver::routes::experiences::maintenance(&server.state)
+        .await
+        .unwrap();
+    let timed = accordserver::db::experiences::load(server.pool(), &space, timed_id)
+        .await
+        .unwrap();
+    assert_eq!(timed.state, "ended");
+    assert_eq!(timed.result.as_ref().unwrap()["reason"], "turn_timeout");
+    assert_eq!(
+        timed.result.as_ref().unwrap()["winner_user_id"],
+        black.user.id
+    );
+    // Ended snapshots have bounded retention, with revision-guarded deletion.
+    sqlx::query(&accordserver::db::q(
+        "UPDATE experience_sessions SET updated_at = ? WHERE id = ?",
+    ))
+    .bind(chrono::Utc::now().timestamp() - 31 * 86400)
+    .bind(timed_id)
+    .execute(server.pool())
+    .await
+    .unwrap();
+    accordserver::routes::experiences::maintenance(&server.state)
+        .await
+        .unwrap();
+    assert!(
+        accordserver::db::experiences::load(server.pool(), &space, timed_id)
+            .await
+            .is_err()
+    );
     release.write().unwrap().status = "revoked".into();
     assert_eq!(
         call(
@@ -468,6 +664,84 @@ async fn directory_lobbies_chess_authority_resume_and_revocation() {
     .await
     .unwrap();
     assert_eq!(observed["data"]["space_id"], space);
+    // A disconnected player keeps the same slot on reconnect. The remaining
+    // client sees a pause, then resumes from the server-owned state.
+    let _ = black_ws.close(None).await;
+    let mut paused =
+        accordserver::db::experiences::load(server.pool(), &space, pong["id"].as_str().unwrap())
+            .await
+            .unwrap();
+    paused
+        .participants
+        .iter_mut()
+        .find(|p| p.user_id == black.user.id)
+        .unwrap()
+        .last_seen = chrono::Utc::now().timestamp() - 10;
+    // Ticks may race this test setup; retry the same authoritative mutation.
+    for _ in 0..20 {
+        if accordserver::db::experiences::save(server.pool(), &mut paused)
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        paused = accordserver::db::experiences::load(
+            server.pool(),
+            &space,
+            pong["id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        paused
+            .participants
+            .iter_mut()
+            .find(|p| p.user_id == black.user.id)
+            .unwrap()
+            .last_seen = chrono::Utc::now().timestamp() - 10;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let message = white_ws.next().await.unwrap().unwrap();
+            if let Ok(text) = message.into_text() {
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if frame["data"]["game"]["paused"] == true {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let (mut reconnected, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    reconnected
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"token":black.auth_header()}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let resumed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let message = reconnected.next().await.unwrap().unwrap();
+            if let Ok(text) = message.into_text() {
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if frame["data"]["game"]["paused"] == false {
+                    break frame;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        resumed["data"]["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["user_id"] == black.user.id)
+            .unwrap()["slot"],
+        1
+    );
+    let _ = reconnected.close(None).await;
     ok(
         &server,
         &owner,
