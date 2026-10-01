@@ -40,8 +40,8 @@ async fn ok(
     path: &str,
     body: Value,
 ) -> Value {
-    let (status, value) = call(server, user, method, path, body).await;
-    assert_eq!(status, StatusCode::OK, "{value}");
+    let (status, value) = call(server, user, method.clone(), path, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{method} {path} {body}: {value}");
     value["data"].clone()
 }
 
@@ -664,6 +664,98 @@ async fn directory_lobbies_chess_authority_resume_and_revocation() {
     .await
     .unwrap();
     assert_eq!(observed["data"]["space_id"], space);
+    // Each last input must converge even if it races a tick: the client need
+    // not send another drag event to repair a dropped final paddle position.
+    for (sequence, target) in (2..).zip([100, 700, 200, 600, 300]) {
+        white_ws
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({"sequence":sequence,"kind":"input","a":target})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let message = black_ws.next().await.unwrap().unwrap();
+                if let Ok(text) = message.into_text() {
+                    let frame: Value = serde_json::from_str(&text).unwrap();
+                    if frame["data"]["game"]["rects"][1] == target {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+    // Continuous ticks must not prevent late spectators or departure intents
+    // from clients whose snapshot is older than the current simulation frame.
+    let stale = pong["revision"].clone();
+    assert!(observed["data"]["revision"].as_i64().unwrap() > stale.as_i64().unwrap());
+    assert_eq!(
+        call(
+            &server,
+            &spectator,
+            Method::POST,
+            &format!("{pong_session}/members"),
+            json!({"operation":"join","spectator":true,"revision":-1})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let joined = ok(
+        &server,
+        &spectator,
+        Method::POST,
+        &format!("{pong_session}/members"),
+        json!({"operation":"join","spectator":true,"revision":stale}),
+    )
+    .await;
+    assert!(joined["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["user_id"] == spectator.user.id && p["role"] == "spectator"));
+    assert_eq!(
+        call(
+            &server,
+            &spectator,
+            Method::POST,
+            &format!("{pong_session}/actions"),
+            json!({"kind":"resign","revision":stale})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &server,
+            &owner,
+            Method::POST,
+            &format!("{pong_session}/actions"),
+            json!({"kind":"resign","revision":i64::MAX})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let left = ok(
+        &server,
+        &spectator,
+        Method::POST,
+        &format!("{pong_session}/members"),
+        json!({"operation":"leave","revision":stale}),
+    )
+    .await;
+    assert!(!left["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["user_id"] == spectator.user.id));
+
     // A disconnected player keeps the same slot on reconnect. The remaining
     // client sees a pause, then resumes from the server-owned state.
     let _ = black_ws.close(None).await;
@@ -741,6 +833,17 @@ async fn directory_lobbies_chess_authority_resume_and_revocation() {
             .unwrap()["slot"],
         1
     );
+    let resignation = ok(
+        &server,
+        &black,
+        Method::POST,
+        &format!("{pong_session}/actions"),
+        json!({"kind":"resign","revision":stale}),
+    )
+    .await;
+    assert_eq!(resignation["state"], "ended");
+    assert_eq!(resignation["result"]["reason"], "resigned");
+    assert_eq!(resignation["result"]["winner_user_id"], owner.user.id);
     let _ = reconnected.close(None).await;
     ok(
         &server,

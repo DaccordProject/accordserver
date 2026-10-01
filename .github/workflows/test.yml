@@ -97,6 +97,15 @@ jobs:
           DATABASE_URL: "postgres://accord:accord_test@localhost:5432/accord_test"
           ACCORD_TEST_MODE: "true"
 
+      - name: Check live-session contention repeatedly (PostgreSQL)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            cargo test --test experiences
+          done
+        env:
+          DATABASE_URL: "postgres://accord:accord_test@localhost:5432/accord_test"
+          ACCORD_TEST_MODE: "true"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

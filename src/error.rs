@@ -12,6 +12,7 @@ pub enum AppError {
     Unauthorized(String),
     Forbidden(String),
     Conflict(String),
+    SessionChanged,
     PayloadTooLarge(String),
     RateLimited { retry_after: u64 },
 }
@@ -25,7 +26,7 @@ impl AppError {
             AppError::NotFound(_) => "not_found",
             AppError::Unauthorized(_) => "unauthorized",
             AppError::Forbidden(_) => "forbidden",
-            AppError::Conflict(_) => "already_exists",
+            AppError::Conflict(_) | AppError::SessionChanged => "already_exists",
             AppError::PayloadTooLarge(_) => "payload_too_large",
             AppError::RateLimited { .. } => "rate_limited",
         }
@@ -39,7 +40,7 @@ impl AppError {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
-            AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::Conflict(_) | AppError::SessionChanged => StatusCode::CONFLICT,
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         }
@@ -60,6 +61,7 @@ impl AppError {
             AppError::Unauthorized(msg) => msg.clone(),
             AppError::Forbidden(msg) => msg.clone(),
             AppError::Conflict(msg) => msg.clone(),
+            AppError::SessionChanged => "Session changed; refresh before retrying".into(),
             AppError::PayloadTooLarge(msg) => msg.clone(),
             AppError::RateLimited { retry_after } => {
                 format!("rate limited, retry after {retry_after}s")
@@ -101,6 +103,9 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized(msg) => write!(f, "unauthorized: {msg}"),
             AppError::Forbidden(msg) => write!(f, "forbidden: {msg}"),
             AppError::Conflict(msg) => write!(f, "conflict: {msg}"),
+            AppError::SessionChanged => {
+                write!(f, "conflict: Session changed; refresh before retrying")
+            }
             AppError::PayloadTooLarge(msg) => write!(f, "payload too large: {msg}"),
             AppError::RateLimited { retry_after } => {
                 write!(f, "rate limited, retry after {retry_after}s")

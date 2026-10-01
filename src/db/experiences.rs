@@ -1,6 +1,6 @@
 use crate::{db::q, error::AppError};
 use serde::{Deserialize, Serialize};
-use sqlx::{AnyPool, Row};
+use sqlx::{Any, AnyPool, Executor, Row, Transaction};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Participant {
@@ -51,16 +51,41 @@ impl Session {
     }
 }
 
-pub async fn load(pool: &AnyPool, space: &str, id: &str) -> Result<Session, AppError> {
+pub async fn load<'e, E>(executor: E, space: &str, id: &str) -> Result<Session, AppError>
+where
+    E: Executor<'e, Database = Any>,
+{
     let row = sqlx::query(&q(
         "SELECT session_json FROM experience_sessions WHERE space_id = ? AND id = ?",
     ))
     .bind(space)
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
     serde_json::from_str(row.get("session_json"))
         .map_err(|_| AppError::Internal("Invalid stored session".into()))
+}
+
+/// Reserve a live lifecycle write before loading its latest snapshot. This
+/// no-op write locks the row on PostgreSQL and the writer on SQLite, including
+/// ticks from other server processes. Keep remote approval work outside it.
+pub async fn lock_live<'a>(
+    pool: &'a AnyPool,
+    space: &str,
+    id: &str,
+) -> Result<Transaction<'a, Any>, AppError> {
+    let mut tx = pool.begin().await?;
+    let result = sqlx::query(&q(
+        "UPDATE experience_sessions SET revision = revision WHERE space_id = ? AND id = ?",
+    ))
+    .bind(space)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Session not found".into()));
+    }
+    Ok(tx)
 }
 
 pub async fn list(pool: &AnyPool, space: &str) -> Result<Vec<Session>, AppError> {
@@ -97,16 +122,17 @@ pub async fn insert(pool: &AnyPool, session: &Session) -> Result<(), AppError> {
 
 /// Compare-and-swap serializes moves, ready changes and host transfer across
 /// concurrent requests without relying on process-local mutexes.
-pub async fn save(pool: &AnyPool, session: &mut Session) -> Result<(), AppError> {
+pub async fn save<'e, E>(executor: E, session: &mut Session) -> Result<(), AppError>
+where
+    E: Executor<'e, Database = Any>,
+{
     let previous = session.revision;
     session.revision += 1;
     session.updated_at = chrono::Utc::now().timestamp();
     let result = sqlx::query(&q("UPDATE experience_sessions SET revision = ?, session_json = ?, updated_at = ?, state = ?, deadline = ? WHERE id = ? AND space_id = ? AND revision = ? AND (? = 1 OR (EXISTS (SELECT 1 FROM space_experiences e WHERE e.space_id = ? AND e.game_id = ? AND e.enabled = 1 AND e.generation = ?) AND NOT EXISTS (SELECT 1 FROM space_arcades a WHERE a.space_id = ? AND a.enabled = 0)))"))
-        .bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.state).bind(session.deadline).bind(&session.id).bind(&session.space_id).bind(previous).bind(if session.state == "ended" {1i64} else {0}).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).execute(pool).await?;
+        .bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.state).bind(session.deadline).bind(&session.id).bind(&session.space_id).bind(previous).bind(if session.state == "ended" {1i64} else {0}).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).execute(executor).await?;
     if result.rows_affected() == 0 {
-        return Err(AppError::Conflict(
-            "Session changed; refresh before retrying".into(),
-        ));
+        return Err(AppError::SessionChanged);
     }
     Ok(())
 }
