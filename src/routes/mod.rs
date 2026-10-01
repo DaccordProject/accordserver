@@ -5,6 +5,9 @@ mod auth;
 mod bans;
 pub mod channels;
 mod emojis;
+pub mod experiences;
+mod experiences_live;
+mod experiences_rules;
 mod gateway;
 mod health;
 mod interactions;
@@ -14,7 +17,6 @@ mod landing;
 pub mod members;
 pub mod messages;
 mod mutes;
-mod plugins;
 mod reactions;
 mod read_states;
 mod relationships;
@@ -396,68 +398,43 @@ fn api_routes(state: &AppState) -> Router<AppState> {
                 .patch(emojis::update_emoji)
                 .delete(emojis::delete_emoji),
         )
-        // Plugins
         .route(
-            "/spaces/{space_id}/plugins",
-            get(plugins::list_plugins).post(plugins::install_plugin),
+            "/spaces/{space_id}/arcade",
+            get(experiences::arcade).patch(experiences::configure_arcade),
         )
         .route(
-            "/spaces/{space_id}/plugins/{plugin_id}",
-            delete(plugins::uninstall_plugin),
+            "/spaces/{space_id}/experiences/directory",
+            get(experiences::directory),
         )
         .route(
-            "/plugins/{plugin_id}/source",
-            get(plugins::get_plugin_source),
+            "/spaces/{space_id}/experiences/{game_id}",
+            axum::routing::put(experiences::enable)
+                .patch(experiences::configure)
+                .delete(experiences::remove),
         )
         .route(
-            "/plugins/{plugin_id}/bundle",
-            get(plugins::get_plugin_bundle),
-        )
-        .route("/plugins/{plugin_id}/icon", get(plugins::get_plugin_icon))
-        .route(
-            "/channels/{channel_id}/sessions/active",
-            get(plugins::get_channel_active_sessions),
+            "/spaces/{space_id}/experiences/{game_id}/package",
+            get(experiences::package),
         )
         .route(
-            "/spaces/{space_id}/sessions/active",
-            get(plugins::get_space_active_sessions),
+            "/spaces/{space_id}/arcade/sessions",
+            get(experiences::sessions).post(experiences::create_session),
         )
         .route(
-            "/plugins/{plugin_id}/sessions",
-            post(plugins::create_session),
+            "/spaces/{space_id}/arcade/sessions/{session_id}",
+            get(experiences::session),
         )
         .route(
-            "/plugins/{plugin_id}/sessions/{session_id}",
-            patch(plugins::update_session_state).delete(plugins::delete_session),
+            "/spaces/{space_id}/arcade/sessions/{session_id}/members",
+            post(experiences::membership),
         )
         .route(
-            "/plugins/{plugin_id}/sessions/{session_id}/leave",
-            post(plugins::leave_session),
+            "/spaces/{space_id}/arcade/sessions/{session_id}/actions",
+            post(experiences::action),
         )
         .route(
-            "/plugins/{plugin_id}/sessions/{session_id}/roles",
-            post(plugins::assign_role),
-        )
-        .route(
-            "/plugins/{plugin_id}/sessions/{session_id}/actions",
-            post(plugins::send_action),
-        )
-        // Plugin leaderboards
-        .route(
-            "/plugins/{plugin_id}/leaderboards/{board_id}/submit",
-            post(plugins::leaderboard_submit),
-        )
-        .route(
-            "/plugins/{plugin_id}/leaderboards/{board_id}",
-            get(plugins::leaderboard_list),
-        )
-        .route(
-            "/plugins/{plugin_id}/leaderboards/{board_id}/around",
-            get(plugins::leaderboard_around),
-        )
-        .route(
-            "/plugins/{plugin_id}/leaderboards/{board_id}/user/{user_id}",
-            get(plugins::leaderboard_get_user),
+            "/spaces/{space_id}/arcade/sessions/{session_id}/live",
+            get(experiences_live::upgrade),
         )
         // Soundboard
         .route(

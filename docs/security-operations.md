@@ -51,19 +51,17 @@ For an existing deployment using `devkey` / `secret`, generate new credentials, 
 
 Forwarded IPs require both `TRUST_PROXY_HEADERS=true` and `TRUSTED_PROXY_IPS`, a comma-separated list of the actual reverse proxies' literal IP addresses. All other peers use their socket IP. Configure the proxy to replace incoming forwarding headers. Without an allowlist, clients behind a proxy share one IP budget.
 
-## Native plugin signing
+## Curated game signing and legacy retirement
 
-Native uploads require two additional multipart fields: `signer` and `signature`. `signer` contains letters, digits, `_` or `-`. `signature` is a base64 Ed25519 signature. Configure `ACCORD_PLUGIN_TRUSTED_KEYS` as a JSON object mapping signer IDs to base64 raw 32-byte Ed25519 public keys. An empty trust store rejects all native uploads.
+Lua/native plugin uploads and execution routes are retired. Old tables remain
+an inert archive for operator export; there is no automatic package migration.
+Retired native signing configuration no longer enables any executable route.
 
-Sign these bytes with the trusted private key:
-
-```
-ASCII("accord-native-plugin-v1") || 0x00 || SHA256(exact_uploaded_zip_bytes)
-```
-
-The archive digest binds every file, including `plugin.json`. Keep the detached signature outside the ZIP to avoid a self-referential hash. Merely including `plugin.sig` inside an archive is insufficient. The server computes `bundle_hash`, verifies the signature, and derives `signed` and the returned signature metadata (`ed25519-v1:<signer>:<base64-signature>`). Scripted uploads cannot assert trust through manifest fields.
-
-The migration clears older unverified trust flags. Reinstall native bundles with a valid trusted signature before downloading them again. Downloads reverify against the current trust store, so removing a key also blocks future downloads of bundles signed with that key.
+Provision `EXPERIENCE_TRUSTED_KEYS` with approved key ids and hex Ed25519 public
+keys from the master-server operator. Set `EXPERIENCES_ENABLED=true` explicitly.
+Community servers accept only exact reviewed immutable WASM releases; publication
+uses a separate master-server reviewer credential. See [experiences](experiences.md)
+for approval freshness, outage behavior, revocation, rollback and key rotation.
 
 ## Revocation, limits and deleted files
 

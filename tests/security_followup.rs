@@ -1,8 +1,6 @@
 mod common;
 
-use accordserver::{
-    db, models::invite::CreateInvite, models::plugin::PluginManifest, security, storage,
-};
+use accordserver::{db, models::invite::CreateInvite, security, storage};
 use common::{authenticated_json_request, authenticated_request, parse_body, TestServer};
 use http::{Method, StatusCode};
 use serde_json::json;
@@ -138,58 +136,20 @@ async fn invite_page_escapes_stored_icons_for_browsers_and_crawlers() {
 }
 
 #[tokio::test]
-async fn plugin_sessions_reject_foreign_channels_and_nonmember_participants() {
+async fn legacy_executable_plugin_routes_are_retired() {
     let server = TestServer::new().await;
     let owner = server.create_user_with_token("owner").await;
-    let outsider = server.create_user_with_token("outsider").await;
     let space = server.create_space(&owner.user.id, "space").await;
-    let other = server.create_space(&outsider.user.id, "other").await;
-    let local = server.create_channel(&space, "local").await;
-    let foreign = server.create_channel(&other, "foreign").await;
-    let plugin = db::plugins::create_plugin(
-        server.pool(),
-        &space,
-        &owner.user.id,
-        &PluginManifest {
-            name: "demo".into(),
-            runtime: "scripted".into(),
-            plugin_type: "activity".into(),
-            ..Default::default()
-        },
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let req = authenticated_json_request(
-        Method::POST,
-        &format!("/api/v1/plugins/{}/sessions", plugin.id),
-        &owner.auth_header(),
-        &json!({"channel_id":foreign}),
-    );
-    assert_eq!(
-        server.router().oneshot(req).await.unwrap().status(),
-        StatusCode::FORBIDDEN
-    );
-    let session =
-        db::plugins::create_session(server.pool(), &plugin.id, &local, &owner.user.id, false)
-            .await
-            .unwrap();
-    assert!(db::plugins::add_participant(
-        server.pool(),
-        &session.id,
-        &outsider.user.id,
-        "player",
-        Some(1)
-    )
-    .await
-    .is_err());
-    assert_eq!(
-        db::plugins::get_session_user_ids(server.pool(), &session.id)
-            .await
-            .unwrap(),
-        vec![owner.user.id]
-    );
+    for path in [
+        format!("/api/v1/spaces/{space}/plugins"),
+        "/api/v1/plugins/legacy/sessions".into(),
+    ] {
+        let req = authenticated_json_request(Method::POST, &path, &owner.auth_header(), &json!({}));
+        assert_eq!(
+            server.router().oneshot(req).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 }
 
 #[tokio::test]

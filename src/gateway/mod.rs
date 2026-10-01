@@ -286,35 +286,15 @@ async fn classify_broadcast(
         .get("type")
         .and_then(|t| t.as_str())
         .unwrap_or("");
-    if event_type.starts_with("plugin.") {
-        if let Some(space_id) = broadcast.space_id.as_deref() {
-            if crate::middleware::permissions::require_membership(&state.db, space_id, user_id)
-                .await
-                .is_err()
-            {
-                return Delivery::Skip;
-            }
-        }
-        let data = &broadcast.event["data"];
-        let channel = if let Some(id) = data["channel_id"].as_str() {
-            Some(id.to_string())
-        } else if let Some(id) = data["session_id"].as_str() {
-            db::plugins::get_session(&state.db, id)
-                .await
-                .ok()
-                .map(|s| s.channel_id)
-        } else {
-            None
+    if event_type.starts_with("experience.") {
+        let Some(space) = broadcast.space_id.as_deref() else {
+            return Delivery::Skip;
         };
-        if let Some(channel) = channel {
-            if crate::middleware::permissions::require_channel_membership(
-                &state.db, &channel, user_id,
-            )
+        if crate::middleware::permissions::require_membership(&state.db, space, user_id)
             .await
             .is_err()
-            {
-                return Delivery::Skip;
-            }
+        {
+            return Delivery::Skip;
         }
     }
 

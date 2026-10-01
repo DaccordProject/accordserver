@@ -1,0 +1,13 @@
+[package]
+name = "experience-contract"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+ed25519-dalek = "2"
+wasmparser = "0.207"
