@@ -104,9 +104,7 @@ pub async fn save(pool: &AnyPool, session: &mut Session) -> Result<(), AppError>
     let result = sqlx::query(&q("UPDATE experience_sessions SET revision = ?, session_json = ?, updated_at = ?, state = ?, deadline = ? WHERE id = ? AND space_id = ? AND revision = ? AND (? = 1 OR (EXISTS (SELECT 1 FROM space_experiences e WHERE e.space_id = ? AND e.game_id = ? AND e.enabled = 1 AND e.generation = ?) AND NOT EXISTS (SELECT 1 FROM space_arcades a WHERE a.space_id = ? AND a.enabled = 0)))"))
         .bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.state).bind(session.deadline).bind(&session.id).bind(&session.space_id).bind(previous).bind(if session.state == "ended" {1i64} else {0}).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).execute(pool).await?;
     if result.rows_affected() == 0 {
-        return Err(AppError::Conflict(
-            "Session changed; refresh before retrying".into(),
-        ));
+        return Err(AppError::SessionChanged);
     }
     Ok(())
 }

@@ -356,12 +356,22 @@ pub(super) async fn checked_session(
     id: &str,
     auth: &AuthUser,
 ) -> Result<Session, AppError> {
+    Ok(checked_session_release(state, space, id, auth).await?.0)
+}
+
+async fn checked_session_release(
+    state: &AppState,
+    space: &str,
+    id: &str,
+    auth: &AuthUser,
+) -> Result<(Session, Option<Release>), AppError> {
     member(auth)?;
     require_membership(&state.db, space, &auth.user_id).await?;
     let mut session = db::experiences::load(&state.db, space, id).await?;
     if !session.can_observe(&auth.user_id) {
         return Err(AppError::Forbidden("Invite-only session".into()));
     }
+    let mut approved = None;
     if session.state != "ended" {
         if !arcade_enabled(state, space).await? {
             return Err(AppError::Forbidden("Arcade disabled".into()));
@@ -371,6 +381,12 @@ pub(super) async fn checked_session(
             return Err(AppError::Forbidden(
                 "Session release no longer enabled".into(),
             ));
+        }
+        approved = Some(release);
+        // Approval checks can involve a remote directory. Live ticks must not
+        // make the returned snapshot obsolete while those checks are in flight.
+        if session.mode == "real_time" {
+            session = db::experiences::load(&state.db, space, id).await?;
         }
         let now = chrono::Utc::now().timestamp();
         if session.deadline.is_some_and(|deadline| now >= deadline) {
@@ -394,7 +410,7 @@ pub(super) async fn checked_session(
             db::experiences::save(&state.db, &mut session).await?;
         }
     }
-    Ok(session)
+    Ok((session, approved))
 }
 
 pub async fn sessions(
@@ -517,8 +533,34 @@ pub async fn membership(
     auth: AuthUser,
     Json(request): Json<Membership>,
 ) -> Result<Json<Value>, AppError> {
-    let mut session = checked_session(&state, &space, &id, &auth).await?;
-    if request.revision != session.revision {
+    for attempt in 0..3 {
+        let result = membership_once(&state, &space, &id, &auth, &request).await;
+        if attempt < 2
+            && matches!(result, Err(AppError::SessionChanged))
+            && matches!(request.operation.as_str(), "join" | "leave")
+        {
+            continue;
+        }
+        return result;
+    }
+    unreachable!()
+}
+
+async fn membership_once(
+    state: &AppState,
+    space: &str,
+    id: &str,
+    auth: &AuthUser,
+    request: &Membership,
+) -> Result<Json<Value>, AppError> {
+    let (mut session, approved) = checked_session_release(state, space, id, auth).await?;
+    let live_membership = session.mode == "real_time"
+        && session.state == "running"
+        && matches!(request.operation.as_str(), "join" | "leave");
+    if request.revision < 0
+        || request.revision > session.revision
+        || (!live_membership && request.revision != session.revision)
+    {
         return Err(AppError::Conflict("Stale session revision".into()));
     }
     if session.state == "ended" {
@@ -539,7 +581,9 @@ pub async fn membership(
                         "Only spectators can join a started session".into(),
                     ));
                 }
-                let (release, _, _) = installed(&state, &space, &session.game_id).await?;
+                let release = approved
+                    .as_ref()
+                    .ok_or_else(|| AppError::Conflict("Session ended".into()))?;
                 let slot = if request.spectator {
                     if session
                         .participants
@@ -597,7 +641,7 @@ pub async fn membership(
                 return Err(AppError::Conflict("Two ready players required".into()));
             }
             for player in &players {
-                require_membership(&state.db, &space, &player.user_id).await?;
+                require_membership(&state.db, space, &player.user_id).await?;
             }
             session.state = "running".into();
             for p in &mut session.participants {
@@ -647,7 +691,7 @@ pub async fn membership(
         _ => return Err(AppError::BadRequest("Unknown membership operation".into())),
     }
     db::experiences::save(&state.db, &mut session).await?;
-    broadcast(&state, &session).await;
+    broadcast(state, &session).await;
     Ok(Json(json!({"data":session})))
 }
 
@@ -670,8 +714,33 @@ pub async fn action(
     auth: AuthUser,
     Json(request): Json<Action>,
 ) -> Result<Json<Value>, AppError> {
-    let mut session = checked_session(&state, &space, &id, &auth).await?;
-    if request.revision != session.revision || session.state != "running" {
+    for attempt in 0..3 {
+        let result = action_once(&state, &space, &id, &auth, &request).await;
+        if attempt < 2
+            && request.kind == "resign"
+            && matches!(result, Err(AppError::SessionChanged))
+        {
+            continue;
+        }
+        return result;
+    }
+    unreachable!()
+}
+
+async fn action_once(
+    state: &AppState,
+    space: &str,
+    id: &str,
+    auth: &AuthUser,
+    request: &Action,
+) -> Result<Json<Value>, AppError> {
+    let mut session = checked_session(state, space, id, auth).await?;
+    let live_resignation = session.mode == "real_time" && request.kind == "resign";
+    if request.revision < 0
+        || request.revision > session.revision
+        || (!live_resignation && request.revision != session.revision)
+        || session.state != "running"
+    {
         return Err(AppError::Conflict("Stale or inactive session".into()));
     }
     let player = session
@@ -690,7 +759,7 @@ pub async fn action(
         if session.turn_user_id.as_deref() != Some(&auth.user_id) {
             return Err(AppError::Forbidden("It is not your turn".into()));
         }
-        super::experiences_rules::chess_move(&mut session, &request, &auth.user_id)?;
+        super::experiences_rules::chess_move(&mut session, request, &auth.user_id)?;
     } else {
         if request.kind != "input" || request.b != 0 || request.promotion.is_some() {
             return Err(AppError::BadRequest("Invalid live input action".into()));
@@ -699,7 +768,7 @@ pub async fn action(
         super::experiences_rules::pong_input(&mut session, slot, request.a)?;
     }
     db::experiences::save(&state.db, &mut session).await?;
-    broadcast(&state, &session).await;
+    broadcast(state, &session).await;
     Ok(Json(json!({"data":session})))
 }
 

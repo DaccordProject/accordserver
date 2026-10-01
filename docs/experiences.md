@@ -87,6 +87,9 @@ Pong is server-authoritative: the host owns fixed 16ms simulation steps, paddles
 ball, collisions and the first-to-five result. WebSocket snapshots run at 20Hz,
 with monotonic input sequences and at most 30 messages/second per
 user/space/session across connections. Messages/frames are at most 2048 bytes.
+Each connection retains at most one pending paddle target. A compare-and-swap
+conflict retries that target on the next snapshot tick; a newer input replaces
+it, so a final drag position converges without another input event.
 The trusted host coalesces inputs to 20Hz; guests receive the same `read_state`,
 `draw`, `action` API as chess and no socket. Target end-to-end input latency is
 250ms: up to 50ms host coalescing, 16ms simulation, 50ms snapshot and ordinary
@@ -120,3 +123,10 @@ retired routes and two WebSocket Pong players. Run the shared contract tests wit
 `cargo test --manifest-path crates/experience_contract/Cargo.toml`. CI additionally
 runs the complete SQLite and PostgreSQL suites. Client physical-device validation
 is recorded separately; server tests do not establish a mobile platform claim.
+
+Live simulation revisions advance independently of user intent. Running Pong
+spectator joins, departures and resignations may carry an older nonnegative
+snapshot revision; future revisions are rejected. The server reapplies only
+these lifecycle operations to its freshly approved current state, with a bounded
+retry for a tick racing the database compare-and-swap. Chess moves and all lobby
+ready/start operations still require the exact observed revision.
