@@ -1,10 +1,11 @@
 # Build stage
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /app
 
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 
 # Create dummy sources to build dependencies
 RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && echo "fn main() {}" > src/bin/seed.rs && echo "fn main() {}" > src/bin/migrate_to_postgres.rs

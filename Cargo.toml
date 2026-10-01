@@ -2,6 +2,7 @@
 name = "accordserver"
 version = "0.2.2"
 edition = "2021"
+rust-version = "1.95"
 
 [dependencies]
 experience-contract = { path = "crates/experience_contract" }

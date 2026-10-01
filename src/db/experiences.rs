@@ -75,8 +75,8 @@ pub async fn list(pool: &AnyPool, space: &str) -> Result<Vec<Session>, AppError>
 }
 
 pub async fn insert(pool: &AnyPool, session: &Session) -> Result<(), AppError> {
-    let result = sqlx::query(&q("INSERT INTO experience_sessions (id, space_id, game_id, revision, session_json, updated_at) SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM space_experiences e WHERE e.space_id = ? AND e.game_id = ? AND e.enabled = 1 AND e.generation = ?) AND NOT EXISTS (SELECT 1 FROM space_arcades a WHERE a.space_id = ? AND a.enabled = 0)"))
-        .bind(&session.id).bind(&session.space_id).bind(&session.game_id).bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).execute(pool).await?;
+    let result = sqlx::query(&q("INSERT INTO experience_sessions (id, space_id, game_id, revision, session_json, updated_at, state, deadline) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM space_experiences e WHERE e.space_id = ? AND e.game_id = ? AND e.enabled = 1 AND e.generation = ?) AND NOT EXISTS (SELECT 1 FROM space_arcades a WHERE a.space_id = ? AND a.enabled = 0)"))
+        .bind(&session.id).bind(&session.space_id).bind(&session.game_id).bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.state).bind(session.deadline).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).execute(pool).await?;
     if result.rows_affected() == 0 {
         return Err(AppError::Conflict(
             "Experience changed during session creation".into(),
@@ -91,8 +91,8 @@ pub async fn save(pool: &AnyPool, session: &mut Session) -> Result<(), AppError>
     let previous = session.revision;
     session.revision += 1;
     session.updated_at = chrono::Utc::now().timestamp();
-    let result = sqlx::query(&q("UPDATE experience_sessions SET revision = ?, session_json = ?, updated_at = ? WHERE id = ? AND space_id = ? AND revision = ? AND (? = 1 OR (EXISTS (SELECT 1 FROM space_experiences e WHERE e.space_id = ? AND e.game_id = ? AND e.enabled = 1 AND e.generation = ?) AND NOT EXISTS (SELECT 1 FROM space_arcades a WHERE a.space_id = ? AND a.enabled = 0)))"))
-        .bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.id).bind(&session.space_id).bind(previous).bind(if session.state == "ended" {1i64} else {0}).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).execute(pool).await?;
+    let result = sqlx::query(&q("UPDATE experience_sessions SET revision = ?, session_json = ?, updated_at = ?, state = ?, deadline = ? WHERE id = ? AND space_id = ? AND revision = ? AND (? = 1 OR (EXISTS (SELECT 1 FROM space_experiences e WHERE e.space_id = ? AND e.game_id = ? AND e.enabled = 1 AND e.generation = ?) AND NOT EXISTS (SELECT 1 FROM space_arcades a WHERE a.space_id = ? AND a.enabled = 0)))"))
+        .bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.state).bind(session.deadline).bind(&session.id).bind(&session.space_id).bind(previous).bind(if session.state == "ended" {1i64} else {0}).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).execute(pool).await?;
     if result.rows_affected() == 0 {
         return Err(AppError::Conflict(
             "Session changed; refresh before retrying".into(),

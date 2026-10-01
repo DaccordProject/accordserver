@@ -48,6 +48,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Test signed package contract
+        run: cargo test --manifest-path crates/experience_contract/Cargo.toml
+
       - name: Run tests (SQLite)
         run: cargo test --all-targets
         env:

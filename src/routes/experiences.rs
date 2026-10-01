@@ -702,3 +702,53 @@ pub async fn action(
     broadcast(&state, &session).await;
     Ok(Json(json!({"data":session})))
 }
+
+/// Bounded maintenance runs independently of connected clients. Timeout results
+/// and abandonment therefore do not depend on somebody opening the Arcade.
+pub async fn maintenance(state: &AppState) -> Result<(), AppError> {
+    let now = chrono::Utc::now().timestamp();
+    let rows=sqlx::query(&db::q("SELECT session_json FROM experience_sessions WHERE (state = 'lobby' AND updated_at < ?) OR (state = 'running' AND deadline IS NOT NULL AND deadline <= ?) OR (state = 'running' AND updated_at < ?) OR (state = 'ended' AND updated_at < ?) LIMIT 128"))
+        .bind(now-86400).bind(now).bind(now-30*86400).bind(now-30*86400).fetch_all(&state.db).await?;
+    for row in rows {
+        let mut session: Session = serde_json::from_str(row.get("session_json"))
+            .map_err(|_| AppError::Internal("Invalid session".into()))?;
+        if session.state == "ended" {
+            sqlx::query(&db::q(
+                "DELETE FROM experience_sessions WHERE id = ? AND revision = ?",
+            ))
+            .bind(&session.id)
+            .bind(session.revision)
+            .execute(&state.db)
+            .await?;
+        } else {
+            if session.deadline.is_some_and(|d| d <= now) {
+                let winner = session
+                    .participants
+                    .iter()
+                    .find(|p| {
+                        p.role == "player" && Some(&p.user_id) != session.turn_user_id.as_ref()
+                    })
+                    .map(|p| p.user_id.clone());
+                session.end("turn_timeout", winner);
+            } else {
+                session.end("abandoned", None);
+            }
+            if db::experiences::save(&state.db, &mut session).await.is_ok() {
+                broadcast(state, &session).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn spawn_maintenance(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if let Err(e) = maintenance(&state).await {
+                tracing::warn!("Experience maintenance failed: {e}");
+            }
+        }
+    });
+}
