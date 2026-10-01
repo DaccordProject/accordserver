@@ -177,8 +177,8 @@ pub async fn discover(
     let mut rows = Vec::new();
     for id in users {
         // Old history continues to use a pinned key when a former member's server is offline.
-        if id.contains('@') && e2ee::identity(&state.db,&id).await?.is_none() {
-            refresh_remote(state,&id).await?;
+        if id.contains('@') && e2ee::identity(&state.db, &id).await?.is_none() {
+            refresh_remote(state, &id).await?;
         }
         let wire = if id.contains('@') {
             id.clone()
