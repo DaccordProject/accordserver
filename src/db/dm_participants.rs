@@ -58,6 +58,8 @@ pub async fn add_participant(
     user_id: &str,
     is_postgres: bool,
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    crate::e2ee::lock_chat(&mut tx, channel_id).await?;
     let sql = if is_postgres {
         "INSERT INTO dm_participants (channel_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
     } else {
@@ -67,8 +69,9 @@ pub async fn add_participant(
     sqlx::query(&sql)
         .bind(channel_id)
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -78,13 +81,16 @@ pub async fn remove_participant(
     channel_id: &str,
     user_id: &str,
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    crate::e2ee::lock_chat(&mut tx, channel_id).await?;
     sqlx::query(&super::q(
         "DELETE FROM dm_participants WHERE channel_id = ? AND user_id = ?",
     ))
     .bind(channel_id)
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 

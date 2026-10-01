@@ -223,7 +223,11 @@ pub async fn create_message(
     let cooldown_ms = cooldown_ms.max(0);
     let now = chrono::Utc::now().timestamp_millis();
     let mut tx = pool.begin().await?;
+    if input.content.starts_with(crate::e2ee::PREFIX) {
+        crate::e2ee::lock_chat(&mut tx, channel_id).await?;
+    }
     crate::e2ee::reserve_token(&mut tx, author_id, &input.content).await?;
+    crate::e2ee::enforce_recipients(&mut tx, author_id, channel_id, &input.content).await?;
     // The conditional upsert serializes concurrent sends in both databases.
     // A failed message insert rolls the reservation back as well.
     let admitted = sqlx::query(&super::q("INSERT INTO message_cooldowns (channel_id,user_id,last_sent_ms) VALUES (?,?,?) ON CONFLICT(channel_id,user_id) DO UPDATE SET last_sent_ms=excluded.last_sent_ms WHERE ?=0 OR message_cooldowns.last_sent_ms <= ?"))
@@ -411,8 +415,22 @@ pub async fn update_message(
         .await?;
     }
     let mut tx = pool.begin().await?;
+    if input
+        .content
+        .as_ref()
+        .is_some_and(|c| c.starts_with(crate::e2ee::PREFIX))
+    {
+        crate::e2ee::lock_chat(&mut tx, &existing.channel_id).await?;
+    }
     if let Some(content) = &input.content {
         crate::e2ee::reserve_token(&mut tx, &existing.author_id, content).await?;
+        crate::e2ee::enforce_recipients(
+            &mut tx,
+            &existing.author_id,
+            &existing.channel_id,
+            content,
+        )
+        .await?;
     }
     let now_fn = crate::db::now_sql(is_postgres);
     if let Some(ref content) = input.content {
@@ -469,6 +487,21 @@ pub async fn edit_remote_message(
     content: Option<&str>,
     edited_at: Option<&str>,
 ) -> Result<(), AppError> {
+    let existing = get_message_row(pool, message_id).await?;
+    let channel = super::channels::get_channel_row(pool, &existing.channel_id).await?;
+    if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+        if let Some(content) = content {
+            crate::e2ee::validate_message(
+                pool,
+                &existing.channel_id,
+                &existing.author_id,
+                content,
+                existing.reply_to.as_deref(),
+                Some(message_id),
+            )
+            .await?;
+        }
+    }
     if let Some(content) = content {
         sqlx::query(&super::q("UPDATE messages SET content = ? WHERE id = ?"))
             .bind(content)

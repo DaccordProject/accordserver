@@ -932,6 +932,7 @@ pub fn qualified_payload(
         .as_ref()
         .expect("qualified payload requires federation");
     let mut payload = crate::federation::outbound::message_payload(&fed.domain, msg, author);
+    payload["edited_at"] = json!(msg.edited_at);
     payload["attachments"] = json!(attachments
         .iter()
         .map(|a| {

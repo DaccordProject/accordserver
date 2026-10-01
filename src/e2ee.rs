@@ -240,3 +240,65 @@ pub async fn reserve_token(
     }
     Ok(())
 }
+
+/// Serialize membership mutations and private sends on the same channel row.
+/// SQLite serializes writers; PostgreSQL additionally needs an explicit row lock.
+pub async fn lock_chat(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    channel_id: &str,
+) -> Result<(), AppError> {
+    if db::is_pg() {
+        let row: Option<(String,)> =
+            sqlx::query_as(&db::q("SELECT id FROM channels WHERE id=? FOR UPDATE"))
+                .bind(channel_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        if row.is_none() {
+            return Err(AppError::NotFound("Unknown private chat".into()));
+        }
+    }
+    Ok(())
+}
+
+/// Recheck after taking the write lock, closing the discovery/admission race.
+pub async fn enforce_recipients(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    author_id: &str,
+    channel_id: &str,
+    content: &str,
+) -> Result<(), AppError> {
+    let Some(body) = content.strip_prefix(PREFIX) else {
+        return Ok(());
+    };
+    let envelope: Envelope =
+        serde_json::from_str(body).map_err(|_| invalid("Invalid encrypted envelope"))?;
+    let rows: Vec<(String,Option<String>,Option<String>)>=sqlx::query_as(&db::q("SELECT p.user_id,e.user_context,e.exchange_key FROM dm_participants p LEFT JOIN e2ee_identities e ON e.user_id=p.user_id WHERE p.channel_id=?"))
+        .bind(channel_id).fetch_all(&mut **tx).await?;
+    if !rows.iter().any(|(id, _, _)| id == author_id) {
+        return Err(AppError::Forbidden("Not a private chat participant".into()));
+    }
+    let mut expected = Vec::new();
+    for (_, context, key) in rows {
+        let (Some(context), Some(key)) = (context, key) else {
+            return Err(invalid(
+                "Every participant must set up encryption before sending",
+            ));
+        };
+        expected.push((context, key));
+    }
+    expected.sort();
+    let recipients = envelope.payload[8]
+        .as_array()
+        .ok_or_else(|| invalid("Invalid recipients"))?;
+    if recipients.len() != expected.len()
+        || recipients
+            .iter()
+            .zip(expected)
+            .any(|(row, (id, key))| row[0] != id || row[1] != key)
+    {
+        return Err(AppError::Conflict(
+            "Private chat membership changed. Refresh before sending.".into(),
+        ));
+    }
+    Ok(())
+}
