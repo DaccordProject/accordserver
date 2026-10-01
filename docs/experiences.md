@@ -75,7 +75,7 @@ identity rather than trusting local state or the former host.
 
 ## Authorities and limits
 
-Chess uses shakmaty's legal move engine, including check, castling, en passant,
+Chess uses cozy-chess's MIT-licensed legal move engine, including check, castling, en passant,
 promotion, checkmate and stalemate. The authenticated slot/turn is checked before
 rule validation. The server records win/draw/cancellation outcomes, repetition,
 50-move and insufficient-material draws, resignations and optional turn-timeout
