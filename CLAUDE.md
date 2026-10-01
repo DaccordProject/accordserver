@@ -126,3 +126,16 @@ Integration tests live in `tests/` with a shared helper in `tests/common/mod.rs`
 This repository includes a compiled documentation database/knowledgebase at `AGENTS.db`.
 For context for any task, you MUST use MCP `agents_search` to look up context including architectural, API, and historical changes.
 Treat `AGENTS.db` layers as immutable; avoid in-place mutation utilities unless required by the design.
+
+## Curated experiences
+
+`src/routes/experiences*.rs`, `src/db/experiences.rs` and
+`crates/experience_contract` replace the legacy executable plugin system.
+Directory releases require explicit operator enablement, pinned Ed25519 keys,
+and fresh approval. Arcade/session scope is a space, independent of channels.
+Never expose credentials or arbitrary state mutation to game guests. Moves and
+results are authoritative; both revisions and installation generations gate
+writes. Keep SQLite/PostgreSQL migrations aligned. Run `cargo test --test
+experiences` for the directory/lobby/chess/Pong/disable/revocation flow, and the
+shared contract suite separately. See `docs/experiences.md` for network budgets,
+creator tooling and cutover.

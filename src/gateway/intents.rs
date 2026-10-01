@@ -12,7 +12,7 @@ pub const ALL_INTENTS: &[&str] = &[
     "dm_reactions",
     "dm_typing",
     "scheduled_events",
-    "plugins",
+    "experiences",
     "relationships",
     // Privileged
     "members",
@@ -55,11 +55,7 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
             Some("soundboard")
         }
         "relationship.add" | "relationship.update" | "relationship.remove" => Some("relationships"),
-        "plugin.installed"
-        | "plugin.uninstalled"
-        | "plugin.event"
-        | "plugin.session_state"
-        | "plugin.role_changed" => Some("plugins"),
+        "experience.session" => Some("experiences"),
         // Profile changes are already fanned out only to shared spaces, DM
         // peers and friends, and every client renders usernames and avatars
         // regardless of which intents it asked for.

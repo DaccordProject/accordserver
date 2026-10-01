@@ -300,6 +300,7 @@ async fn run_main_server(config: Config) {
         }
     });
     tokio::spawn(accordserver::automod::run(state.clone()));
+    accordserver::routes::experiences::spawn_maintenance(state.clone());
     let app = accordserver::routes::router(state);
 
     let listener = TcpListener::bind((config.bind.as_str(), config.port))

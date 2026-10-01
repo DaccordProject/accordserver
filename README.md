@@ -52,7 +52,7 @@ Configuration comes from environment variables, with optional CLI flags as overr
 | `RUST_LOG` | `accordserver=debug,tower_http=debug` | Tracing log filter |
 | `TRUST_PROXY_HEADERS` | `false` | Enable forwarded client IPs only from peers listed in `TRUSTED_PROXY_IPS`. The proxy must replace incoming forwarding headers. |
 | `TRUSTED_PROXY_IPS` | empty | Comma-separated literal IP addresses of trusted reverse proxies. An empty list never trusts forwarded headers. |
-| `ACCORD_PLUGIN_TRUSTED_KEYS` | `{}` | JSON map of signer IDs to base64 Ed25519 public keys for native plugins. See [security operations](docs/security-operations.md). |
+| `EXPERIENCE_TRUSTED_KEYS` | `{}` | Operator-provisioned key id → hex Ed25519 publication public key. |
 | `LIVEKIT_INTERNAL_URL` | | LiveKit server URL for server communication (e.g. `http://livekit:7880`) |
 | `LIVEKIT_EXTERNAL_URL` | | LiveKit server URL for client connections (e.g. `wss://livekit.example.com`) |
 | `LIVEKIT_API_KEY` | | LiveKit API key |
@@ -151,7 +151,7 @@ docker compose up -d
 docker compose -f docker-compose.postgres.yml up -d
 ```
 
-Provision the administrator locally using the instructions in [security operations](docs/security-operations.md). Public registration always creates ordinary users. Existing operators should also read the credential rotation and native plugin upgrade instructions there.
+Provision the administrator locally using the instructions in [security operations](docs/security-operations.md). Public registration always creates ordinary users. Existing operators should also read the credential rotation and legacy plugin retirement instructions there.
 
 **Important notes:**
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` only take effect when PostgreSQL initializes a **fresh data directory**. If the volume already has data, changing these values does nothing. To reset: stop the stack, delete the postgres volume, and start again.
@@ -304,146 +304,14 @@ The client sends `VOICE_STATE_UPDATE` (opcode 9) through the gateway. The server
 
 ## Plugins
 
-Accord supports installable plugins that run inside spaces. Plugins are uploaded as `.daccord-plugin` bundles (ZIP files) and can power activities, bots, themes, or custom commands.
+Curated WASM games replace the legacy Lua/native plugin system. The master server
+reviews immutable signed releases; community servers own Arcade policy, lobbies
+and authoritative game state. Enable with `EXPERIENCES_ENABLED=true`, provision
+`EXPERIENCE_TRUSTED_KEYS` (key id → hex Ed25519 public key) and optionally set
+`EXPERIENCE_DIRECTORY_URL` (default `https://master.daccord.gg`).
 
-### Plugin Types
-
-| Type | Description |
-|---|---|
-| `activity` | Interactive activities (games, whiteboards, etc.) with session and participant management |
-| `bot` | Automated bots that respond to events |
-| `theme` | Visual themes for the client |
-| `command` | Custom slash commands |
-
-### Bundle Format
-
-A `.daccord-plugin` bundle is a ZIP file containing:
-
-```
-plugin.json          # Required — plugin manifest
-bin/plugin.elf       # Required for scripted plugins — the ELF binary
-plugin.sig           # Required for native plugins — signature file
-assets/icon.png      # Optional — plugin icon
-```
-
-The `plugin.json` manifest defines the plugin metadata:
-
-```json
-{
-  "name": "My Plugin",
-  "type": "activity",
-  "runtime": "scripted",
-  "description": "A cool plugin",
-  "version": "1.0.0",
-  "entry_point": "main",
-  "max_participants": 4,
-  "max_spectators": 10,
-  "lobby": true,
-  "canvas_size": [800, 600],
-  "permissions": [],
-  "data_topics": []
-}
-```
-
-| Field | Required | Description |
-|---|---|---|
-| `name` | Yes | Plugin name (max 100 characters) |
-| `type` | Yes | One of: `activity`, `bot`, `theme`, `command` |
-| `runtime` | Yes | `scripted` (ELF binary) or `native` (full bundle, requires signature) |
-| `description` | No | Short description |
-| `version` | No | Semver version string |
-| `entry_point` | No | Entry point function name |
-| `max_participants` | No | Max player slots (0 = unlimited) |
-| `max_spectators` | No | Max spectator slots |
-| `lobby` | No | Whether sessions start in a lobby state before running |
-| `canvas_size` | No | `[width, height]` for activity rendering (max 1280x720) |
-| `permissions` | No | Permissions the plugin requests |
-| `data_topics` | No | Data topics the plugin subscribes to |
-
-### Installing a Plugin
-
-Plugins are installed per-space. The installing user must have the `manage_space` permission.
-
-```bash
-# Upload a .daccord-plugin bundle
-curl -X POST /api/v1/spaces/{space_id}/plugins \
-  -H "Authorization: Bearer <token>" \
-  -F "bundle=@my-plugin.daccord-plugin"
-```
-
-The server validates the bundle, extracts the manifest, and stores the plugin. A `plugin.installed` gateway event is broadcast to space members.
-
-### Managing Plugins
-
-```bash
-# List plugins in a space (optionally filter by type)
-curl /api/v1/spaces/{space_id}/plugins?type=activity \
-  -H "Authorization: Bearer <token>"
-
-# Uninstall a plugin (requires manage_space)
-curl -X DELETE /api/v1/spaces/{space_id}/plugins/{plugin_id} \
-  -H "Authorization: Bearer <token>"
-
-# Download plugin ELF binary (scripted plugins only)
-curl /api/v1/plugins/{plugin_id}/elf \
-  -H "Authorization: Bearer <token>" -o plugin.elf
-
-# Download full plugin bundle
-curl /api/v1/plugins/{plugin_id}/bundle \
-  -H "Authorization: Bearer <token>" -o plugin.zip
-
-# Get plugin icon
-curl /api/v1/plugins/{plugin_id}/icon \
-  -H "Authorization: Bearer <token>" -o icon.png
-```
-
-### Activity Sessions
-
-Activity plugins support multiplayer sessions with lobby, running, and ended states.
-
-```bash
-# Create a session (starts in "lobby" if plugin has lobby enabled)
-curl -X POST /api/v1/plugins/{plugin_id}/sessions \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"channel_id": "123"}'
-
-# Join as a player or spectator
-curl -X POST /api/v1/plugins/{plugin_id}/sessions/{session_id}/roles \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "456", "role": "player"}'
-
-# Start the session (host only, transitions lobby → running)
-curl -X PATCH /api/v1/plugins/{plugin_id}/sessions/{session_id} \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"state": "running"}'
-
-# Send an action to other participants (running sessions only)
-curl -X POST /api/v1/plugins/{plugin_id}/sessions/{session_id}/actions \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"type": "move", "x": 10, "y": 20}'
-
-# End a session (host or manage_space permission)
-curl -X DELETE /api/v1/plugins/{plugin_id}/sessions/{session_id} \
-  -H "Authorization: Bearer <token>"
-```
-
-Session state transitions: `lobby` → `running` → `ended` (or `lobby` → `ended` to cancel).
-
-### Gateway Events
-
-Plugin events are broadcast over the WebSocket gateway under the `plugins` intent:
-
-| Event | Description |
-|---|---|
-| `plugin.installed` | A plugin was installed in a space |
-| `plugin.uninstalled` | A plugin was removed from a space |
-| `plugin.session_state` | A session was created, changed state, or ended |
-| `plugin.role_changed` | A participant's role changed in a session |
-| `plugin.event` | An action was relayed to session participants |
+See [experiences](docs/experiences.md) for owner operations, game networking,
+limits, rollback, offline behavior and the coordinated legacy cutover.
 
 ## Development
 
