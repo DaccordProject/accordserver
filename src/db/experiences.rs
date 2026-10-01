@@ -75,13 +75,23 @@ pub async fn list(pool: &AnyPool, space: &str) -> Result<Vec<Session>, AppError>
 }
 
 pub async fn insert(pool: &AnyPool, session: &Session) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    if crate::db::is_pg() {
+        // Serialize capacity checks across concurrent PostgreSQL connections.
+        // SQLite serializes the INSERT SELECT as a write automatically.
+        sqlx::query(&q("SELECT id FROM spaces WHERE id = ? FOR UPDATE"))
+            .bind(&session.space_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    }
     let result = sqlx::query(&q("INSERT INTO experience_sessions (id, space_id, game_id, revision, session_json, updated_at, state, deadline) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM space_experiences e WHERE e.space_id = ? AND e.game_id = ? AND e.enabled = 1 AND e.generation = ?) AND NOT EXISTS (SELECT 1 FROM space_arcades a WHERE a.space_id = ? AND a.enabled = 0) AND (SELECT COUNT(*) FROM experience_sessions s WHERE s.space_id = ? AND s.state != 'ended') < 32"))
-        .bind(&session.id).bind(&session.space_id).bind(&session.game_id).bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.state).bind(session.deadline).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).bind(&session.space_id).execute(pool).await?;
+        .bind(&session.id).bind(&session.space_id).bind(&session.game_id).bind(session.revision).bind(serde_json::to_string(session).unwrap()).bind(session.updated_at).bind(&session.state).bind(session.deadline).bind(&session.space_id).bind(&session.game_id).bind(session.installation_generation).bind(&session.space_id).bind(&session.space_id).execute(&mut *tx).await?;
     if result.rows_affected() == 0 {
         return Err(AppError::Conflict(
             "Experience changed during session creation".into(),
         ));
     }
+    tx.commit().await?;
     Ok(())
 }
 

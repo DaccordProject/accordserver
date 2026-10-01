@@ -754,6 +754,39 @@ async fn directory_lobbies_chess_authority_resume_and_revocation() {
     assert_eq!(ended["state"], "ended");
     let _ = white_ws.close(None).await;
     let _ = black_ws.close(None).await;
+    // Concurrent creation cannot exceed capacity on either SQL backend.
+    let mut template =
+        accordserver::db::experiences::load(server.pool(), &space, lobby["id"].as_str().unwrap())
+            .await
+            .unwrap();
+    template.state = "lobby".into();
+    template.result = None;
+    template.game = json!({});
+    template.revision = 0;
+    let futures = (0..40).map(|_| {
+        let mut session = template.clone();
+        session.id = accordserver::snowflake::generate().to_string();
+        let pool = server.pool().clone();
+        async move {
+            accordserver::db::experiences::insert(&pool, &session)
+                .await
+                .is_ok()
+        }
+    });
+    let inserted = futures_util::future::join_all(futures)
+        .await
+        .into_iter()
+        .filter(|ok| *ok)
+        .count();
+    assert_eq!(inserted, 32);
+    ok(
+        &server,
+        &owner,
+        Method::PATCH,
+        &game,
+        json!({"enabled":false}),
+    )
+    .await;
     community_task.abort();
     task.abort();
 }
