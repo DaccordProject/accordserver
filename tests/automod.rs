@@ -677,30 +677,44 @@ async fn moderator_gateway_events_are_not_disclosed_to_ordinary_members() {
 }
 
 #[tokio::test]
-async fn dm_uploads_use_instance_policy_and_only_instance_admin_can_review() {
-    let (server, owner, member, _, _, _) = setup(0.95, false).await;
+async fn encrypted_dm_uploads_bypass_plaintext_scanning_and_reject_legacy_uploads() {
+    let (server, owner, member, _, _, calls) = setup(0.95, false).await;
     let admin = server.create_admin_with_token("operator").await;
     set_policy(&server, &admin, "*", &policy(Action::Flag)).await;
     let dm = server.create_dm(&owner.user.id, &member.user.id).await;
-    let (_, body) = upload(&server, &member, &dm, b"dm content").await;
-    automod::process_one(&server.state).await.unwrap();
-    assert_eq!(
-        automod::get(&server.state, id(&body)).await.unwrap().status,
-        "published"
+    let (status, _) = upload(&server, &member, &dm, b"dm content").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let content = common::encrypted_test_content(&server, &dm, &member.user.id).await;
+    let body = build_multipart_upload_body(
+        "testboundary",
+        &json!({"content":content}),
+        "attachment-0.bin",
+        "application/octet-stream",
+        &[9; 80],
     );
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/channels/{dm}/messages/upload"))
+        .header("Authorization", member.auth_header())
+        .header("Content-Type", "multipart/form-data; boundary=testboundary")
+        .body(Body::from(body))
+        .unwrap();
+    let response = server.router().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["pending_attachments"], json!([]));
+    assert_eq!(
+        body["data"]["attachments"][0]["filename"],
+        "attachment-0.bin"
+    );
+    assert_eq!(body["data"]["content"], content);
+    automod::process_one(&server.state).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM reports WHERE space_id IS NULL")
         .fetch_one(server.pool())
         .await
         .unwrap();
-    assert_eq!(count, 1);
-    assert_eq!(
-        review(&server, &owner, id(&body), "quarantine").await,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        review(&server, &admin, id(&body), "quarantine").await,
-        StatusCode::OK
-    );
+    assert_eq!(count, 0);
 }
 
 struct FiveFrames {

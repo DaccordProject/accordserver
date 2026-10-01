@@ -115,6 +115,10 @@ pub async fn apply_event(
             apply_typing(state, env).await;
             Ok(Applied::Ok)
         }
+        "m.dm.message.update" => {
+            crate::federation::dm::apply_message_update(state, peer, env).await?;
+            Ok(Applied::Ok)
+        }
         "m.dm.message.create" => {
             crate::federation::dm::apply_message_create(state, peer, env).await?;
             Ok(Applied::Ok)
@@ -152,6 +156,8 @@ pub struct RemoteMessagePayload {
     #[serde(default)]
     pub reply_to: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub attachments: Vec<crate::models::attachment::Attachment>,
 }
 
 async fn apply_message_create(

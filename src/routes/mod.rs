@@ -4,6 +4,7 @@ pub mod audit_log;
 mod auth;
 mod bans;
 pub mod channels;
+mod e2ee;
 mod emojis;
 pub mod experiences;
 mod experiences_live;
@@ -64,6 +65,14 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .route("/ws", get(crate::gateway::ws_upgrade))
         .route("/mcp", post(crate::mcp::handle_mcp))
+        .route(
+            crate::federation::e2ee::IDENTITY_PATH,
+            post(crate::federation::e2ee::handle_identity),
+        )
+        .route(
+            crate::federation::e2ee::CHAT_PATH,
+            post(crate::federation::e2ee::handle_chat),
+        )
         .route("/invite/{code}", get(invite_page::invite_page))
         // Federation: signature-authed (not bearer/rate-limited), so wired here
         // rather than under /api/v1.
@@ -113,7 +122,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             crate::federation::dm::DM_SEND_PATH,
-            post(crate::federation::dm::handle_send),
+            post(crate::federation::dm::handle_send).layer(axum::extract::DefaultBodyLimit::max(
+                encrypted_upload_body_limit(&state),
+            )),
         )
         .route(
             "/cdn/attachments/{*path}",
@@ -155,6 +166,15 @@ pub fn router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(build_cors_layer())
         .with_state(state)
+}
+
+fn encrypted_upload_body_limit(state: &AppState) -> usize {
+    let settings = state.settings.load();
+    (settings.max_attachment_size as usize)
+        .saturating_mul(settings.max_attachments_per_message as usize)
+        .saturating_mul(4)
+        .div_ceil(3)
+        .saturating_add(crate::e2ee::MAX_ENVELOPE + 65536)
 }
 
 fn api_routes(state: &AppState) -> Router<AppState> {
@@ -311,6 +331,8 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/channels/{channel_id}/permissions/{overwrite_id}",
             put(channels::upsert_overwrite).delete(channels::delete_overwrite),
         )
+        .route("/users/@me/encryption", put(e2ee::register))
+        .route("/channels/{channel_id}/encryption", get(e2ee::participants))
         // Messages
         .route(
             "/channels/{channel_id}/messages",
@@ -318,7 +340,9 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route(
             "/channels/{channel_id}/messages/upload",
-            post(messages::create_message_multipart),
+            post(messages::create_message_multipart).layer(axum::extract::DefaultBodyLimit::max(
+                encrypted_upload_body_limit(state),
+            )),
         )
         .route(
             "/channels/{channel_id}/messages/{message_id}",

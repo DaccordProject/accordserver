@@ -130,7 +130,7 @@ pub async fn create_message(
     }
 
     // Input validation
-    if input.content.len() > 4000 {
+    if input.content.len() > crate::e2ee::MAX_ENVELOPE {
         return Err(AppError::BadRequest(
             "message content must be at most 4000 characters".into(),
         ));
@@ -152,6 +152,19 @@ pub async fn create_message(
     }
 
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+
+    if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+        crate::e2ee::validate_private_metadata(&input)?;
+        crate::e2ee::validate_message(
+            &state.db,
+            &channel_id,
+            &auth.user_id,
+            &input.content,
+            input.reply_to.as_deref(),
+            None,
+        )
+        .await?;
+    }
 
     // Remote-homed space: this server is only a replica. Forward the message to
     // the authoritative home server and return its canonical result; the home
@@ -291,7 +304,8 @@ pub async fn create_message(
     // Spawn URL unfurling in the background -- if the message has no embeds
     // already and its content contains URLs, fetch OpenGraph metadata and
     // update the message with generated embeds.
-    if input.embeds.as_ref().is_none_or(|e| e.is_empty())
+    if !is_dm
+        && input.embeds.as_ref().is_none_or(|e| e.is_empty())
         && !crate::unfurl::extract_urls(&input.content).is_empty()
     {
         // Acquire before spawning: overload skips a preview rather than queuing tasks.
@@ -432,6 +446,51 @@ pub async fn create_message_multipart(
     }
 
     let channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+        crate::e2ee::validate_private_metadata(&input)?;
+        crate::e2ee::validate_message(
+            &state.db,
+            &channel_id,
+            &auth.user_id,
+            &input.content,
+            input.reply_to.as_deref(),
+            None,
+        )
+        .await?;
+        if files.iter().enumerate().any(|(i, f)| {
+            f.filename != format!("attachment-{i}.bin")
+                || f.content_type != "application/octet-stream"
+                || f.bytes.len() < 28
+        }) {
+            return Err(AppError::BadRequest(
+                "Private attachments must be encrypted with opaque metadata".into(),
+            ));
+        }
+        if let Some(home) = db::federation::channel_origin(&state.db, &channel_id).await? {
+            let actor = db::users::get_user(&state.db, &auth.user_id).await?;
+            let opaque = files
+                .iter()
+                .map(|f| crate::federation::dm::EncryptedFile {
+                    filename: f.filename.clone(),
+                    bytes: data_encoding::BASE64.encode(&f.bytes),
+                })
+                .collect::<Vec<_>>();
+            let payload = crate::federation::dm::forward_dm_upload(
+                &state,
+                &home,
+                &channel_id,
+                &actor,
+                &input.content,
+                input.reply_to.as_deref(),
+                &opaque,
+            )
+            .await?;
+            return Ok((
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({"data":payload,"pending_attachments":[]})),
+            ));
+        }
+    }
     let cooldown_ms = slowmode_cooldown_ms(&state.db, &channel, &auth).await?;
 
     // The admission lock covers only the hash/policy check and the queue
@@ -440,7 +499,22 @@ pub async fn create_message_multipart(
     // instance, including when automod is disabled.
     let (msg, automod_policy, pending_ids) = {
         let _admission = state.automod.admission.lock().await;
-        let automod_policy = crate::automod::preflight(&state, &channel, &auth, &files).await?;
+        let private = matches!(channel.channel_type.as_str(), "dm" | "group_dm");
+        if private
+            && files.iter().enumerate().any(|(i, f)| {
+                f.filename != format!("attachment-{i}.bin")
+                    || f.content_type != "application/octet-stream"
+            })
+        {
+            return Err(AppError::BadRequest(
+                "Private attachments must be encrypted with opaque metadata".into(),
+            ));
+        }
+        let automod_policy = if private {
+            None
+        } else {
+            crate::automod::preflight(&state, &channel, &auth, &files).await?
+        };
         let msg = db::messages::create_message(
             &state.db,
             &channel_id,
@@ -516,6 +590,12 @@ pub async fn create_message_multipart(
 
     let json = message_row_to_json_with_attachments(&msg, &attachments, None);
 
+    if matches!(channel.channel_type.as_str(), "dm" | "group_dm") && state.federation.is_some() {
+        let author = db::users::get_user(&state.db, &auth.user_id).await?;
+        let payload = crate::federation::dm::qualified_payload(&state, &msg, &author, &attachments);
+        crate::federation::dm::fanout_dm_message(&state, &channel, &payload).await?;
+    }
+
     // Broadcast to gateway
     if let Some(ref dispatcher) = *state.gateway_tx.read().await {
         let event = serde_json::json!({
@@ -525,7 +605,11 @@ pub async fn create_message_multipart(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id,
-            target_user_ids: None,
+            target_user_ids: if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+                Some(db::dm_participants::list_participant_ids(&state.db, &channel_id).await?)
+            } else {
+                None
+            },
             event,
             intent: "messages".to_string(),
             required_permission: None,
@@ -574,6 +658,46 @@ pub async fn update_message(
         }
     }
 
+    let private_channel = db::channels::get_channel_row(&state.db, &channel_id).await?;
+    if matches!(private_channel.channel_type.as_str(), "dm" | "group_dm")
+        && existing.author_id != auth.user_id
+    {
+        return Err(AppError::Forbidden(
+            "Only the author can edit an encrypted message".into(),
+        ));
+    }
+    if matches!(private_channel.channel_type.as_str(), "dm" | "group_dm") {
+        if input.embeds.is_some() || input.title.is_some() {
+            return Err(AppError::BadRequest(
+                "Private metadata must be encrypted".into(),
+            ));
+        }
+        if let Some(home) = crate::db::federation::channel_origin(&state.db, &channel_id).await? {
+            let content = input.content.as_deref().ok_or_else(|| {
+                AppError::BadRequest("Private edits require encrypted content".into())
+            })?;
+            crate::e2ee::validate_message(
+                &state.db,
+                &channel_id,
+                &auth.user_id,
+                content,
+                existing.reply_to.as_deref(),
+                Some(&message_id),
+            )
+            .await?;
+            let actor = db::users::get_user(&state.db, &auth.user_id).await?;
+            let payload = crate::federation::forward::forward_edit(
+                &state,
+                &home,
+                &message_id,
+                &actor,
+                content,
+            )
+            .await?;
+            return Ok(Json(serde_json::json!({"data":payload})));
+        }
+    }
+
     // Author can always edit their own message; otherwise need manage_messages
     if existing.author_id != auth.user_id {
         require_channel_permission(&state.db, &channel_id, &auth, "manage_messages").await?;
@@ -602,11 +726,19 @@ pub async fn update_message(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id.clone(),
-            target_user_ids: None,
+            target_user_ids: if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+                Some(db::dm_participants::list_participant_ids(&state.db, &channel_id).await?)
+            } else {
+                None
+            },
             event,
             intent: "messages".to_string(),
             required_permission: None,
         });
+    }
+
+    if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+        crate::federation::dm::fanout_dm_edit(&state, &channel, &msg).await?;
     }
 
     // Fan the edit out to interested peers for a locally-homed space.
@@ -676,7 +808,11 @@ pub async fn delete_message(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id.clone(),
-            target_user_ids: None,
+            target_user_ids: if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+                Some(db::dm_participants::list_participant_ids(&state.db, &channel_id).await?)
+            } else {
+                None
+            },
             event,
             intent: "messages".to_string(),
             required_permission: None,
@@ -797,7 +933,11 @@ pub async fn typing_indicator(
         });
         let _ = dispatcher.send(crate::gateway::events::GatewayBroadcast {
             space_id: channel.space_id,
-            target_user_ids: None,
+            target_user_ids: if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+                Some(db::dm_participants::list_participant_ids(&state.db, &channel_id).await?)
+            } else {
+                None
+            },
             event,
             intent: "message_typing".to_string(),
             required_permission: None,

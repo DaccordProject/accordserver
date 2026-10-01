@@ -183,6 +183,21 @@ pub async fn create_message(
     input: &CreateMessage,
     cooldown_ms: i64,
 ) -> Result<MessageRow, AppError> {
+    crate::e2ee::validate_message(
+        pool,
+        channel_id,
+        author_id,
+        &input.content,
+        input.reply_to.as_deref(),
+        None,
+    )
+    .await?;
+    if space_id.is_none() {
+        let channel = super::channels::get_channel_row(pool, channel_id).await?;
+        if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+            crate::e2ee::validate_private_metadata(input)?;
+        }
+    }
     let id = snowflake::generate();
     let embeds_json = serde_json::to_string(&input.embeds.as_deref().unwrap_or(&[])).unwrap();
 
@@ -208,6 +223,11 @@ pub async fn create_message(
     let cooldown_ms = cooldown_ms.max(0);
     let now = chrono::Utc::now().timestamp_millis();
     let mut tx = pool.begin().await?;
+    if input.content.starts_with(crate::e2ee::PREFIX) {
+        crate::e2ee::lock_chat(&mut tx, channel_id).await?;
+    }
+    crate::e2ee::reserve_token(&mut tx, author_id, &input.content).await?;
+    crate::e2ee::enforce_recipients(&mut tx, author_id, channel_id, &input.content).await?;
     // The conditional upsert serializes concurrent sends in both databases.
     // A failed message insert rolls the reservation back as well.
     let admitted = sqlx::query(&super::q("INSERT INTO message_cooldowns (channel_id,user_id,last_sent_ms) VALUES (?,?,?) ON CONFLICT(channel_id,user_id) DO UPDATE SET last_sent_ms=excluded.last_sent_ms WHERE ?=0 OR message_cooldowns.last_sent_ms <= ?"))
@@ -287,6 +307,18 @@ pub async fn insert_remote_message(
     pool: &AnyPool,
     msg: &RemoteMessageInsert<'_>,
 ) -> Result<Option<MessageRow>, AppError> {
+    let channel = super::channels::get_channel_row(pool, msg.channel_id).await?;
+    if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+        crate::e2ee::validate_message(
+            pool,
+            msg.channel_id,
+            msg.author_id,
+            msg.content,
+            msg.reply_to,
+            None,
+        )
+        .await?;
+    }
     let res = sqlx::query(&super::q(
         "INSERT INTO messages (id, channel_id, space_id, author_id, content, mention_everyone, mentions, embeds, reply_to, created_at, origin) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
@@ -362,6 +394,44 @@ pub async fn update_message(
     input: &UpdateMessage,
     is_postgres: bool,
 ) -> Result<MessageRow, AppError> {
+    let existing = get_message_row(pool, message_id).await?;
+    let channel = super::channels::get_channel_row(pool, &existing.channel_id).await?;
+    if matches!(channel.channel_type.as_str(), "dm" | "group_dm")
+        && (input.embeds.is_some() || input.title.is_some())
+    {
+        return Err(AppError::BadRequest(
+            "Private message metadata must be encrypted".into(),
+        ));
+    }
+    if let Some(content) = &input.content {
+        crate::e2ee::validate_message(
+            pool,
+            &existing.channel_id,
+            &existing.author_id,
+            content,
+            existing.reply_to.as_deref(),
+            Some(message_id),
+        )
+        .await?;
+    }
+    let mut tx = pool.begin().await?;
+    if input
+        .content
+        .as_ref()
+        .is_some_and(|c| c.starts_with(crate::e2ee::PREFIX))
+    {
+        crate::e2ee::lock_chat(&mut tx, &existing.channel_id).await?;
+    }
+    if let Some(content) = &input.content {
+        crate::e2ee::reserve_token(&mut tx, &existing.author_id, content).await?;
+        crate::e2ee::enforce_recipients(
+            &mut tx,
+            &existing.author_id,
+            &existing.channel_id,
+            content,
+        )
+        .await?;
+    }
     let now_fn = crate::db::now_sql(is_postgres);
     if let Some(ref content) = input.content {
         let sql = format!(
@@ -371,7 +441,7 @@ pub async fn update_message(
         sqlx::query(&sql)
             .bind(content)
             .bind(message_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
     if let Some(ref embeds) = input.embeds {
@@ -383,7 +453,7 @@ pub async fn update_message(
         sqlx::query(&sql)
             .bind(&embeds_json)
             .bind(message_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
     if let Some(ref title) = input.title {
@@ -394,9 +464,10 @@ pub async fn update_message(
         sqlx::query(&sql)
             .bind(title)
             .bind(message_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
+    tx.commit().await?;
     get_message_row(pool, message_id).await
 }
 
@@ -416,6 +487,21 @@ pub async fn edit_remote_message(
     content: Option<&str>,
     edited_at: Option<&str>,
 ) -> Result<(), AppError> {
+    let existing = get_message_row(pool, message_id).await?;
+    let channel = super::channels::get_channel_row(pool, &existing.channel_id).await?;
+    if matches!(channel.channel_type.as_str(), "dm" | "group_dm") {
+        if let Some(content) = content {
+            crate::e2ee::validate_message(
+                pool,
+                &existing.channel_id,
+                &existing.author_id,
+                content,
+                existing.reply_to.as_deref(),
+                Some(message_id),
+            )
+            .await?;
+        }
+    }
     if let Some(content) = content {
         sqlx::query(&super::q("UPDATE messages SET content = ? WHERE id = ?"))
             .bind(content)

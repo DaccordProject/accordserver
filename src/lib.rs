@@ -18,3 +18,5 @@ pub mod state;
 pub mod storage;
 pub mod unfurl;
 pub mod voice;
+
+pub mod e2ee;

@@ -2193,7 +2193,7 @@ async fn test_direct_report_from_a_dm_has_no_space() {
         Method::POST,
         &format!("/api/v1/channels/{dm_id}/messages"),
         &bob.auth_header(),
-        &serde_json::json!({ "content": "you are a waste of space" }),
+        &serde_json::json!({ "content": common::encrypted_test_content(&server,&dm_id,&bob.user.id).await }),
     );
     let response = server.router().oneshot(req).await.unwrap();
     let msg_id = parse_body(response).await["data"]["id"]
@@ -2264,7 +2264,7 @@ async fn test_direct_report_rejects_a_channel_the_reporter_cannot_read() {
         Method::POST,
         &format!("/api/v1/channels/{dm_id}/messages"),
         &bob.auth_header(),
-        &serde_json::json!({ "content": "private" }),
+        &serde_json::json!({ "content": common::encrypted_test_content(&server,&dm_id,&bob.user.id).await }),
     );
     let response = server.router().oneshot(req).await.unwrap();
     let msg_id = parse_body(response).await["data"]["id"]
@@ -2359,7 +2359,7 @@ async fn test_admin_report_queue_serves_space_less_reports() {
         Method::POST,
         &format!("/api/v1/channels/{dm_id}/messages"),
         &bob.auth_header(),
-        &serde_json::json!({ "content": "abuse" }),
+        &serde_json::json!({ "content": common::encrypted_test_content(&server,&dm_id,&bob.user.id).await }),
     );
     let response = server.router().oneshot(req).await.unwrap();
     let msg_id = parse_body(response).await["data"]["id"]
