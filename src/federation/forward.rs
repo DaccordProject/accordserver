@@ -454,10 +454,20 @@ async fn serve_edit(
     req: &EditRequest,
 ) -> Result<serde_json::Value, AppError> {
     authority::require_homed_on(&req.actor.id, peer, "actor")?;
-    if req.content.chars().count() > 4000 {
+    if req.content.len() > crate::e2ee::MAX_ENVELOPE {
         return Err(AppError::BadRequest("message content too long".to_string()));
     }
     let existing = crate::db::messages::get_message_row(&state.db, &req.message_id).await?;
+    let channel = crate::db::channels::get_channel_row(&state.db, &existing.channel_id).await?;
+    let private = crate::federation::dm::is_dm(&channel.channel_type);
+    if private && existing.author_id != req.actor.id {
+        return Err(AppError::Forbidden(
+            "Only the author may edit a private message".into(),
+        ));
+    }
+    if private {
+        crate::federation::e2ee::discover(state, &existing.channel_id, &req.actor.id).await?;
+    }
     // Authoritative author-or-manage check from our DB.
     require_author_or_manage(
         state,
@@ -480,14 +490,18 @@ async fn serve_edit(
     .await?;
     let payload = crate::routes::messages::message_row_to_json_with_attachments(&msg, &[], None);
 
-    crate::federation::broadcast_space(
-        state,
-        existing.space_id.clone(),
-        "message.update",
-        payload.clone(),
-        "messages",
-    )
-    .await;
+    if private {
+        crate::federation::dm::broadcast_edit(state, &msg).await?;
+    } else {
+        crate::federation::broadcast_space(
+            state,
+            existing.space_id.clone(),
+            "message.update",
+            payload.clone(),
+            "messages",
+        )
+        .await;
+    }
     if let Some(sid) = &existing.space_id {
         let fanout = json!({
             "id": mapping::qualify(&req.message_id, our_domain),
@@ -496,6 +510,17 @@ async fn serve_edit(
         });
         crate::federation::outbound::fanout_to_space(state, sid, "m.message.update", fanout)
             .await?;
+    }
+    if private {
+        let author = crate::db::users::get_user(&state.db, &msg.author_id).await?;
+        let attachments =
+            crate::db::attachments::get_attachments_for_message(&state.db, &msg.id).await?;
+        return Ok(crate::federation::dm::qualified_payload(
+            state,
+            &msg,
+            &author,
+            &attachments,
+        ));
     }
     Ok(payload)
 }

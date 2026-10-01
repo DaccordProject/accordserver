@@ -297,3 +297,5 @@ mod tests {
         assert!(ctx.allow_request("c.test"));
     }
 }
+
+pub mod e2ee;

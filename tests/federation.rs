@@ -575,17 +575,44 @@ async fn cross_server_dm_round_trip() {
             (&a.state, &b.state, a.pool(), id_on_a.clone(), &alice.user)
         };
 
+    for (server, user) in [(&a, &alice), (&b, &bob)] {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let identity = accordserver::e2ee::Identity {
+            exchange_key: data_encoding::BASE64.encode(&[7; 32]),
+            signing_key: data_encoding::BASE64.encode(key.verifying_key().as_bytes()),
+        };
+        let wire = accordserver::federation::mapping::qualify(
+            &user.user.id,
+            &server.state.federation.as_ref().unwrap().domain,
+        );
+        accordserver::federation::e2ee::cache_identity(
+            &server.state,
+            &user.user.id,
+            &wire,
+            &identity,
+        )
+        .await
+        .unwrap();
+    }
+    let keys =
+        accordserver::federation::e2ee::discover(replica_state, &replica_channel, &replica_user.id)
+            .await
+            .unwrap();
+    assert_eq!(keys["participants"].as_array().unwrap().len(), 2);
+    let replica_server = if home_domain == "a.test" { &b } else { &a };
+    let encrypted =
+        common::encrypted_test_content(replica_server, &replica_channel, &replica_user.id).await;
     let payload = accordserver::federation::dm::forward_dm_message(
         replica_state,
         &home_domain,
         &replica_channel,
         replica_user,
-        "hello over a federated dm",
+        &encrypted,
         None,
     )
     .await
     .unwrap();
-    assert_eq!(payload["content"], "hello over a federated dm");
+    assert_eq!(payload["content"], encrypted);
 
     // Home fans the message back to the replica's server.
     assert_eq!(
@@ -596,8 +623,44 @@ async fn cross_server_dm_round_trip() {
     let on_replica = accordserver::db::messages::get_message_row(replica_pool, msg_id)
         .await
         .unwrap();
-    assert_eq!(on_replica.content, "hello over a federated dm");
+    assert_eq!(on_replica.content, encrypted);
     assert_eq!(on_replica.origin.as_deref(), Some(home_domain.as_str()));
+
+    assert_eq!(on_replica.author_id, replica_user.id);
+    let original: Value =
+        serde_json::from_str(encrypted.strip_prefix(accordserver::e2ee::PREFIX).unwrap()).unwrap();
+    let mut edited_payload = original["payload"].clone();
+    edited_payload[3] = json!(data_encoding::BASE64.encode(uuid::Uuid::new_v4().as_bytes()));
+    edited_payload[5] = json!(msg_id);
+    use ed25519_dalek::Signer;
+    let signature = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+        .sign(&serde_json::to_vec(&edited_payload).unwrap());
+    let edited = format!(
+        "{}{}",
+        accordserver::e2ee::PREFIX,
+        json!({"payload":edited_payload,"signature":data_encoding::BASE64.encode(&signature.to_bytes())})
+    );
+    let response = accordserver::federation::forward::forward_edit(
+        replica_state,
+        &home_domain,
+        msg_id,
+        replica_user,
+        &edited,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["content"], edited);
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(home_state).await,
+        1
+    );
+    assert_eq!(
+        accordserver::db::messages::get_message_row(replica_pool, msg_id)
+            .await
+            .unwrap()
+            .content,
+        edited
+    );
 
     std::env::remove_var("ACCORD_FEDERATION_ALLOW_INSECURE");
 }

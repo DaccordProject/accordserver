@@ -38,8 +38,6 @@ pub const DM_ANNOUNCE_PATH: &str = "/federation/v1/dm/announce";
 /// Home side: a replica forwards one of its users' DM messages to us (the home).
 pub const DM_SEND_PATH: &str = "/federation/v1/dm/send";
 
-const MAX_CONTENT_CHARS: usize = 4000;
-
 /// Pick the deterministic home domain for a DM between two qualified user IDs.
 /// Both servers compute the same value, so the DM is created exactly once.
 fn home_domain_for(a_qualified: &str, b_qualified: &str) -> String {
@@ -414,12 +412,21 @@ fn participant_storage_id(qualified_id: &str, our_domain: &str) -> String {
 // Messaging: send on the home, forward from a replica, apply inbound
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptedFile {
+    pub filename: String,
+    pub bytes: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct DmSendRequest {
     actor: RemoteUserRef,
     /// The home server's (bare) DM channel ID.
     channel_id: String,
     content: String,
+    #[serde(default)]
+    encrypted_files: Vec<EncryptedFile>,
     #[serde(default)]
     reply_to: Option<String>,
 }
@@ -442,7 +449,7 @@ pub async fn handle_send(
 
 async fn serve_send(
     state: &AppState,
-    our_domain: &str,
+    _our_domain: &str,
     peer: &str,
     req: &DmSendRequest,
 ) -> Result<serde_json::Value, AppError> {
@@ -450,10 +457,11 @@ async fn serve_send(
         actor: normalized_user_ref(&req.actor),
         channel_id: mapping::normalize_id(&req.channel_id),
         content: req.content.clone(),
+        encrypted_files: req.encrypted_files.clone(),
         reply_to: req.reply_to.clone(),
     };
     authority::require_homed_on(&req.actor.id, peer, "actor")?;
-    if req.content.chars().count() > MAX_CONTENT_CHARS {
+    if req.content.len() > crate::e2ee::MAX_ENVELOPE {
         return Err(AppError::BadRequest("message content too long".to_string()));
     }
 
@@ -480,6 +488,27 @@ async fn serve_send(
     )
     .await?;
 
+    crate::federation::e2ee::discover(state, &req.channel_id, &req.actor.id).await?;
+    let settings = state.settings.load();
+    if req.encrypted_files.len() > settings.max_attachments_per_message as usize {
+        return Err(AppError::BadRequest("Too many encrypted files".into()));
+    }
+    let mut files = Vec::new();
+    for (i, file) in req.encrypted_files.iter().enumerate() {
+        if file.filename != format!("attachment-{i}.bin")
+            || file.bytes.len() > (settings.max_attachment_size as usize).div_ceil(3) * 4
+        {
+            return Err(AppError::BadRequest("Invalid encrypted attachment".into()));
+        }
+        let bytes = data_encoding::BASE64
+            .decode(file.bytes.as_bytes())
+            .map_err(|_| AppError::BadRequest("Invalid encrypted file".into()))?;
+        if bytes.len() > settings.max_attachment_size as usize || bytes.len() < 28 {
+            return Err(AppError::BadRequest("Invalid encrypted file size".into()));
+        }
+        crate::middleware::rate_limit::charge_upload(state, &req.actor.id, 1, bytes.len())?;
+        files.push((file.filename.clone(), bytes));
+    }
     let msg = crate::db::messages::create_message(
         &state.db,
         &req.channel_id,
@@ -497,11 +526,39 @@ async fn serve_send(
     )
     .await?;
 
+    let mut attachments = Vec::new();
+    for (filename, bytes) in files {
+        let id = crate::snowflake::generate();
+        let (url, size) = crate::storage::save_attachment(
+            &state.storage_path,
+            &channel.id,
+            &id,
+            &filename,
+            &bytes,
+            settings.max_attachment_size as usize,
+        )
+        .await?;
+        let attachment = crate::db::attachments::insert_attachment(
+            &state.db,
+            &id,
+            &msg.id,
+            &filename,
+            Some("application/octet-stream"),
+            size as i64,
+            &url,
+            None,
+            None,
+            &crate::storage::content_hash(&bytes),
+        )
+        .await?;
+        attachments.push(attachment);
+    }
     let author = crate::db::users::get_user(&state.db, &req.actor.id).await?;
     // Qualified payload for the originating replica + peer fanout; bare-ID JSON
     // for our own local sessions (which know this DM by its bare home ID).
-    let payload = crate::federation::outbound::message_payload(our_domain, &msg, &author);
-    let local_json = crate::routes::messages::message_row_to_json_with_attachments(&msg, &[], None);
+    let payload = qualified_payload(state, &msg, &author, &attachments);
+    let local_json =
+        crate::routes::messages::message_row_to_json_with_attachments(&msg, &attachments, None);
 
     broadcast_message(state, &req.channel_id, "message.create", local_json).await;
     fanout_dm_message(state, &channel, &payload).await?;
@@ -518,6 +575,19 @@ pub async fn forward_dm_message(
     content: &str,
     reply_to: Option<&str>,
 ) -> Result<serde_json::Value, AppError> {
+    forward_dm_upload(state, home, channel_id, author, content, reply_to, &[]).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn forward_dm_upload(
+    state: &AppState,
+    home: &str,
+    channel_id: &str,
+    author: &User,
+    content: &str,
+    reply_to: Option<&str>,
+    files: &[EncryptedFile],
+) -> Result<serde_json::Value, AppError> {
     let fed = state
         .federation
         .as_ref()
@@ -526,6 +596,7 @@ pub async fn forward_dm_message(
         "actor": actor_ref(&fed.domain, author),
         "channel_id": mapping::local_part(channel_id),
         "content": content,
+        "encrypted_files": files,
         "reply_to": reply_to.map(mapping::local_part),
     }))
     .map_err(|e| AppError::Internal(format!("serialize dm send: {e}")))?;
@@ -583,7 +654,7 @@ pub async fn apply_message_create(
     authority::require_homed_on(&payload.channel_id, peer, "dm channel")?;
     authority::require_remote_target(&payload.author.id)?;
 
-    if payload.content.chars().count() > MAX_CONTENT_CHARS {
+    if payload.content.len() > crate::e2ee::MAX_ENVELOPE {
         return Err(AppError::BadRequest("dm message too long".to_string()));
     }
 
@@ -595,17 +666,39 @@ pub async fn apply_message_create(
         return Ok(());
     }
 
+    let fed = state
+        .federation
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("Federation disabled".into()))?;
+    let local_author = mapping::participant_storage_id(&payload.author.id, Some(&fed.domain));
+    if payload.content.starts_with(crate::e2ee::PREFIX) {
+        payload.author.id = local_author;
+    }
     let author_domain = mapping::domain_of(&payload.author.id).unwrap_or(peer);
     let handle = mapping::handle(payload.author.username_or_id(), author_domain);
-    crate::db::users::upsert_remote_user(
-        &state.db,
-        &payload.author.id,
-        author_domain,
-        &handle,
-        payload.author.display_name.as_deref(),
-        payload.author.avatar.as_deref(),
-    )
-    .await?;
+    if payload.author.id.contains('@') {
+        crate::db::users::upsert_remote_user(
+            &state.db,
+            &payload.author.id,
+            author_domain,
+            &handle,
+            payload.author.display_name.as_deref(),
+            payload.author.avatar.as_deref(),
+        )
+        .await?;
+    }
+    let local_participant =
+        crate::db::dm_participants::list_participant_ids(&state.db, &payload.channel_id)
+            .await?
+            .into_iter()
+            .find(|id| !id.contains('@'))
+            .ok_or_else(|| AppError::Forbidden("No local private chat participant".into()))?;
+    crate::federation::e2ee::discover(state, &payload.channel_id, &local_participant).await?;
+    if payload.mention_everyone || !payload.mentions.is_empty() || !payload.embeds.is_empty() {
+        return Err(AppError::BadRequest(
+            "Private message metadata must be encrypted".into(),
+        ));
+    }
 
     let mentions_json =
         serde_json::to_string(&payload.mentions).unwrap_or_else(|_| "[]".to_string());
@@ -627,7 +720,34 @@ pub async fn apply_message_create(
         return Ok(()); // duplicate delivery
     };
 
-    let json = crate::routes::messages::message_row_to_json_with_attachments(&row, &[], None);
+    let mut attachments = Vec::new();
+    for attachment in &payload.attachments {
+        authority::require_homed_on(&attachment.id, peer, "attachment")?;
+        if !attachment.filename.starts_with("attachment-")
+            || !attachment.filename.ends_with(".bin")
+            || attachment.content_type.as_deref() != Some("application/octet-stream")
+        {
+            return Err(AppError::BadRequest(
+                "Private attachment metadata is not opaque".into(),
+            ));
+        }
+        let stored = crate::db::attachments::insert_attachment(
+            &state.db,
+            &attachment.id,
+            &row.id,
+            &attachment.filename,
+            attachment.content_type.as_deref(),
+            attachment.size,
+            &attachment.url,
+            None,
+            None,
+            attachment.content_hash.as_deref().unwrap_or(""),
+        )
+        .await?;
+        attachments.push(stored);
+    }
+    let json =
+        crate::routes::messages::message_row_to_json_with_attachments(&row, &attachments, None);
     broadcast_message(state, &payload.channel_id, "message.create", json).await;
     Ok(())
 }
@@ -722,4 +842,104 @@ async fn broadcast_to_participants(
             required_permission: None,
         });
     }
+}
+
+/// Edits keep the original message ID; the home sends the ciphertext to every peer.
+pub async fn fanout_dm_edit(
+    state: &AppState,
+    channel: &ChannelRow,
+    msg: &crate::models::message::MessageRow,
+) -> Result<(), AppError> {
+    let Some(fed) = state.federation.as_ref() else {
+        return Ok(());
+    };
+    let targets = remote_participant_domains(state, &channel.id, &fed.domain).await?;
+    let payload = json!({"id":mapping::qualify(&msg.id,&fed.domain),"channel_id":mapping::qualify(&channel.id,&fed.domain),"content":msg.content,"edited_at":msg.edited_at});
+    let envelope = mapping::FederationEnvelope::new(
+        crate::snowflake::generate(),
+        fed.domain.clone(),
+        None,
+        "m.dm.message.update",
+        payload,
+    );
+    sender::enqueue(state, &envelope, &targets).await
+}
+
+pub async fn apply_message_update(
+    state: &AppState,
+    peer: &str,
+    env: &mapping::FederationEnvelope,
+) -> Result<(), AppError> {
+    let id = env.payload["id"]
+        .as_str()
+        .ok_or_else(|| AppError::BadRequest("Missing message ID".into()))?;
+    authority::require_homed_on(id, peer, "message")?;
+    let existing = crate::db::messages::get_message_row(&state.db, id).await?;
+    authority::require_homed_on(&existing.channel_id, peer, "channel")?;
+    let channel = crate::db::channels::get_channel_row(&state.db, &existing.channel_id).await?;
+    if !is_dm(&channel.channel_type) {
+        return Err(AppError::BadRequest("Not a private chat".into()));
+    }
+    let content = env.payload["content"]
+        .as_str()
+        .ok_or_else(|| AppError::BadRequest("Missing encrypted content".into()))?;
+    crate::e2ee::validate_message(
+        &state.db,
+        &existing.channel_id,
+        &existing.author_id,
+        content,
+        existing.reply_to.as_deref(),
+        Some(id),
+    )
+    .await?;
+    crate::db::messages::edit_remote_message(
+        &state.db,
+        id,
+        Some(content),
+        env.payload["edited_at"].as_str(),
+    )
+    .await?;
+    let row = crate::db::messages::get_message_row(&state.db, id).await?;
+    let attachments = crate::db::attachments::get_attachments_for_message(&state.db, id).await?;
+    let payload =
+        crate::routes::messages::message_row_to_json_with_attachments(&row, &attachments, None);
+    broadcast_message(state, &existing.channel_id, "message.update", payload).await;
+    Ok(())
+}
+
+pub async fn broadcast_edit(
+    state: &AppState,
+    msg: &crate::models::message::MessageRow,
+) -> Result<(), AppError> {
+    let channel = crate::db::channels::get_channel_row(&state.db, &msg.channel_id).await?;
+    let attachments =
+        crate::db::attachments::get_attachments_for_message(&state.db, &msg.id).await?;
+    let payload =
+        crate::routes::messages::message_row_to_json_with_attachments(msg, &attachments, None);
+    broadcast_message(state, &channel.id, "message.update", payload).await;
+    fanout_dm_edit(state, &channel, msg).await
+}
+
+/// Federation carries only opaque file metadata and ciphertext URLs at the home.
+pub fn qualified_payload(
+    state: &AppState,
+    msg: &crate::models::message::MessageRow,
+    author: &User,
+    attachments: &[crate::models::attachment::Attachment],
+) -> serde_json::Value {
+    let fed = state
+        .federation
+        .as_ref()
+        .expect("qualified payload requires federation");
+    let mut payload = crate::federation::outbound::message_payload(&fed.domain, msg, author);
+    payload["attachments"] = json!(attachments
+        .iter()
+        .map(|a| {
+            let mut a = a.clone();
+            a.id = mapping::qualify(&a.id, &fed.domain);
+            a.url = crate::federation::outbound::absolute_cdn_url(&fed.public_url, &a.url);
+            a
+        })
+        .collect::<Vec<_>>());
+    payload
 }
