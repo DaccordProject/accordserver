@@ -557,6 +557,14 @@ async fn membership_once(
     let live_membership = session.mode == "real_time"
         && session.state == "running"
         && matches!(request.operation.as_str(), "join" | "leave");
+    let mut locked = if live_membership {
+        Some(db::experiences::lock_live(&state.db, space, id).await?)
+    } else {
+        None
+    };
+    if let Some(tx) = &mut locked {
+        session = db::experiences::load(&mut **tx, space, id).await?;
+    }
     if request.revision < 0
         || request.revision > session.revision
         || (!live_membership && request.revision != session.revision)
@@ -690,7 +698,12 @@ async fn membership_once(
         }
         _ => return Err(AppError::BadRequest("Unknown membership operation".into())),
     }
-    db::experiences::save(&state.db, &mut session).await?;
+    if let Some(mut tx) = locked {
+        db::experiences::save(&mut *tx, &mut session).await?;
+        tx.commit().await?;
+    } else {
+        db::experiences::save(&state.db, &mut session).await?;
+    }
     broadcast(state, &session).await;
     Ok(Json(json!({"data":session})))
 }
@@ -736,6 +749,14 @@ async fn action_once(
 ) -> Result<Json<Value>, AppError> {
     let mut session = checked_session(state, space, id, auth).await?;
     let live_resignation = session.mode == "real_time" && request.kind == "resign";
+    let mut locked = if live_resignation && session.state == "running" {
+        Some(db::experiences::lock_live(&state.db, space, id).await?)
+    } else {
+        None
+    };
+    if let Some(tx) = &mut locked {
+        session = db::experiences::load(&mut **tx, space, id).await?;
+    }
     if request.revision < 0
         || request.revision > session.revision
         || (!live_resignation && request.revision != session.revision)
@@ -767,7 +788,12 @@ async fn action_once(
         let slot = player.slot.unwrap();
         super::experiences_rules::pong_input(&mut session, slot, request.a)?;
     }
-    db::experiences::save(&state.db, &mut session).await?;
+    if let Some(mut tx) = locked {
+        db::experiences::save(&mut *tx, &mut session).await?;
+        tx.commit().await?;
+    } else {
+        db::experiences::save(&state.db, &mut session).await?;
+    }
     broadcast(state, &session).await;
     Ok(Json(json!({"data":session})))
 }

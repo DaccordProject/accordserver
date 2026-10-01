@@ -127,6 +127,9 @@ is recorded separately; server tests do not establish a mobile platform claim.
 Live simulation revisions advance independently of user intent. Running Pong
 spectator joins, departures and resignations may carry an older nonnegative
 snapshot revision; future revisions are rejected. The server reapplies only
-these lifecycle operations to its freshly approved current state, with a bounded
-retry for a tick racing the database compare-and-swap. Chess moves and all lobby
+these lifecycle operations to its freshly approved current state in a short
+database write transaction. Approval requests finish before acquiring the write
+lock; the current snapshot, participants and revision are checked again under
+the lock, so repeated ticks cannot starve a departure or resignation. The same
+SQL revision and installation-policy guards apply. Chess moves and all lobby
 ready/start operations still require the exact observed revision.
