@@ -40,8 +40,8 @@ async fn ok(
     path: &str,
     body: Value,
 ) -> Value {
-    let (status, value) = call(server, user, method, path, body).await;
-    assert_eq!(status, StatusCode::OK, "{value}");
+    let (status, value) = call(server, user, method.clone(), path, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{method} {path} {body}: {value}");
     value["data"].clone()
 }
 
