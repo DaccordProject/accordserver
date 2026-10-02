@@ -1,3 +1,5 @@
+# Set LIVEKIT_NODE_IP to the host's public IPv4 before deployment.
+# See docs/livekit-deployment.md for Docker/Portainer media settings.
 services:
   accordserver:
     image: ghcr.io/daccordproject/accordserver:latest
@@ -30,6 +32,8 @@ services:
     command:
       - "--config"
       - "/etc/livekit.yaml"
+      - "--node-ip"
+      - "${LIVEKIT_NODE_IP:?Set LIVEKIT_NODE_IP to the public IPv4 of this host}"
       - "--keys"
       - "${LIVEKIT_API_KEY:?Set a unique LiveKit API key}: ${LIVEKIT_API_SECRET:?Set a random LiveKit API secret}"
     volumes:

@@ -4,4 +4,6 @@ bind_addresses:
 rtc:
   tcp_port: 7881
   udp_port: 7882
-  use_external_ip: true
+  # Compose supplies the reachable host address with --node-ip.
+  # Standalone deployments must also supply --node-ip or set rtc.node_ip.
+  use_external_ip: false

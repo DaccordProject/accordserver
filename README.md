@@ -143,6 +143,13 @@ ghcr.io/daccordproject/accordserver
 
 Use [docker-compose.yml](docker-compose.yml) for SQLite or [docker-compose.postgres.yml](docker-compose.postgres.yml) for PostgreSQL. Both use [livekit.yaml](livekit.yaml); replace example hostnames and configure the external `app-network` before starting.
 
+Set `LIVEKIT_NODE_IP` to the host's public IPv4 (or LAN IPv4 for LAN-only clients).
+The Compose files pass it to LiveKit with `--node-ip`; `livekit.yaml` disables
+STUN address discovery so that this explicit address is advertised at the
+published media ports. `LIVEKIT_EXTERNAL_URL` is the signaling URL and does not
+override the media IP. See [LiveKit deployment behind Docker](docs/livekit-deployment.md)
+for Portainer settings and troubleshooting intermittent voice connections.
+
 Set `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in an untracked `.env` file, generating each with `openssl rand -hex 32`. PostgreSQL also requires `POSTGRES_PASSWORD` and a matching, URL-encoded `DATABASE_URL`. Compose refuses to start when required values are missing; known development LiveKit credentials are rejected by the server.
 
 ```bash
