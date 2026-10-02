@@ -3,6 +3,31 @@
 Release highlights and upgrade notes for Accord Server. Earlier releases are
 documented in [GitHub Releases](https://github.com/DaccordProject/accordserver/releases).
 
+## [0.2.3] - 2026-10-02
+
+### Added
+
+- Space Arcade with reviewed, signed Chess and Pong releases, open or invite-only
+  lobbies, spectators, persisted turns, and authoritative multiplayer sessions.
+- Signed end-to-end encrypted private messages and attachments, including
+  federated private conversations.
+
+### Fixed
+
+- Assigned distinct Arcade and private-chat encryption migration versions for
+  SQLite and PostgreSQL so new and upgraded servers start successfully.
+- Documented reachable LiveKit media addresses for Docker deployments.
+
+### Upgrade notes
+
+- Upgrade the master directory and Daccord clients alongside community servers.
+  Legacy executable plugin routes are retired; existing plugin tables remain
+  available for export.
+- Arcade is disabled until operators configure `EXPERIENCES_ENABLED=true` and
+  `EXPERIENCE_TRUSTED_KEYS`. Space owners then enable reviewed games and Arcade.
+- Updated clients must send signed encrypted payloads for private messages;
+  plaintext private-message writes are rejected.
+
 ## [0.2.2] - 2026-09-28
 
 ### Fixed
@@ -65,3 +90,5 @@ Changes since 0.1.35.
 [0.2.2]: https://github.com/DaccordProject/accordserver/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/DaccordProject/accordserver/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/DaccordProject/accordserver/compare/v0.1.35...v0.2.0
+
+[0.2.3]: https://github.com/DaccordProject/accordserver/compare/v0.2.2...v0.2.3
