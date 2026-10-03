@@ -194,6 +194,20 @@ async fn verify_arcade_channel(
         StatusCode::BAD_REQUEST
     );
 
+    let uncategorized = ok(
+        server,
+        owner,
+        Method::PATCH,
+        &format!("/api/v1/channels/{id}"),
+        json!({"parent_id":null,"position":0}),
+    )
+    .await;
+    assert!(
+        uncategorized["parent_id"].is_null(),
+        "Arcade must move out of a category too"
+    );
+    assert_eq!(uncategorized["position"], 0);
+
     let permissions = format!("/api/v1/channels/{id}/permissions/{}", black.user.id);
     ok(
         server,
