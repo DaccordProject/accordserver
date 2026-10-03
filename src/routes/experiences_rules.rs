@@ -212,6 +212,8 @@ mod tests {
             deadline: None,
             created_at: 0,
             updated_at: 0,
+            last_activity_at: 0,
+            idle_expires_at: Some(crate::db::experiences::IDLE_TIMEOUT_SECONDS),
         }
     }
     fn play(

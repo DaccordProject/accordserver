@@ -195,6 +195,11 @@ pub async fn delete_channel(
     require_channel_permission(&state.db, &channel_id, &auth, "manage_channels").await?;
 
     // Broadcast channel.delete to space members before deleting
+    if existing.channel_type == "arcade" {
+        if let Some(space) = &existing.space_id {
+            super::experiences::disable_arcade(&state, space).await?;
+        }
+    }
     if let Some(ref space_id) = existing.space_id {
         if let Some(ref dispatcher) = *state.gateway_tx.read().await {
             let event = serde_json::json!({

@@ -281,6 +281,22 @@ pub async fn create_channel(
     require_permission(&state.db, &space_id, &auth, "manage_channels").await?;
 
     // Input validation
+    if input.channel_type == "arcade" {
+        if std::env::var("EXPERIENCES_ENABLED").as_deref() != Ok("true") {
+            return Err(AppError::Forbidden(
+                "Experiences are disabled by this server's operator".into(),
+            ));
+        }
+        if db::channels::list_channels_in_space(&state.db, &space_id)
+            .await?
+            .iter()
+            .any(|c| c.channel_type == "arcade")
+        {
+            return Err(AppError::Conflict(
+                "This space already has an Arcade channel".into(),
+            ));
+        }
+    }
     let name = input.name.trim();
     if name.is_empty() || name.len() > 100 {
         return Err(AppError::BadRequest(

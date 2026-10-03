@@ -109,6 +109,340 @@ fn release(game: &str) -> Release {
     }
 }
 
+async fn verify_arcade_channel(
+    server: &TestServer,
+    owner: &TestUser,
+    black: &TestUser,
+    space: &str,
+    base: &str,
+) {
+    let channels = ok(
+        server,
+        owner,
+        Method::GET,
+        &format!("{base}/channels"),
+        Value::Null,
+    )
+    .await;
+    let arcades: Vec<_> = channels
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["type"] == "arcade")
+        .collect();
+    assert_eq!(arcades.len(), 1);
+    let id = arcades[0]["id"].as_str().unwrap();
+    assert_eq!(
+        call(
+            server,
+            owner,
+            Method::POST,
+            &format!("{base}/channels"),
+            json!({"name":"duplicate", "type":"arcade"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let category = ok(
+        server,
+        owner,
+        Method::POST,
+        &format!("{base}/channels"),
+        json!({"name":"Games", "type":"category"}),
+    )
+    .await;
+    let moved = ok(
+        server,
+        owner,
+        Method::PATCH,
+        &format!("/api/v1/channels/{id}"),
+        json!({"name":"game-room", "position":5, "parent_id":category["id"]}),
+    )
+    .await;
+    assert_eq!(moved["position"], 5);
+    assert_eq!(moved["parent_id"], category["id"]);
+    assert_eq!(moved["name"], "game-room");
+    ok(
+        server,
+        owner,
+        Method::PUT,
+        &format!("{base}/experiences/chess"),
+        json!({"version":"1.0.0"}),
+    )
+    .await;
+    let same = ok(
+        server,
+        owner,
+        Method::GET,
+        &format!("/api/v1/channels/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(same["parent_id"], category["id"]);
+    assert_eq!(same["position"], 5);
+    assert_eq!(
+        call(
+            server,
+            owner,
+            Method::PATCH,
+            &format!("/api/v1/channels/{id}"),
+            json!({"type":"text"})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let permissions = format!("/api/v1/channels/{id}/permissions/{}", black.user.id);
+    ok(
+        server,
+        owner,
+        Method::PUT,
+        &permissions,
+        json!({"type":"member", "allow":[], "deny":["view_channel"]}),
+    )
+    .await;
+    for path in [format!("{base}/arcade"), format!("{base}/arcade/sessions")] {
+        assert_eq!(
+            call(server, black, Method::GET, &path, Value::Null).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    ok(server, owner, Method::DELETE, &permissions, Value::Null).await;
+
+    // Both requests can pass the preliminary check; the DB still admits one.
+    let other = server
+        .create_space(&owner.user.id, "Concurrent Arcade")
+        .await;
+    let path = format!("/api/v1/spaces/{other}/channels");
+    let (a, b) = tokio::join!(
+        call(
+            server,
+            owner,
+            Method::POST,
+            &path,
+            json!({"name":"arcade", "type":"arcade"})
+        ),
+        call(
+            server,
+            owner,
+            Method::POST,
+            &path,
+            json!({"name":"arcade", "type":"arcade"})
+        )
+    );
+    assert!(
+        matches!(
+            (a.0, b.0),
+            (StatusCode::OK, StatusCode::CONFLICT) | (StatusCode::CONFLICT, StatusCode::OK)
+        ),
+        "{a:?} {b:?}"
+    );
+    let rows = accordserver::db::channels::list_channels_in_space(server.pool(), &other)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter().filter(|c| c.channel_type == "arcade").count(),
+        1
+    );
+    assert!(
+        accordserver::db::channels::ensure_arcade_channel(server.pool(), space)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn verify_idle_cleanup(
+    server: &TestServer,
+    owner: &TestUser,
+    black: &TestUser,
+    spectator: &TestUser,
+    space: &str,
+    base: &str,
+) {
+    use accordserver::db::experiences::{load, save, IDLE_TIMEOUT_SECONDS};
+    let baseline_owner = ok(
+        server,
+        owner,
+        Method::GET,
+        &format!("{base}/arcade"),
+        Value::Null,
+    )
+    .await["active_sessions"]
+        .as_u64()
+        .unwrap();
+    let baseline_black = ok(
+        server,
+        black,
+        Method::GET,
+        &format!("{base}/arcade"),
+        Value::Null,
+    )
+    .await["active_sessions"]
+        .as_u64()
+        .unwrap();
+    let private = ok(
+        server,
+        owner,
+        Method::POST,
+        &format!("{base}/arcade/sessions"),
+        json!({"game_id":"chess","invite_only":true,"invited":[]}),
+    )
+    .await;
+    assert_eq!(
+        ok(
+            server,
+            owner,
+            Method::GET,
+            &format!("{base}/arcade"),
+            Value::Null
+        )
+        .await["active_sessions"],
+        baseline_owner + 1
+    );
+    assert_eq!(
+        ok(
+            server,
+            black,
+            Method::GET,
+            &format!("{base}/arcade"),
+            Value::Null
+        )
+        .await["active_sessions"],
+        baseline_black
+    );
+    ok(
+        server,
+        owner,
+        Method::POST,
+        &format!(
+            "{base}/arcade/sessions/{}/members",
+            private["id"].as_str().unwrap()
+        ),
+        json!({"operation":"leave","revision":private["revision"]}),
+    )
+    .await;
+    assert_eq!(
+        ok(
+            server,
+            owner,
+            Method::GET,
+            &format!("{base}/arcade"),
+            Value::Null
+        )
+        .await["active_sessions"],
+        baseline_owner
+    );
+
+    for running in [false, true] {
+        let snapshot = if running {
+            start_chess(server, owner, black, base).await
+        } else {
+            ok(
+                server,
+                owner,
+                Method::POST,
+                &format!("{base}/arcade/sessions"),
+                json!({"game_id":"chess"}),
+            )
+            .await
+        };
+        let id = snapshot["id"].as_str().unwrap();
+        let mut idle = load(server.pool(), space, id).await.unwrap();
+        let activity = chrono::Utc::now().timestamp() - IDLE_TIMEOUT_SECONDS + 60;
+        idle.last_activity_at = activity;
+        save(server.pool(), &mut idle).await.unwrap();
+        assert_eq!(idle.idle_expires_at, Some(activity + IDLE_TIMEOUT_SECONDS));
+        let path = format!("{base}/arcade/sessions/{id}/members");
+        let joined = ok(
+            server,
+            spectator,
+            Method::POST,
+            &path,
+            json!({"operation":"join","spectator":true,"revision":idle.revision}),
+        )
+        .await;
+        ok(
+            server,
+            spectator,
+            Method::POST,
+            &path,
+            json!({"operation":"leave","revision":joined["revision"]}),
+        )
+        .await;
+        let viewed = ok(
+            server,
+            owner,
+            Method::GET,
+            &format!("{base}/arcade/sessions/{id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(viewed["last_activity_at"], activity);
+        idle = load(server.pool(), space, id).await.unwrap();
+        // Ordinary save/live simulation updates updated_at, never activity.
+        save(server.pool(), &mut idle).await.unwrap();
+        assert_eq!(
+            load(server.pool(), space, id)
+                .await
+                .unwrap()
+                .last_activity_at,
+            activity
+        );
+        idle.last_activity_at = chrono::Utc::now().timestamp() - IDLE_TIMEOUT_SECONDS;
+        save(server.pool(), &mut idle).await.unwrap();
+        accordserver::routes::experiences::maintenance(&server.state)
+            .await
+            .unwrap();
+        assert!(
+            load(server.pool(), space, id).await.is_err(),
+            "expired lobby/game must be removed"
+        );
+    }
+    let fresh = start_chess(server, owner, black, base).await;
+    let id = fresh["id"].as_str().unwrap();
+    let mut snapshot = load(server.pool(), space, id).await.unwrap();
+    snapshot.last_activity_at = chrono::Utc::now().timestamp() - 6 * 86400;
+    save(server.pool(), &mut snapshot).await.unwrap();
+    let mut stale = snapshot.clone();
+    let moved = ok(
+        server,
+        owner,
+        Method::POST,
+        &format!("{base}/arcade/sessions/{id}/actions"),
+        json!({"kind":"move","a":12,"b":28,"revision":snapshot.revision}),
+    )
+    .await;
+    let now = chrono::Utc::now().timestamp();
+    assert!(moved["last_activity_at"].as_i64().unwrap() >= now - 2);
+    assert!(moved["idle_expires_at"].as_i64().unwrap() >= now + IDLE_TIMEOUT_SECONDS - 2);
+    stale.end("idle_timeout", None);
+    assert!(matches!(
+        save(server.pool(), &mut stale).await,
+        Err(accordserver::error::AppError::SessionChanged)
+    ));
+    assert_eq!(
+        load(server.pool(), space, id).await.unwrap().state,
+        "running"
+    );
+    let mut expired = load(server.pool(), space, id).await.unwrap();
+    expired.last_activity_at = now - IDLE_TIMEOUT_SECONDS - 1;
+    save(server.pool(), &mut expired).await.unwrap();
+    // Reading an expired game also removes it, without waiting for maintenance.
+    let final_snapshot = ok(
+        server,
+        owner,
+        Method::GET,
+        &format!("{base}/arcade/sessions/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(final_snapshot["result"]["reason"], "idle_timeout");
+    assert!(load(server.pool(), space, id).await.is_err());
+}
+
 #[tokio::test]
 #[serial]
 async fn directory_lobbies_chess_authority_resume_and_revocation() {
@@ -186,6 +520,7 @@ async fn directory_lobbies_chess_authority_resume_and_revocation() {
         json!({"version":"1.0.0"}),
     )
     .await;
+    verify_arcade_channel(&server, &owner, &black, &space, &base).await;
     assert_eq!(
         ok(
             &server,
@@ -548,6 +883,7 @@ async fn directory_lobbies_chess_authority_resume_and_revocation() {
             .await
             .is_err()
     );
+    verify_idle_cleanup(&server, &owner, &black, &spectator, &space, &base).await;
     release.write().unwrap().status = "revoked".into();
     assert_eq!(
         call(

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.4
+
+Arcade now has one ordinary channel per space, with persisted ordering, category
+placement, renaming and channel view permissions. Enabling the first game
+creates the entry; a database constraint prevents duplicate Arcade channels.
+Existing enabled spaces receive their entry during the upgrade.
+
+Arcade summaries include the number of visible active games and lobbies, with
+invite-only sessions counted only for authorized members. Games expire after
+seven days without player activity; session snapshots expose the removal
+deadline for the client countdown. Reads, spectators and automatic Pong ticks
+do not reset it. Cleanup removes expired sessions with revision checks while
+preserving installed games and other completed-game history.
+
+Requires the updated Arcade client for channel rendering, badges and countdowns.
+Signing, trust and directory settings are unchanged. Master server 0.1.2 remains
+compatible and needs no update.
+
 Release highlights and upgrade notes for Accord Server. Earlier releases are
 documented in [GitHub Releases](https://github.com/DaccordProject/accordserver/releases).
 
