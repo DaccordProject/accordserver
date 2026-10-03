@@ -163,5 +163,6 @@ async fn apply_input(
     let slot = player.slot.unwrap();
     player.last_seen = chrono::Utc::now().timestamp();
     super::experiences_rules::pong_input(&mut current, slot, target)?;
+    current.record_player_activity();
     db::experiences::save(&state.db, &mut current).await
 }

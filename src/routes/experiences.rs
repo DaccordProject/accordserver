@@ -7,7 +7,7 @@ use crate::{
     gateway::events::GatewayBroadcast,
     middleware::{
         auth::AuthUser,
-        permissions::{require_membership, require_permission},
+        permissions::{require_channel_permission, require_membership, require_permission},
     },
     state::AppState,
 };
@@ -113,6 +113,24 @@ fn member(auth: &AuthUser) -> Result<(), AppError> {
     Ok(())
 }
 
+async fn require_arcade_access(
+    state: &AppState,
+    space: &str,
+    auth: &AuthUser,
+) -> Result<(), AppError> {
+    require_membership(&state.db, space, &auth.user_id).await?;
+    let channel: Option<String> = sqlx::query_scalar(&db::q(
+        "SELECT id FROM channels WHERE space_id = ? AND type = 'arcade'",
+    ))
+    .bind(space)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some(channel) = channel {
+        require_channel_permission(&state.db, &channel, auth, "view_channel").await?;
+    }
+    Ok(())
+}
+
 async fn installed_with_disabled(
     state: &AppState,
     space: &str,
@@ -203,6 +221,39 @@ async fn end_sessions(
     Ok(())
 }
 
+async fn ensure_arcade_channel(state: &AppState, space: &str) -> Result<(), AppError> {
+    if let Some(channel) = db::channels::ensure_arcade_channel(&state.db, space).await? {
+        let json = super::spaces::channel_row_to_json_pub(&state.db, &channel).await;
+        if let Some(tx) = state.gateway_tx.read().await.as_ref() {
+            let _ = tx.send(GatewayBroadcast {
+                space_id: Some(space.into()),
+                target_user_ids: None,
+                event: json!({"op":0,"type":"channel.create","data":json}),
+                intent: "channels".into(),
+                required_permission: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn disable_arcade(state: &AppState, space: &str) -> Result<(), AppError> {
+    sqlx::query(&db::q("INSERT INTO space_arcades (space_id, enabled) VALUES (?, 0) ON CONFLICT(space_id) DO UPDATE SET enabled = 0"))
+        .bind(space).execute(&state.db).await?;
+    end_sessions(state, space, None, "arcade_disabled").await
+}
+
+/// End and remove an expired game only if no player action has changed the
+/// snapshot. Broadcast the final result before deleting so open clients stop.
+async fn remove_idle_session(state: &AppState, session: &mut Session) -> Result<(), AppError> {
+    session.end("idle_timeout", None);
+    db::experiences::save(&state.db, session).await?;
+    broadcast(state, session).await;
+    sqlx::query(&db::q("DELETE FROM experience_sessions WHERE id = ? AND space_id = ? AND revision = ? AND state = 'ended'"))
+        .bind(&session.id).bind(&session.space_id).bind(session.revision).execute(&state.db).await?;
+    Ok(())
+}
+
 pub async fn directory(
     State(state): State<AppState>,
     Path(space): Path<String>,
@@ -242,6 +293,7 @@ pub async fn enable(
     sqlx::query(&db::q("INSERT INTO space_experiences (space_id, game_id, release_json) VALUES (?, ?, ?) ON CONFLICT(space_id, game_id) DO UPDATE SET release_json = excluded.release_json, enabled = 1, generation = space_experiences.generation + 1"))
         .bind(&space).bind(&game).bind(serde_json::to_string(&release).unwrap()).execute(&state.db).await?;
     end_sessions(&state, &space, Some(&game), "release_updated").await?;
+    ensure_arcade_channel(&state, &space).await?;
     Ok(Json(json!({"data":release.manifest})))
 }
 
@@ -309,6 +361,8 @@ pub async fn configure_arcade(
     sqlx::query(&db::q("INSERT INTO space_arcades (space_id, enabled) VALUES (?, ?) ON CONFLICT(space_id) DO UPDATE SET enabled = excluded.enabled")).bind(&space).bind(if request.enabled {1i64} else {0}).execute(&state.db).await?;
     if !request.enabled {
         end_sessions(&state, &space, None, "arcade_disabled").await?;
+    } else {
+        ensure_arcade_channel(&state, &space).await?;
     }
     Ok(Json(json!({"data":{"enabled":request.enabled}})))
 }
@@ -319,7 +373,7 @@ pub async fn arcade(
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
     member(&auth)?;
-    require_membership(&state.db, &space, &auth.user_id).await?;
+    require_arcade_access(&state, &space, &auth).await?;
     let enabled = arcade_enabled(&state, &space).await?;
     let rows = sqlx::query(&db::q("SELECT release_json, enabled, config_json FROM space_experiences WHERE space_id = ? ORDER BY game_id")).bind(&space).fetch_all(&state.db).await?;
     let mut games = Vec::new();
@@ -329,8 +383,18 @@ pub async fn arcade(
         games.push(json!({"manifest":release.manifest,"enabled":row.get::<i64,_>("enabled") != 0,"config":serde_json::from_str::<Value>(row.get("config_json")).unwrap_or(json!({}))}));
     }
     let visible = enabled && games.iter().any(|g| g["enabled"] == true);
+    let active_sessions = if visible {
+        let now = chrono::Utc::now().timestamp();
+        db::experiences::list(&state.db, &space)
+            .await?
+            .iter()
+            .filter(|s| s.state != "ended" && !s.idle_expired(now) && s.can_observe(&auth.user_id))
+            .count()
+    } else {
+        0
+    };
     Ok(Json(
-        json!({"data":{"enabled":enabled,"visible":visible,"experiences":games}}),
+        json!({"data":{"enabled":enabled,"visible":visible,"experiences":games,"active_sessions":active_sessions}}),
     ))
 }
 
@@ -340,7 +404,7 @@ pub async fn package(
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
     member(&auth)?;
-    require_membership(&state.db, &space, &auth.user_id).await?;
+    require_arcade_access(&state, &space, &auth).await?;
     if !arcade_enabled(&state, &space).await? {
         return Err(AppError::Forbidden("Arcade disabled".into()));
     }
@@ -366,12 +430,16 @@ async fn checked_session_release(
     auth: &AuthUser,
 ) -> Result<(Session, Option<Release>), AppError> {
     member(auth)?;
-    require_membership(&state.db, space, &auth.user_id).await?;
+    require_arcade_access(state, space, auth).await?;
     let mut session = db::experiences::load(&state.db, space, id).await?;
     if !session.can_observe(&auth.user_id) {
         return Err(AppError::Forbidden("Invite-only session".into()));
     }
     let mut approved = None;
+    if session.idle_expired(chrono::Utc::now().timestamp()) {
+        remove_idle_session(state, &mut session).await?;
+        return Ok((session, None));
+    }
     if session.state != "ended" {
         if !arcade_enabled(state, space).await? {
             return Err(AppError::Forbidden("Arcade disabled".into()));
@@ -399,15 +467,6 @@ async fn checked_session_release(
             session.end("turn_timeout", winner);
             db::experiences::save(&state.db, &mut session).await?;
             broadcast(state, &session).await;
-        } else if now - session.updated_at
-            > if session.state == "lobby" {
-                86400
-            } else {
-                30 * 86400
-            }
-        {
-            session.end("abandoned", None);
-            db::experiences::save(&state.db, &mut session).await?;
         }
     }
     Ok((session, approved))
@@ -419,11 +478,20 @@ pub async fn sessions(
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
     member(&auth)?;
-    require_membership(&state.db, &space, &auth.user_id).await?;
+    require_arcade_access(&state, &space, &auth).await?;
     let mut result = Vec::new();
     for session in db::experiences::list(&state.db, &space).await? {
         if session.can_observe(&auth.user_id) {
-            result.push(checked_session(&state, &space, &session.id, &auth).await?);
+            match checked_session(&state, &space, &session.id, &auth).await {
+                Ok(session)
+                    if session.result.as_ref().and_then(|r| r["reason"].as_str())
+                        != Some("idle_timeout") =>
+                {
+                    result.push(session)
+                }
+                Ok(_) | Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(Json(json!({"data":result})))
@@ -456,7 +524,7 @@ pub async fn create_session(
     Json(request): Json<Create>,
 ) -> Result<Json<Value>, AppError> {
     member(&auth)?;
-    require_membership(&state.db, &space, &auth.user_id).await?;
+    require_arcade_access(&state, &space, &auth).await?;
     if !arcade_enabled(&state, &space).await? {
         return Err(AppError::Forbidden("Arcade disabled".into()));
     }
@@ -510,6 +578,8 @@ pub async fn create_session(
         deadline: None,
         created_at: now,
         updated_at: now,
+        last_activity_at: now,
+        idle_expires_at: Some(now + db::experiences::IDLE_TIMEOUT_SECONDS),
     };
     db::experiences::insert(&state.db, &session).await?;
     broadcast(&state, &session).await;
@@ -579,6 +649,12 @@ async fn membership_once(
         .participants
         .iter()
         .position(|p| p.user_id == auth.user_id);
+    let player_activity = match request.operation.as_str() {
+        "ready" | "start" => true,
+        "join" => position.is_none() && !request.spectator,
+        "leave" => position.is_some_and(|i| session.participants[i].role == "player"),
+        _ => false,
+    };
     match request.operation.as_str() {
         "join" => {
             if let Some(index) = position {
@@ -698,6 +774,9 @@ async fn membership_once(
         }
         _ => return Err(AppError::BadRequest("Unknown membership operation".into())),
     }
+    if player_activity {
+        session.record_player_activity();
+    }
     if let Some(mut tx) = locked {
         db::experiences::save(&mut *tx, &mut session).await?;
         tx.commit().await?;
@@ -788,6 +867,7 @@ async fn action_once(
         let slot = player.slot.unwrap();
         super::experiences_rules::pong_input(&mut session, slot, request.a)?;
     }
+    session.record_player_activity();
     if let Some(mut tx) = locked {
         db::experiences::save(&mut *tx, &mut session).await?;
         tx.commit().await?;
@@ -802,11 +882,12 @@ async fn action_once(
 /// and abandonment therefore do not depend on somebody opening the Arcade.
 pub async fn maintenance(state: &AppState) -> Result<(), AppError> {
     let now = chrono::Utc::now().timestamp();
-    let rows=sqlx::query(&db::q("SELECT session_json FROM experience_sessions WHERE (state = 'lobby' AND updated_at < ?) OR (state = 'running' AND deadline IS NOT NULL AND deadline <= ?) OR (state = 'running' AND updated_at < ?) OR (state = 'ended' AND updated_at < ?) LIMIT 128"))
-        .bind(now-86400).bind(now).bind(now-30*86400).bind(now-30*86400).fetch_all(&state.db).await?;
+    let rows=sqlx::query(&db::q("SELECT session_json FROM experience_sessions WHERE (state != 'ended' AND last_activity_at <= ?) OR (state = 'running' AND deadline IS NOT NULL AND deadline <= ?) OR (state = 'ended' AND updated_at < ?) LIMIT 128"))
+        .bind(now-db::experiences::IDLE_TIMEOUT_SECONDS).bind(now).bind(now-30*86400).fetch_all(&state.db).await?;
     for row in rows {
         let mut session: Session = serde_json::from_str(row.get("session_json"))
             .map_err(|_| AppError::Internal("Invalid session".into()))?;
+        session.normalize_activity();
         if session.state == "ended" {
             sqlx::query(&db::q(
                 "DELETE FROM experience_sessions WHERE id = ? AND revision = ?",
@@ -815,6 +896,11 @@ pub async fn maintenance(state: &AppState) -> Result<(), AppError> {
             .bind(session.revision)
             .execute(&state.db)
             .await?;
+        } else if session.idle_expired(now) {
+            match remove_idle_session(state, &mut session).await {
+                Ok(()) | Err(AppError::SessionChanged) => {}
+                Err(error) => return Err(error),
+            }
         } else {
             if session.deadline.is_some_and(|d| d <= now) {
                 let winner = session

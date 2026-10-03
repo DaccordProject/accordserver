@@ -76,7 +76,7 @@ fn oembed_link(base: &str, page_url: &str) -> String {
 
 /// Channel types that are never exposed as public crawlable pages.
 fn is_hidden_channel_type(t: &str) -> bool {
-    matches!(t, "category" | "dm" | "group_dm" | "voice")
+    matches!(t, "category" | "dm" | "group_dm" | "voice" | "arcade")
 }
 
 /// Percent-encode a single URL path segment (RFC 3986 unreserved set kept).

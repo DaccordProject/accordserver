@@ -29,6 +29,23 @@ fn row_to_channel(row: sqlx::any::AnyRow) -> ChannelRow {
 
 const SELECT_CHANNELS: &str = "SELECT id, type, space_id, name, description, topic, position, parent_id, nsfw, rate_limit, bitrate, user_limit, owner_id, last_message_id, archived, auto_archive_after, allow_anonymous_read, created_at FROM channels";
 
+/// Idempotent provisioning, protected by the partial unique index even when
+/// two game installations or channel requests arrive concurrently.
+pub async fn ensure_arcade_channel(
+    pool: &AnyPool,
+    space_id: &str,
+) -> Result<Option<ChannelRow>, AppError> {
+    let id = snowflake::generate();
+    let result = sqlx::query(&super::q(
+        "INSERT INTO channels (id, name, type, space_id, position) SELECT ?, 'arcade', 'arcade', ?, COALESCE(MAX(position) + 1, 0) FROM channels WHERE space_id = ? AND parent_id IS NULL ON CONFLICT DO NOTHING",
+    ))
+    .bind(&id).bind(space_id).bind(space_id).execute(pool).await?;
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(get_channel_row(pool, &id).await?))
+}
+
 pub async fn get_channel_row(pool: &AnyPool, channel_id: &str) -> Result<ChannelRow, AppError> {
     let row = sqlx::query(&super::q(&format!("{SELECT_CHANNELS} WHERE id = ?")))
         .bind(channel_id)

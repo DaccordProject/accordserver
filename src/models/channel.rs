@@ -76,6 +76,7 @@ pub struct UpdateChannel {
     pub channel_type: Option<String>,
     pub topic: Option<String>,
     pub position: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_parent_id")]
     pub parent_id: Option<Option<String>>,
     pub nsfw: Option<bool>,
     pub rate_limit: Option<i64>,
@@ -83,6 +84,15 @@ pub struct UpdateChannel {
     pub user_limit: Option<i64>,
     pub archived: Option<bool>,
     pub allow_anonymous_read: Option<bool>,
+}
+
+/// Moving a channel out of a category sends an explicit null; omitting the
+/// field leaves the existing category alone.
+fn deserialize_parent_id<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 #[derive(Debug, Deserialize)]
