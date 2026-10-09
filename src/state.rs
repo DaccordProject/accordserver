@@ -66,6 +66,7 @@ pub struct AppState {
     pub db_is_postgres: bool,
     pub voice_states: Arc<DashMap<String, VoiceState>>,
     pub presences: Arc<DashMap<String, Presence>>,
+    pub federated_presence: Arc<crate::federation::presence::PresenceState>,
     pub dispatcher: Arc<RwLock<Option<Dispatcher>>>,
     pub gateway_tx: Arc<RwLock<Option<broadcast::Sender<GatewayBroadcast>>>>,
     pub test_mode: bool,

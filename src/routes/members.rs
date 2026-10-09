@@ -578,3 +578,23 @@ pub fn member_row_to_json(row: &MemberRow, role_ids: &[String]) -> serde_json::V
         "permissions": null
     })
 }
+
+/// Member-scoped presence snapshot; guests only see their token's space.
+pub async fn list_presences(
+    State(state): State<AppState>,
+    Path(space_id): Path<String>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if auth.is_guest {
+        if auth.guest_space_id.as_deref() != Some(&space_id) {
+            return Err(AppError::Forbidden(
+                "guest token not valid for this space".into(),
+            ));
+        }
+    } else {
+        require_membership(&state.db, &space_id, &auth.user_id).await?;
+    }
+    crate::federation::presence::sync_once(&state).await;
+    let presences = crate::presence::snapshot(&state, &space_id, &auth.user_id).await?;
+    Ok(Json(serde_json::json!({ "data": presences })))
+}

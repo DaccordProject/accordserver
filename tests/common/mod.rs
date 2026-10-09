@@ -139,6 +139,7 @@ impl TestServer {
             db_is_postgres: is_postgres,
             voice_states: Arc::new(DashMap::new()),
             presences: Arc::new(DashMap::new()),
+            federated_presence: Arc::new(Default::default()),
             dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
             gateway_tx: Arc::new(RwLock::new(Some(gateway_tx))),
             test_mode: true,

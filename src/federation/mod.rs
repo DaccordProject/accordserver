@@ -16,6 +16,7 @@ pub mod inbox;
 pub mod mapping;
 pub mod outbound;
 pub mod peers;
+pub mod presence;
 pub mod sender;
 pub mod signatures;
 pub mod verify;
@@ -256,7 +257,7 @@ fn build_client() -> reqwest::Client {
 
 /// Background task entry point: drains the outbound delivery queue.
 pub async fn run(state: crate::state::AppState) {
-    sender::run(state).await;
+    tokio::join!(sender::run(state.clone()), presence::run(state));
 }
 
 #[cfg(test)]

@@ -1602,3 +1602,140 @@ async fn gateway_limits_validated_user_connections() {
         let _ = ws.close(None).await;
     }
 }
+
+#[tokio::test]
+async fn ready_masks_other_members_invisible_status_and_preserves_self_choice() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space = server.create_space(&alice.user.id, "Privacy").await;
+    server.add_member(&space, &bob.user.id).await;
+    let (_alice_socket, alice_ready) = connect_with(
+        &ws_url,
+        &alice.gateway_token(),
+        &["presences"],
+        Some(serde_json::json!({"status":"invisible", "activity":{"name":"Private"}})),
+    )
+    .await;
+    let own = alice_ready["data"]["presences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["user_id"] == alice.user.id)
+        .unwrap();
+    assert_eq!(own["status"], "invisible");
+    let (_bob_socket, bob_ready) =
+        connect_with(&ws_url, &bob.gateway_token(), &["presences"], None).await;
+    let other = bob_ready["data"]["presences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["user_id"] == alice.user.id)
+        .unwrap();
+    assert_eq!(other["status"], "offline");
+    assert_eq!(other["activities"], serde_json::json!([]));
+    assert!(other["client_status"]["desktop"].is_null());
+}
+
+#[tokio::test]
+async fn joining_mid_session_receives_existing_presence_and_announces_the_joiner() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space = server.create_public_space(&alice.user.id, "Open").await;
+    let (mut alice_socket, _) = connect_with(
+        &ws_url,
+        &alice.gateway_token(),
+        &["presences"],
+        Some(serde_json::json!({"status":"dnd"})),
+    )
+    .await;
+    let (mut bob_socket, _) = connect_with(
+        &ws_url,
+        &bob.gateway_token(),
+        &["presences", "members"],
+        None,
+    )
+    .await;
+    // Drain Alice's connection announcement before asserting Bob's join.
+    let _ = recv_event_type(&mut alice_socket, "presence.update", 3).await;
+    let response = server
+        .router()
+        .oneshot(authenticated_json_request(
+            Method::POST,
+            &format!("/api/v1/spaces/{space}/join"),
+            &bob.auth_header(),
+            &serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut found = false;
+    for _ in 0..6 {
+        let frame = next_json(&mut bob_socket).await;
+        if frame["type"] == "presence.update" && frame["data"]["user_id"] == alice.user.id {
+            assert_eq!(frame["data"]["status"], "dnd");
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "join must seed presences already published before joining"
+    );
+    let (announcement, others) = recv_event_type(&mut alice_socket, "presence.update", 6).await;
+    let announcement =
+        announcement.unwrap_or_else(|| panic!("joiner announcement missing: {others:?}"));
+    assert_eq!(announcement["data"]["user_id"], bob.user.id);
+    assert_eq!(announcement["data"]["status"], "online");
+}
+
+#[tokio::test]
+async fn live_invisible_preserves_self_choice_and_masks_other_sessions() {
+    let (server, ws_url) = spawn_test_server().await;
+    let alice = server.create_user_with_token("alice").await;
+    let bob = server.create_user_with_token("bob").await;
+    let space = server.create_space(&alice.user.id, "Private status").await;
+    server.add_member(&space, &bob.user.id).await;
+    let (mut alice_socket, _) =
+        connect_with(&ws_url, &alice.gateway_token(), &["presences"], None).await;
+    let (mut bob_socket, _) =
+        connect_with(&ws_url, &bob.gateway_token(), &["presences"], None).await;
+    // Ignore connection announcements before sending the deliberate update.
+    let _ = recv_event_type(&mut alice_socket, "presence.update", 3).await;
+    let _ = recv_event_type(&mut bob_socket, "presence.update", 3).await;
+    alice_socket
+        .send(Message::Text(
+            serde_json::json!({"op":8,"data":{
+                "status":"invisible","activity":{"name":"Private"}
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let mut own = None;
+    for _ in 0..6 {
+        let frame = next_json(&mut alice_socket).await;
+        if frame["type"] == "presence.update"
+            && frame["data"]["user_id"] == alice.user.id
+            && frame["data"]["status"] == "invisible"
+        {
+            own = Some(frame);
+            break;
+        }
+    }
+    let own = own.expect("own sessions should retain Invisible");
+    assert_eq!(own["data"]["activities"][0]["name"], "Private");
+    let mut other = None;
+    for _ in 0..6 {
+        let frame = next_json(&mut bob_socket).await;
+        if frame["type"] == "presence.update" && frame["data"]["user_id"] == alice.user.id {
+            other = Some(frame);
+            break;
+        }
+    }
+    let other = other.expect("other sessions should see Offline");
+    assert_eq!(other["data"]["status"], "offline");
+    assert_eq!(other["data"]["activities"], serde_json::json!([]));
+}

@@ -398,6 +398,33 @@ async fn classify_broadcast(
         }
     }
 
+    // A public Invisible broadcast is masked for other users, but the user's
+    // own sessions must retain their private choice (including custom-status
+    // edits, which would otherwise resend invalid `offline` as `online`).
+    if event_type == "presence.update" {
+        if let Some(subject) = broadcast
+            .event
+            .get("data")
+            .and_then(|d| d.get("user_id"))
+            .and_then(|id| id.as_str())
+        {
+            let self_subject = subject == user_id
+                || state.federation.as_ref().is_some_and(|fed| {
+                    crate::federation::mapping::domain_of(subject)
+                        .is_some_and(|d| d.eq_ignore_ascii_case(&fed.domain))
+                        && crate::federation::mapping::local_part(subject) == user_id
+                });
+            if self_subject {
+                let p = crate::presence::current_presence(state, user_id)
+                    .unwrap_or_else(|| crate::presence::offline_presence(user_id));
+                let mut event = broadcast.event.clone();
+                event["data"] =
+                    serde_json::to_value(crate::presence::visible_presence(p, Some(user_id)))
+                        .unwrap_or_default();
+                return Delivery::Send(event);
+            }
+        }
+    }
     Delivery::Send(broadcast.event.clone())
 }
 
@@ -520,6 +547,11 @@ async fn broadcast_presence(
     } else {
         serde_json::json!({ "desktop": visible })
     };
+    let activities = if visible == "offline" {
+        &[][..]
+    } else {
+        activities
+    };
     let data = serde_json::json!({
         "user_id": user_id,
         "status": visible,
@@ -586,9 +618,13 @@ async fn send_ready(
                 }
             }
         }
+        crate::federation::presence::sync_once(state).await;
         presences_json = crate::presence::get_space_presences(state, &all_member_ids)
             .iter()
-            .map(|p| serde_json::to_value(p).unwrap_or_default())
+            .map(|p| {
+                serde_json::to_value(crate::presence::visible_presence(p.clone(), Some(user_id)))
+                    .unwrap_or_default()
+            })
             .collect();
 
         relationships_json = db::relationships::list_relationships(&state.db, user_id)
@@ -1104,6 +1140,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     .unwrap_or_default();
                             }
                             Delivery::RefreshSpaces(event) => {
+                                let previous_spaces = space_ids.clone();
                                 space_ids = reload_space_ids(&state, &user_id, is_guest_session, &space_ids).await;
                                 sync_session_spaces(&state, &session_id, &space_ids).await;
                                 if let Some(event) = event {
@@ -1113,6 +1150,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         break;
                                     }
                                     resume::push(&mut replay_buffer, seq, payload);
+                                }
+                                state.federated_presence.changed.notify_one();
+                                let added_spaces: HashSet<String> = space_ids.difference(&previous_spaces).cloned().collect();
+                                if !is_guest_session && !added_spaces.is_empty() {
+                                    if let Some(presence) = crate::presence::current_presence(&state, &user_id) {
+                                        broadcast_presence(&state, &user_id, &added_spaces, &HashSet::new(),
+                                            &presence.status, &presence.activities).await;
+                                    }
+                                }
+                                if user_intents.iter().any(|i| i == "presences") {
+                                    for added in space_ids.difference(&previous_spaces) {
+                                        if let Ok(snapshot) = crate::presence::snapshot(&state, added, &user_id).await {
+                                            for presence in snapshot {
+                                                seq += 1;
+                                                let payload = stamp_seq(serde_json::json!({
+                                                    "op": events::opcode::EVENT, "type": "presence.update", "data": presence,
+                                                }), seq);
+                                                if ws_sink.send(Message::Text(payload.clone().into())).await.is_err() {
+                                                    break;
+                                                }
+                                                resume::push(&mut replay_buffer, seq, payload);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Delivery::Send(event) => {

@@ -81,6 +81,10 @@ pub fn router(state: AppState) -> Router {
             get(crate::federation::wellknown::handle_well_known),
         )
         .route(
+            crate::federation::presence::PATH,
+            post(crate::federation::presence::handle_exchange),
+        )
+        .route(
             crate::federation::inbox::INBOX_PATH,
             post(crate::federation::inbox::handle_inbox),
         )
@@ -371,6 +375,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/channels/{channel_id}/typing",
             post(messages::typing_indicator),
         )
+        .route("/spaces/{space_id}/presences", get(members::list_presences))
         // Reactions
         .route(
             "/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me",

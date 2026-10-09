@@ -227,6 +227,7 @@ async fn run_main_server(config: Config) {
         db_is_postgres: accordserver::db::url_is_postgres(&config.database_url),
         voice_states: Arc::new(DashMap::new()),
         presences: Arc::new(DashMap::new()),
+        federated_presence: Arc::new(Default::default()),
         dispatcher: Arc::new(RwLock::new(Some(dispatcher))),
         gateway_tx: gateway_tx_arc,
         test_mode: config.test_mode,
