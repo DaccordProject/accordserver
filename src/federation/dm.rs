@@ -255,7 +255,9 @@ async fn serve_open(
     let recipient = crate::db::users::get_user(&state.db, &recipient_local).await?;
 
     // Consent: the recipient must not have blocked the opener.
-    if crate::db::relationships::is_blocked_by(&state.db, &recipient.id, &req.opener.id).await? {
+    if crate::db::relationships::is_blocked_by(&state.db, &recipient.id, &req.opener.id).await?
+        || crate::db::bans::ban_separates(&state.db, &req.opener.id, &recipient.id).await?
+    {
         return Err(AppError::Forbidden(
             "recipient is not accepting DMs from this user".to_string(),
         ));

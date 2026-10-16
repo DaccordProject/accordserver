@@ -65,8 +65,10 @@ Authentication on the gateway uses `"Bot <token>"` or `"Bearer <token>"` in the 
 
 All REST endpoints are under `/api/v1` with a rate-limit middleware layer. The router is built in `routes/mod.rs`. Key resource groups:
 
-- **Auth** — `POST /auth/register` (unauthenticated), `POST /auth/login` (unauthenticated), `POST /auth/logout` (authenticated). Passwords hashed with Argon2id. Returns user + bearer token on register/login.
-- **Users** — `GET/PATCH /users/@me`, `GET /users/{user_id}`, `GET /users/@me/spaces`. Space summaries include `member_count` and `presence_count`, computed in grouped queries so clients do not need full rosters for totals.
+- **Auth** — `POST /auth/register` (unauthenticated), `POST /auth/login` (unauthenticated), `POST /auth/logout` (authenticated). Passwords hashed with Argon2id. Returns user + bearer token on register/login. Register/login/login-mfa accept an optional `device_fingerprint` (64 lowercase hex); banned devices get 403 before password checks.
+- **Device bans** — `POST /admin/users/{user_id}/device-bans`, `GET /admin/device-bans`, `DELETE /admin/device-bans/{ban_id}` (instance admin). Tables `user_devices` and `device_bans` (`src/db/devices.rs`); bans have no FK to `users` and survive account deletion. See `docs/security-operations.md#device-bans`.
+- **DM consent** — Opening a DM or sending in a 1:1 DM is refused (403) when the recipient blocked the sender or when `db::bans::ban_separates` holds (sender banned from a space the recipient is in, no shared space, not friends). Send-side check: `require_dm_send_allowed` in `middleware/permissions.rs`, shared by JSON and multipart sends.
+- **Users** — `GET/PATCH /users/@me`, `GET /users/{user_id}`, `GET /users/@me/spaces`, `PUT /users/@me/device` (records the session's device fingerprint; a banned device gets its token revoked and 403). Space summaries include `member_count` and `presence_count`, computed in grouped queries so clients do not need full rosters for totals.
 - **Spaces** (guilds) — CRUD + channel listing/creation/reordering. Spaces have a `public` flag; public spaces allow joining without an invite via `POST /spaces/{space_id}/join`.
 - **Channels** — CRUD (nested under spaces for creation, top-level for get/update/delete)
 - **Messages** — CRUD, bulk delete, pins, typing indicators

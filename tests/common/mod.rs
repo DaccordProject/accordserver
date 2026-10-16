@@ -90,6 +90,8 @@ impl TestServer {
                 "bot_tokens",
                 "applications",
                 "user_tokens",
+                "user_devices",
+                "device_bans",
                 "backup_codes",
                 "channels",
                 "roles",

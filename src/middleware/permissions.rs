@@ -428,6 +428,38 @@ pub async fn require_dm_access(
     Ok(())
 }
 
+/// Consent check for sending in a 1:1 DM. `space_id` is the value returned by
+/// `require_channel_permission` (empty for DMs); space channels and group DMs
+/// (3+ participants) pass. A 1:1 send is rejected when the recipient has
+/// blocked the sender, or when a space ban is the only thing that connected
+/// them (`db::bans::ban_separates`). Uses the local participant list, so it
+/// also works for replicas of remote-homed DMs before they are forwarded.
+pub async fn require_dm_send_allowed(
+    pool: &AnyPool,
+    channel_id: &str,
+    space_id: &str,
+    sender_id: &str,
+) -> Result<(), AppError> {
+    if !space_id.is_empty() {
+        return Ok(());
+    }
+    let participants = db::dm_participants::list_participant_ids(pool, channel_id).await?;
+    if participants.len() != 2 {
+        return Ok(());
+    }
+    let Some(other) = participants.iter().find(|id| id.as_str() != sender_id) else {
+        return Ok(());
+    };
+    if db::relationships::is_blocked_by(pool, other, sender_id).await?
+        || db::bans::ban_separates(pool, sender_id, other).await?
+    {
+        return Err(AppError::Forbidden(
+            "you cannot send a DM to this user".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Check that a user has a specific permission for a channel.
 /// Uses `resolve_channel_permissions` which accounts for overwrites.
 /// Instance admins (`auth.is_admin`) bypass all permission checks.

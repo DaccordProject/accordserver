@@ -19,6 +19,12 @@ pub struct CreateDmRequest {
 }
 
 #[derive(Deserialize)]
+pub struct UpdateDeviceRequest {
+    #[serde(default)]
+    pub device_fingerprint: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct DeleteMeRequest {
     pub password: String,
 }
@@ -257,6 +263,42 @@ pub async fn get_current_user_spaces(
     Ok(Json(serde_json::json!({ "data": spaces })))
 }
 
+/// PUT /users/@me/device — report the device fingerprint of the current
+/// session. Records it for the account, or, when an instance admin has banned
+/// that device, revokes the calling session's token and returns 403.
+pub async fn put_current_device(
+    state: State<AppState>,
+    auth: AuthUser,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<UpdateDeviceRequest>,
+) -> Result<axum::http::StatusCode, AppError> {
+    if auth.is_bot || auth.is_guest {
+        return Ok(axum::http::StatusCode::NO_CONTENT);
+    }
+    let fingerprint = input
+        .device_fingerprint
+        .as_deref()
+        .filter(|fp| db::devices::is_valid_fingerprint(fp))
+        .ok_or_else(|| AppError::BadRequest("invalid device_fingerprint".into()))?;
+
+    if db::devices::is_fingerprint_banned(&state.db, fingerprint).await? {
+        // Same token revocation as POST /auth/logout: only this session ends.
+        let raw_token = headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        sqlx::query(&db::q("DELETE FROM user_tokens WHERE token_hash = ?"))
+            .bind(crate::middleware::auth::create_token_hash(raw_token))
+            .execute(&state.db)
+            .await?;
+        return Err(AppError::Forbidden("this device is banned".into()));
+    }
+
+    db::devices::record_device(&state.db, &auth.user_id, fingerprint, state.db_is_postgres).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 pub async fn create_dm_channel(
     state: State<AppState>,
     auth: AuthUser,
@@ -319,6 +361,13 @@ pub async fn create_dm_channel(
         db::users::get_user(&state.db, rid).await?;
         // Blocked users cannot create DMs with the blocker
         if db::relationships::is_blocked_by(&state.db, rid, &auth.user_id).await? {
+            return Err(AppError::Forbidden(
+                "you cannot send a DM to this user".into(),
+            ));
+        }
+        // A space ban must not leave a side channel to that space's members:
+        // banned users cannot DM someone they only knew through that space.
+        if rid != &auth.user_id && db::bans::ban_separates(&state.db, &auth.user_id, rid).await? {
             return Err(AppError::Forbidden(
                 "you cannot send a DM to this user".into(),
             ));
