@@ -62,12 +62,17 @@ pub struct RegisterRequest {
     pub username: String,
     pub password: String,
     pub display_name: Option<String>,
+    /// Opaque per-server device fingerprint (64 lowercase hex). Optional.
+    #[serde(default)]
+    pub device_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub device_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +85,8 @@ pub struct ChangePasswordRequest {
 pub struct MfaLoginRequest {
     pub ticket: String,
     pub code: String,
+    #[serde(default)]
+    pub device_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +335,36 @@ fn generate_backup_codes() -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Device fingerprint helpers
+// ---------------------------------------------------------------------------
+
+/// Validate an optional device fingerprint and reject it with `banned_msg`
+/// (403) when an instance admin has banned that device. Returns the
+/// fingerprint to record once the account action succeeds.
+async fn check_device<'a>(
+    state: &AppState,
+    fingerprint: Option<&'a str>,
+    banned_msg: &str,
+) -> Result<Option<&'a str>, AppError> {
+    let fingerprint = db::devices::validate_fingerprint(fingerprint)?;
+    if let Some(fp) = fingerprint {
+        if db::devices::is_fingerprint_banned(&state.db, fp).await? {
+            return Err(AppError::Forbidden(banned_msg.to_string()));
+        }
+    }
+    Ok(fingerprint)
+}
+
+/// Record a device for an account. Best-effort: a failure here must not undo
+/// an otherwise successful sign-in or registration.
+async fn record_device(state: &AppState, user_id: &str, fingerprint: Option<&str>) {
+    let Some(fp) = fingerprint else { return };
+    if let Err(e) = db::devices::record_device(&state.db, user_id, fp, state.db_is_postgres).await {
+        tracing::warn!("failed to record device for user {user_id}: {e:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Token helpers
 // ---------------------------------------------------------------------------
 
@@ -410,6 +447,13 @@ pub async fn register(
     // Per-IP rate limit: max 5 registration attempts per 15 minutes
     check_register_rate_limit(&state, &ip)?;
     record_register_attempt(&state, &ip);
+
+    let device = check_device(
+        &state,
+        input.device_fingerprint.as_deref(),
+        "registration is not available from this device",
+    )
+    .await?;
 
     // Check registration policy
     let policy = &state.settings.load().registration_policy;
@@ -499,6 +543,7 @@ pub async fn register(
     .map_err(AppError::from)?;
 
     let user = db::users::get_user(&state.db, &id).await?;
+    record_device(&state, &id, device).await;
 
     // Auto-join the default space (first space created on the server)
     let default_space: Option<(String,)> =
@@ -567,6 +612,14 @@ pub async fn login(
         ));
     }
     check_login_rate_limit(&state, &input.username)?;
+
+    // Device bans apply to every account, so check before the password.
+    let device = check_device(
+        &state,
+        input.device_fingerprint.as_deref(),
+        "sign-in is not available from this device",
+    )
+    .await?;
 
     // Look up user by username (must not be a bot, must have password_hash)
     let row = sqlx::query(
@@ -664,6 +717,7 @@ pub async fn login(
 
     cleanup_expired_tokens(&state.db, &user_id).await;
     enforce_session_limit(&state.db, &user_id).await;
+    record_device(&state, &user_id, device).await;
 
     let mut data = serde_json::json!({
         "user": user,
@@ -684,6 +738,13 @@ pub async fn login_mfa(
     State(state): State<AppState>,
     Json(input): Json<MfaLoginRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let device = check_device(
+        &state,
+        input.device_fingerprint.as_deref(),
+        "sign-in is not available from this device",
+    )
+    .await?;
+
     // Resolve the MFA ticket
     let ticket_hash = create_token_hash(&input.ticket);
     let ticket = state
@@ -735,6 +796,7 @@ pub async fn login_mfa(
 
     cleanup_expired_tokens(&state.db, user_id).await;
     enforce_session_limit(&state.db, user_id).await;
+    record_device(&state, user_id, device).await;
 
     // Check force_password_reset
     let force_reset = sqlx::query(&crate::db::q(

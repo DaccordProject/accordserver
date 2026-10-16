@@ -340,6 +340,12 @@ pub async fn delete_user(pool: &AnyPool, user_id: &str) -> Result<(), AppError> 
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+    // Recorded device fingerprints go with the account; device_bans rows are
+    // deliberately kept so a ban outlives the account it was issued against.
+    sqlx::query(&super::q("DELETE FROM user_devices WHERE user_id = ?"))
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(&super::q("DELETE FROM bot_tokens WHERE user_id = ?"))
         .bind(user_id)
         .execute(&mut *tx)

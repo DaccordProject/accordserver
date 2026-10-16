@@ -222,6 +222,7 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             get(read_states::get_unread_channels),
         )
         .route("/users/@me/mutes", get(mutes::list_mutes))
+        .route("/users/@me/device", put(users::put_current_device))
         .route(
             "/users/@me/relationships",
             get(relationships::list_relationships),
@@ -580,6 +581,16 @@ fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/admin/users/{user_id}/reset-password",
             post(admin::reset_user_password),
+        )
+        // Admin: device bans
+        .route(
+            "/admin/users/{user_id}/device-bans",
+            post(admin::ban_user_devices),
+        )
+        .route("/admin/device-bans", get(admin::list_device_bans))
+        .route(
+            "/admin/device-bans/{ban_id}",
+            delete(admin::delete_device_ban),
         )
         // Admin: federation peer management
         .route(

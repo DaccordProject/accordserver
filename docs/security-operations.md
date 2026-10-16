@@ -63,6 +63,21 @@ Community servers accept only exact reviewed immutable WASM releases; publicatio
 uses a separate master-server reviewer credential. See [experiences](experiences.md)
 for approval freshness, outage behavior, revocation, rollback and key rotation.
 
+## Device bans
+
+Clients may send an opaque per-server device fingerprint: exactly 64 lowercase hex characters (a SHA-256 the client computes). It is optional everywhere except `PUT /users/@me/device`; a malformed value is `400 invalid device_fingerprint`.
+
+- `POST /api/v1/auth/register`, `POST /api/v1/auth/login` and `POST /api/v1/auth/login/mfa` accept `device_fingerprint`. A banned device gets `403` (`registration is not available from this device` / `sign-in is not available from this device`), checked before the password. The fingerprint is recorded for the account once a token is issued (not when only an MFA ticket is).
+- `PUT /api/v1/users/@me/device` with `{"device_fingerprint": "…"}` records the current session's device (`204`). If the device is banned, that session's token is revoked and the response is `403 this device is banned`. Bots and guest tokens get `204` without effect.
+- `POST /api/v1/admin/users/{user_id}/device-bans` with optional `{"reason": "…"}` (at most 512 characters) bans every fingerprint recorded for the user and returns `{"data": {"banned": n, "bans": [ban…]}}` with only the newly created bans. Your own devices are `400`, another administrator's `403`, an unknown user `404`. It does not disable the account; use `PATCH /api/v1/admin/users/{user_id}` with `{"disabled": true}` for that.
+- `GET /api/v1/admin/device-bans?after=<id>&limit=<1..100, default 50>` lists bans newest first as `{"data": [ban…]}`; `DELETE /api/v1/admin/device-bans/{ban_id}` lifts one (`204`, or `404`).
+
+A ban object is `{"id", "fingerprint", "user_id", "username", "reason", "banned_by", "created_at"}`. Bans outlive the account: deleting a user removes its recorded devices but keeps its device bans. A fingerprint is client-supplied, so it raises the cost of ban evasion rather than preventing it.
+
+## DM consent after a space ban
+
+A user banned from a space cannot open a DM (`POST /users/@me/channels`) with, or send in an existing 1:1 DM to, a member of that space unless they still share another space or are friends: `403 you cannot send a DM to this user`. Sends in an existing 1:1 DM are also refused once the recipient has blocked the sender. Group DMs are not affected on send. Federated DM opens apply the same rule on the recipient's home server.
+
 ## Revocation, limits and deleted files
 
 Gateway credentials are revalidated before inbound operations and broadcast delivery, and every two seconds when idle or parked. Revoked, expired, deleted or disabled identities lose their sessions and replay eligibility. Gateway admission allows at most 512 connections globally, 32 per IP and eight per authenticated user or guest token, including parked connections. Heartbeats have a separate budget of ten per ten seconds; normal negotiated heartbeats remain supported.

@@ -8,7 +8,7 @@ use crate::error::AppError;
 use crate::middleware::auth::{AuthUser, OptionalAuthUser};
 use crate::middleware::permissions::{
     require_channel_membership, require_channel_permission, require_channel_read_access,
-    require_not_timed_out, slowmode_cooldown_ms,
+    require_dm_send_allowed, require_not_timed_out, slowmode_cooldown_ms,
 };
 use crate::models::attachment::Attachment;
 use crate::models::message::{BulkDeleteMessages, CreateMessage, MessageRow, UpdateMessage};
@@ -123,6 +123,7 @@ pub async fn create_message(
     if !space_id.is_empty() {
         require_not_timed_out(&state.db, &space_id, &auth).await?;
     }
+    require_dm_send_allowed(&state.db, &channel_id, &space_id, &auth.user_id).await?;
 
     // Thread permission enforcement
     if input.thread_id.is_some() {
@@ -371,6 +372,7 @@ pub async fn create_message_multipart(
     if !space_id.is_empty() {
         require_not_timed_out(&state.db, &space_id, &auth).await?;
     }
+    require_dm_send_allowed(&state.db, &channel_id, &space_id, &auth.user_id).await?;
 
     crate::middleware::rate_limit::charge_upload(&state, &auth.user_id, 1, 0)?;
     let settings = state.settings.load();
