@@ -335,7 +335,20 @@ fn api_routes(state: &AppState) -> Router<AppState> {
             "/channels/{channel_id}/permissions/{overwrite_id}",
             put(channels::upsert_overwrite).delete(channels::delete_overwrite),
         )
-        .route("/users/@me/encryption", put(e2ee::register))
+        .route("/users/@me/encryption", put(e2ee::register).get(e2ee::me))
+        .route(
+            "/users/@me/encryption/devices/{device_id}",
+            put(e2ee::put_device).delete(e2ee::decline_device),
+        )
+        .route(
+            "/users/@me/encryption/devices/{device_id}/approve",
+            post(e2ee::approve_device),
+        )
+        .route(
+            "/users/@me/encryption/devices/{device_id}/package",
+            get(e2ee::get_package).delete(e2ee::ack_package),
+        )
+        .route("/users/@me/encryption/rotate", post(e2ee::rotate))
         .route("/channels/{channel_id}/encryption", get(e2ee::participants))
         // Messages
         .route(

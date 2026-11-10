@@ -56,6 +56,7 @@ pub fn intent_for_event(event_type: &str) -> Option<&'static str> {
         }
         "relationship.add" | "relationship.update" | "relationship.remove" => Some("relationships"),
         "experience.session" => Some("experiences"),
+        "encryption.device_pending" | "encryption.devices_update" => Some("direct_messages"),
         // Profile changes are already fanned out only to shared spaces, DM
         // peers and friends, and every client renders usernames and avatars
         // regardless of which intents it asked for.

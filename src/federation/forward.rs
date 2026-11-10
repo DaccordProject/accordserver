@@ -466,6 +466,7 @@ async fn serve_edit(
         ));
     }
     if private {
+        crate::federation::e2ee::refresh_sender(state, &req.actor.id, &req.content).await;
         crate::federation::e2ee::discover(state, &existing.channel_id, &req.actor.id).await?;
     }
     // Authoritative author-or-manage check from our DB.
