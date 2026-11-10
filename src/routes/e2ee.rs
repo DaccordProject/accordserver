@@ -59,12 +59,15 @@ fn wire_id(state: &AppState, user_id: &str) -> String {
 /// Devices are bound to `user_tokens` sessions, so bot and guest tokens cannot
 /// manage them. Returns the caller's session token hash.
 fn session(auth: &AuthUser, headers: &HeaderMap) -> Result<String, AppError> {
+    raw_session_token(auth, headers).map(create_token_hash)
+}
+fn raw_session_token<'h>(auth: &AuthUser, headers: &'h HeaderMap) -> Result<&'h str, AppError> {
     let token = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match token {
-        Some(token) if !auth.is_bot && !auth.is_guest => Ok(create_token_hash(token)),
+        Some(token) if !auth.is_bot && !auth.is_guest => Ok(token),
         _ => Err(AppError::Forbidden(
             "Encrypted chat devices require a signed-in user session.".into(),
         )),
@@ -141,6 +144,9 @@ pub struct RegisterDevice {
     signing_key: String,
     certificate: Option<String>,
     account_version: Option<i64>,
+    /// Device signing key over `["daccord-e2ee-bind-v2", user_context,
+    /// device_id, base64(SHA-256(raw bearer token))]`.
+    binding: Option<String>,
 }
 
 /// `PUT /users/@me/encryption/devices/{device_id}`: idempotent registration.
@@ -153,9 +159,13 @@ pub async fn put_device(
     headers: HeaderMap,
     Json(input): Json<RegisterDevice>,
 ) -> Result<Json<Value>, AppError> {
-    let session = session(&auth, &headers)?;
+    let raw_token = raw_session_token(&auth, &headers)?;
+    let session = create_token_hash(raw_token);
     account::require_device_id(&device_id)?;
     account::validate_name(&input.name)?;
+    let binding = input.binding.as_deref().ok_or_else(|| {
+        AppError::BadRequest("Device registration requires a session binding signature.".into())
+    })?;
     let keys = Identity {
         exchange_key: input.exchange_key,
         signing_key: input.signing_key,
@@ -186,6 +196,17 @@ pub async fn put_device(
             ));
         }
     }
+    // Proof of possession of the (immutable) device signing key for this session.
+    let user_context = match account::account(&mut tx, user_id).await? {
+        Some(account) => account.user_context,
+        None => wire_id(&state, user_id),
+    };
+    account::verify(
+        &keys.signing_key,
+        &account::binding_message(&user_context, &device_id, &account::token_digest(raw_token)),
+        binding,
+    )
+    .map_err(|_| AppError::BadRequest("Device session binding verification failed".into()))?;
     let was_active = existing.as_ref().is_some_and(Device::is_active);
     if let Some((certificate, version)) = certified {
         let account = account::account(&mut tx, user_id)
@@ -473,6 +494,8 @@ pub struct Rotate {
     account: Identity,
     version: i64,
     signature: String,
+    /// New signing key over the previous version's keys.
+    back_signature: Option<String>,
     devices: Vec<RotationCertificate>,
     packages: Vec<RotationPackage>,
 }
@@ -569,6 +592,16 @@ pub async fn rotate(
         &input.signature,
     )
     .map_err(|_| AppError::BadRequest("Succession signature verification failed".into()))?;
+    let back_signature = input
+        .back_signature
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("Rotation requires a back_signature".into()))?;
+    account::verify(
+        &input.account.signing_key,
+        &account::back_message(&account.user_context, input.version, &account.keys),
+        back_signature,
+    )
+    .map_err(|_| AppError::BadRequest("Succession back-signature verification failed".into()))?;
     for entry in &input.devices {
         let device = active
             .iter()
@@ -590,6 +623,7 @@ pub async fn rotate(
         input.version,
         &input.account,
         Some(&input.signature),
+        Some(back_signature),
     )
     .await?;
     let updated = sqlx::query(&crate::db::q(

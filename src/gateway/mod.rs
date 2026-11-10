@@ -1128,8 +1128,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 } => {
                     if let Some(broadcast) = broadcast {
+                        // Deleted sessions (logout, or encryption-device revocation,
+                        // whose rotation broadcasts to the user) close immediately.
                         if auth_resolve::resolve_hash(&state.db, &token_hash, is_bot, guest).await.is_none() {
                             resumable = false;
+                            send_close(&mut ws_sink, 4004, "credential revoked or expired").await;
                             break;
                         }
                         match classify_broadcast(&state, &broadcast, &user_id, &space_ids, &muted_channel_ids, &user_intents).await {

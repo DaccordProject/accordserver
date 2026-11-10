@@ -17,6 +17,9 @@ pub const PREFIX: &str = "daccord-e2ee:1:";
 pub const PREFIX_V2: &str = "daccord-e2ee:2:";
 pub const MAX_ENVELOPE: usize = 256 * 1024;
 pub const MAX_V2_RECIPIENTS: usize = 400;
+/// `[2, channel, author, device_id, token, reply, edit, ephemeral, body,
+/// recipients, account_version]`.
+const V2_PAYLOAD_LEN: usize = 11;
 pub const STALE_KEYS: &str = "Encryption keys changed. Refresh before sending.";
 
 /// True for any private-chat encryption envelope version.
@@ -413,12 +416,25 @@ fn same_recipients(actual: &[Recipient], expected: &[Recipient]) -> bool {
             .all(|(a, e)| a.0 == e.0 && a.1 == e.1 && a.2 == e.2)
 }
 
+/// The account version a v2 payload signs (item 10): a positive integer.
+fn signed_version(p: &[Value]) -> Result<i64, AppError> {
+    p.get(10)
+        .and_then(Value::as_i64)
+        .filter(|v| *v >= 1)
+        .ok_or_else(|| invalid("invalid E2EE account version"))
+}
+
 /// The sender device must be active and certified by the author's current
-/// account version. Returns the device's signing key.
+/// account version, which must also be the version the payload signs.
+/// A replica (not the admission authority) may hold a newer view of the
+/// author than the chat home did when it admitted the message, so it accepts
+/// any known version up to the current one. Returns the device's signing key.
 async fn sender_device(
     conn: &mut sqlx::AnyConnection,
     author_id: &str,
     device_id: &str,
+    signed_version: i64,
+    replica: bool,
 ) -> Result<String, AppError> {
     let account = account::account(conn, author_id)
         .await?
@@ -435,7 +451,15 @@ async fn sender_device(
     let (Some(certificate), Some(version)) = (&device.certificate, device.account_version) else {
         return Err(AppError::Forbidden(account::NOT_APPROVED_MESSAGE.into()));
     };
-    if version != account.version {
+    let signed_ok = if replica {
+        signed_version <= account.version
+            && account::version_keys(conn, author_id, signed_version)
+                .await?
+                .is_some()
+    } else {
+        signed_version == account.version
+    };
+    if version != account.version || !signed_ok {
         return Err(AppError::Conflict(STALE_KEYS.into()));
     }
     account::verify_certificate(
@@ -470,7 +494,7 @@ async fn validate_v2(
     let expected_edit = edit_id
         .map(|id| Value::from(message_context(&context, id)))
         .unwrap_or(Value::Null);
-    if p.len() != 10
+    if p.len() != V2_PAYLOAD_LEN
         || p[0] != 2
         || string(&p[1])? != context
         || string(&p[2])? != user_context(pool, author_id).await?
@@ -485,20 +509,28 @@ async fn validate_v2(
     bytes(string(&p[7])?, 32)?;
     box_bytes(&p[8], 29, 64 * 1024)?;
     let recipients = v2_recipients(&p[9])?;
+    let version = signed_version(p)?;
     let participants = db::dm_participants::list_participant_ids(pool, channel_id).await?;
     if !participants.iter().any(|id| id == author_id) {
         return Err(AppError::Forbidden("not a private chat participant".into()));
     }
-    let signing_key = sender_device(&mut *pool.acquire().await?, author_id, device_id).await?;
+    let replica = db::federation::channel_origin(pool, channel_id)
+        .await?
+        .is_some();
+    let signing_key = sender_device(
+        &mut *pool.acquire().await?,
+        author_id,
+        device_id,
+        version,
+        replica,
+    )
+    .await?;
     account::verify(
         &signing_key,
         &serde_json::to_vec(p).map_err(|_| invalid("invalid E2EE payload"))?,
         &envelope.signature,
     )?;
-    if db::federation::channel_origin(pool, channel_id)
-        .await?
-        .is_some()
-    {
+    if replica {
         // A replica is not the admission authority: the chat home enforces the
         // exact set under its chat lock. Our own key view can legitimately be
         // newer than the home's cache, so only membership is checked here.
@@ -535,7 +567,7 @@ async fn enforce_v2(
     let envelope: Envelope =
         serde_json::from_str(body).map_err(|_| invalid("Invalid encrypted envelope"))?;
     let p = &envelope.payload;
-    if p.len() != 10 {
+    if p.len() != V2_PAYLOAD_LEN {
         return Err(invalid("Invalid encrypted envelope"));
     }
     let origin: Option<Option<String>> =
@@ -561,8 +593,9 @@ async fn enforce_v2(
     if participant.is_none() {
         return Err(AppError::Forbidden("Not a private chat participant".into()));
     }
-    sender_device(tx, author_id, string(&p[3])?).await?;
-    if origin.flatten().is_some() {
+    let replica = origin.flatten().is_some();
+    sender_device(tx, author_id, string(&p[3])?, signed_version(p)?, replica).await?;
+    if replica {
         return Ok(());
     }
     let recipients = v2_recipients(&p[9])?;

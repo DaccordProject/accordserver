@@ -140,22 +140,32 @@ pub async fn refresh_sender(state: &AppState, author_id: &str, content: &str) {
     if !author_id.contains('@') {
         return;
     }
-    let Some(device_id) = content
+    let Some(payload) = content
         .strip_prefix(e2ee::PREFIX_V2)
         .and_then(|body| serde_json::from_str::<Value>(body).ok())
-        .and_then(|e| e["payload"][3].as_str().map(str::to_owned))
+        .map(|e| e["payload"].clone())
     else {
         return;
     };
-    if !account::valid_device_id(&device_id) {
+    let (Some(device_id), Some(signed_version)) = (payload[3].as_str(), payload[10].as_i64())
+    else {
+        return;
+    };
+    if !account::valid_device_id(device_id) {
         return;
     }
+    // Refresh when the device is unknown/inactive or the author signed a
+    // different account version than we have cached.
     let known = match state.db.acquire().await {
-        Ok(mut conn) => account::device(&mut conn, author_id, &device_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|d| d.is_active()),
+        Ok(mut conn) => {
+            let device = account::device(&mut conn, author_id, device_id)
+                .await
+                .ok()
+                .flatten();
+            let account = account::account(&mut conn, author_id).await.ok().flatten();
+            device.is_some_and(|d| d.is_active())
+                && account.is_some_and(|a| a.version == signed_version)
+        }
         Err(_) => return,
     };
     if !known {
@@ -178,7 +188,7 @@ pub async fn cache_identity(
     let inserted = sqlx::query(&db::q("INSERT INTO e2ee_identities(user_id,exchange_key,signing_key,user_context) VALUES (?,?,?,?) ON CONFLICT(user_id) DO NOTHING"))
         .bind(user_id).bind(&key.exchange_key).bind(&key.signing_key).bind(wire_id).execute(&mut *tx).await?;
     if inserted.rows_affected() == 1 {
-        account::insert_version(&mut tx, user_id, 1, key, None).await?;
+        account::insert_version(&mut tx, user_id, 1, key, None, None).await?;
     }
     let current = account::account(&mut tx, user_id).await?;
     tx.commit().await?;
@@ -247,38 +257,21 @@ pub async fn cache_account(
     account::lock_account(&mut tx, user_id).await?;
     match account::account(&mut tx, user_id).await? {
         None => {
-            // First sight: trust on first use, as v1. Keep whatever part of the
-            // chain verifies internally so older device certificates can be checked.
+            // First sight: the current key is the trust anchor (first use, as
+            // v1). History is extended backwards below via back-signatures.
             sqlx::query(&db::q("INSERT INTO e2ee_identities(user_id,exchange_key,signing_key,user_context,account_version) VALUES (?,?,?,?,?)"))
                 .bind(user_id).bind(&identity.exchange_key).bind(&identity.signing_key).bind(wire_id).bind(version)
                 .execute(&mut *tx).await?;
-            if version == 1 {
-                account::insert_version(&mut tx, user_id, 1, &identity, None).await?;
-            }
-            let mut v = version;
-            while let Some(s) = succession(v) {
-                if v == 1 {
-                    account::insert_version(&mut tx, user_id, 1, &s.keys(), None).await?;
-                    break;
-                }
-                let Some(signature) = s.signature.as_deref() else {
-                    break;
-                };
-                account::insert_version(&mut tx, user_id, v, &s.keys(), Some(signature)).await?;
-                let Some(previous) = succession(v - 1) else {
-                    break;
-                };
-                if account::verify(
-                    &previous.signing_key,
-                    &account::succession_message(wire_id, v, &s.keys()),
-                    signature,
-                )
-                .is_err()
-                {
-                    break;
-                }
-                v -= 1;
-            }
+            let anchor = succession(version);
+            account::insert_version(
+                &mut tx,
+                user_id,
+                version,
+                &identity,
+                anchor.and_then(|s| s.signature.as_deref()),
+                anchor.and_then(|s| s.back_signature.as_deref()),
+            )
+            .await?;
         }
         Some(cached) => {
             if cached.user_context != wire_id {
@@ -294,20 +287,21 @@ pub async fn cache_account(
                     "Remote encryption identity changed".into(),
                 ));
             }
+            // Forward only through successions signed in both directions.
             let mut previous = cached.keys.clone();
             for v in cached.version + 1..=version {
                 let s = succession(v).ok_or_else(|| bad_remote("missing succession"))?;
-                let signature = s
-                    .signature
-                    .as_deref()
-                    .ok_or_else(|| bad_remote("unsigned succession"))?;
-                account::verify(
-                    &previous.signing_key,
-                    &account::succession_message(wire_id, v, &s.keys()),
-                    signature,
+                s.verify_link(wire_id, &previous)
+                    .map_err(|_| bad_remote("invalid succession signature"))?;
+                account::insert_version(
+                    &mut tx,
+                    user_id,
+                    v,
+                    &s.keys(),
+                    s.signature.as_deref(),
+                    s.back_signature.as_deref(),
                 )
-                .map_err(|_| bad_remote("invalid succession signature"))?;
-                account::insert_version(&mut tx, user_id, v, &s.keys(), Some(signature)).await?;
+                .await?;
                 previous = s.keys();
             }
             if version > cached.version {
@@ -316,6 +310,48 @@ pub async fn cache_account(
                     .execute(&mut *tx).await?;
             }
         }
+    }
+    // Backward from the oldest trusted version, only via back-signatures by
+    // that version (and the matching forward signature). Unauthenticated older
+    // versions are ignored, so certificates relying on them are skipped.
+    let oldest: Option<i64> = sqlx::query_scalar(&db::q(
+        "SELECT MIN(version) FROM e2ee_account_versions WHERE user_id=?",
+    ))
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let mut oldest = oldest.unwrap_or(1);
+    while oldest > 1 {
+        let (Some(trusted), Some(link), Some(older)) = (
+            account::version_keys(&mut tx, user_id, oldest).await?,
+            succession(oldest),
+            succession(oldest - 1),
+        ) else {
+            break;
+        };
+        if link.keys() != trusted || link.verify_link(wire_id, &older.keys()).is_err() {
+            break;
+        }
+        // Republish the signatures that actually verified for this link.
+        sqlx::query(&db::q(
+            "UPDATE e2ee_account_versions SET signature=?,back_signature=? WHERE user_id=? AND version=?",
+        ))
+        .bind(&link.signature)
+        .bind(&link.back_signature)
+        .bind(user_id)
+        .bind(oldest)
+        .execute(&mut *tx)
+        .await?;
+        account::insert_version(
+            &mut tx,
+            user_id,
+            oldest - 1,
+            &older.keys(),
+            older.signature.as_deref(),
+            older.back_signature.as_deref(),
+        )
+        .await?;
+        oldest -= 1;
     }
     let cached: std::collections::HashMap<String, account::Device> =
         account::devices(&mut tx, user_id)

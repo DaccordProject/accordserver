@@ -10,6 +10,8 @@ use sqlx::{AnyConnection, Row};
 
 pub const DEVICE_LABEL: &str = "daccord-e2ee-device-v2";
 pub const ROTATE_LABEL: &str = "daccord-e2ee-rotate-v2";
+pub const ROTATE_BACK_LABEL: &str = "daccord-e2ee-rotate-back-v2";
+pub const BIND_LABEL: &str = "daccord-e2ee-bind-v2";
 /// Non-revoked (pending + active) devices per account.
 pub const MAX_DEVICES: i64 = 20;
 pub const PENDING_TTL_HOURS: i64 = 24;
@@ -80,6 +82,27 @@ pub fn succession_message(user_context: &str, version: i64, account: &Identity) 
     ]))
 }
 
+/// Back-signature input: version `version` (the new key) signs the keys of
+/// version `version - 1`, authenticating history backwards from a pinned key.
+pub fn back_message(user_context: &str, version: i64, previous: &Identity) -> Vec<u8> {
+    compact(&json!([
+        ROTATE_BACK_LABEL,
+        user_context,
+        version,
+        previous.exchange_key,
+        previous.signing_key
+    ]))
+}
+/// Session binding input: the device proves possession of its signing key for
+/// the calling session (`token_digest` = base64(SHA-256(raw bearer token))).
+pub fn binding_message(user_context: &str, device_id: &str, token_digest: &str) -> Vec<u8> {
+    compact(&json!([BIND_LABEL, user_context, device_id, token_digest]))
+}
+pub fn token_digest(raw_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    BASE64.encode(&Sha256::digest(raw_token.as_bytes()))
+}
+
 /// Strict Ed25519 verification of a padded base64 signature.
 pub fn verify(signing_key: &str, message: &[u8], signature: &str) -> Result<(), AppError> {
     let key: [u8; 32] = bytes(signing_key, 32)?.try_into().unwrap();
@@ -148,6 +171,9 @@ pub struct Succession {
     pub signing_key: String,
     /// Null only for version 1, which has no predecessor to sign it.
     pub signature: Option<String>,
+    /// This version's key over the previous version's keys; null for version 1.
+    #[serde(default)]
+    pub back_signature: Option<String>,
 }
 impl Succession {
     pub fn keys(&self) -> Identity {
@@ -155,6 +181,22 @@ impl Succession {
             exchange_key: self.exchange_key.clone(),
             signing_key: self.signing_key.clone(),
         }
+    }
+    /// Both directions between `previous` (version - 1) and this version.
+    pub fn verify_link(&self, user_context: &str, previous: &Identity) -> Result<(), AppError> {
+        let (Some(forward), Some(back)) = (&self.signature, &self.back_signature) else {
+            return Err(invalid("unsigned account succession"));
+        };
+        verify(
+            &previous.signing_key,
+            &succession_message(user_context, self.version, &self.keys()),
+            forward,
+        )?;
+        verify(
+            &self.signing_key,
+            &back_message(user_context, self.version, previous),
+            back,
+        )
     }
 }
 
@@ -305,7 +347,7 @@ pub async fn successions(
     user_id: &str,
 ) -> Result<Vec<Succession>, AppError> {
     let rows = sqlx::query(&db::q(
-        "SELECT version,exchange_key,signing_key,signature FROM e2ee_account_versions WHERE user_id=? AND (version=1 OR signature IS NOT NULL) ORDER BY version",
+        "SELECT version,exchange_key,signing_key,signature,back_signature FROM e2ee_account_versions WHERE user_id=? AND (version=1 OR signature IS NOT NULL) ORDER BY version",
     ))
     .bind(user_id)
     .fetch_all(&mut *conn)
@@ -317,6 +359,7 @@ pub async fn successions(
             exchange_key: row.get("exchange_key"),
             signing_key: row.get("signing_key"),
             signature: row.get("signature"),
+            back_signature: row.get("back_signature"),
         })
         .collect())
 }
@@ -327,15 +370,17 @@ pub async fn insert_version(
     version: i64,
     keys: &Identity,
     signature: Option<&str>,
+    back_signature: Option<&str>,
 ) -> Result<(), AppError> {
     sqlx::query(&db::q(
-        "INSERT INTO e2ee_account_versions(user_id,version,exchange_key,signing_key,signature,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(user_id,version) DO NOTHING",
+        "INSERT INTO e2ee_account_versions(user_id,version,exchange_key,signing_key,signature,back_signature,created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(user_id,version) DO NOTHING",
     ))
     .bind(user_id)
     .bind(version)
     .bind(&keys.exchange_key)
     .bind(&keys.signing_key)
     .bind(signature)
+    .bind(back_signature)
     .bind(now_ts())
     .execute(&mut *conn)
     .await?;

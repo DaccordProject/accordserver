@@ -10,11 +10,13 @@ CREATE TABLE e2ee_account_versions (
     signing_key TEXT NOT NULL,
     -- Succession signature by the previous version; NULL for version 1.
     signature TEXT,
+    -- Back-signature by this version over the previous version's keys; NULL for version 1.
+    back_signature TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY (user_id, version)
 );
-INSERT INTO e2ee_account_versions (user_id, version, exchange_key, signing_key, signature, created_at)
-SELECT user_id, 1, exchange_key, signing_key, NULL, '1970-01-01T00:00:00.000Z' FROM e2ee_identities;
+INSERT INTO e2ee_account_versions (user_id, version, exchange_key, signing_key, signature, back_signature, created_at)
+SELECT user_id, 1, exchange_key, signing_key, NULL, NULL, '1970-01-01T00:00:00.000Z' FROM e2ee_identities;
 -- status: pending | active | revoked. Revoked rows are permanent tombstones so
 -- history from removed devices still verifies and the ID cannot be reused.
 -- token_hash binds a local device to the user_tokens session that last
