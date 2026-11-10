@@ -685,6 +685,15 @@ async fn cross_server_dm_round_trip() {
                 ))
                 .to_bytes(),
         );
+        let binding = data_encoding::BASE64.encode(
+            &device_key
+                .sign(&account::binding_message(
+                    &wire,
+                    &device_id,
+                    &account::token_digest(&user.token),
+                ))
+                .to_bytes(),
+        );
         let response = server
             .router()
             .oneshot(common::authenticated_json_request(
@@ -692,7 +701,7 @@ async fn cross_server_dm_round_trip() {
                 &format!("/api/v1/users/@me/encryption/devices/{device_id}"),
                 &user.auth_header(),
                 &json!({"name":"test","exchange_key":exchange,"signing_key":signing,
-                        "certificate":certificate,"account_version":1}),
+                        "certificate":certificate,"account_version":1,"binding":binding}),
             ))
             .await
             .unwrap();
@@ -746,7 +755,8 @@ async fn cross_server_dm_round_trip() {
         null,
         data_encoding::BASE64.encode(&[3; 32]),
         data_encoding::BASE64.encode(&[5; 80]),
-        recipients
+        recipients,
+        1
     ]);
     let v2 = format!(
         "{}{}",
@@ -800,6 +810,10 @@ async fn cross_server_dm_round_trip() {
         exchange_key: data_encoding::BASE64.encode(&[77; 32]),
         signing_key: data_encoding::BASE64.encode(new_account.verifying_key().as_bytes()),
     };
+    let old_identity = accordserver::e2ee::Identity {
+        exchange_key: data_encoding::BASE64.encode(&[7; 32]),
+        signing_key: data_encoding::BASE64.encode(account_key.verifying_key().as_bytes()),
+    };
     let (_, exchange, device_key) = &device_keys[&author];
     let signing = data_encoding::BASE64.encode(device_key.verifying_key().as_bytes());
     let sign = |key: &ed25519_dalek::SigningKey, message: Vec<u8>| {
@@ -810,6 +824,7 @@ async fn cross_server_dm_round_trip() {
         "account": new_identity,
         "version": 2,
         "signature": sign(&account_key, account::succession_message(&author, 2, &new_identity)),
+        "back_signature": sign(&new_account, account::back_message(&author, 2, &old_identity)),
         "devices": [{"device_id": device_id, "certificate": sign(&new_account, account::certificate_message(&author, 2, device_id, exchange, &signing))}],
         "packages": [],
     });
@@ -852,7 +867,70 @@ async fn cross_server_dm_round_trip() {
     assert_eq!(successions[0]["version"], 1);
     assert!(successions[0]["signature"].is_null());
     assert_eq!(successions[1]["version"], 2);
+    assert!(successions[0]["back_signature"].is_null());
+    assert!(successions[1]["back_signature"].is_string());
     assert_eq!(row["devices"][0]["account_version"], 2);
+
+    // A v2 message signing the new account version is admitted at the home
+    // and mirrored back to the replica.
+    let mut recipients = Vec::new();
+    for row in keys["participants"].as_array().unwrap() {
+        let wire = row["wire_user_id"].as_str().unwrap();
+        recipients.push(json!([
+            wire,
+            "account",
+            row["identity"]["exchange_key"],
+            data_encoding::BASE64.encode(&[4; 60])
+        ]));
+        for d in row["devices"].as_array().unwrap() {
+            recipients.push(json!([
+                wire,
+                d["device_id"],
+                d["exchange_key"],
+                data_encoding::BASE64.encode(&[4; 60])
+            ]));
+        }
+    }
+    recipients.sort_by(|x, y| (x[0].as_str(), x[1].as_str()).cmp(&(y[0].as_str(), y[1].as_str())));
+    let rotated_payload = json!([
+        2,
+        original["payload"][1],
+        author,
+        device_id,
+        data_encoding::BASE64.encode(uuid::Uuid::new_v4().as_bytes()),
+        null,
+        null,
+        data_encoding::BASE64.encode(&[3; 32]),
+        data_encoding::BASE64.encode(&[5; 80]),
+        recipients,
+        2
+    ]);
+    let rotated = format!(
+        "{}{}",
+        accordserver::e2ee::PREFIX_V2,
+        json!({"payload":rotated_payload,"signature":sign(device_key, serde_json::to_vec(&rotated_payload).unwrap())})
+    );
+    let payload = accordserver::federation::dm::forward_dm_message(
+        replica_state,
+        &home_domain,
+        &replica_channel,
+        replica_user,
+        &rotated,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(home_state).await,
+        1
+    );
+    assert_eq!(
+        accordserver::db::messages::get_message_row(replica_pool, payload["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .content,
+        rotated
+    );
 
     std::env::remove_var("ACCORD_FEDERATION_ALLOW_INSECURE");
 }

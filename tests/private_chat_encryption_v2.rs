@@ -136,7 +136,28 @@ async fn put_device(
         body["certificate"] = json!(certificate);
         body["account_version"] = json!(version);
     }
+    body["binding"] = json!(binding(server, auth, dev).await);
     call(server, auth, Method::PUT, &device_path(dev), body).await
+}
+
+/// The device's proof of possession for the session behind `auth`.
+async fn binding(server: &TestServer, auth: &str, dev: &Dev) -> String {
+    let raw = auth.strip_prefix("Bearer ").unwrap_or(auth);
+    let user_id: Option<String> =
+        sqlx::query_scalar(&db::q("SELECT user_id FROM user_tokens WHERE token_hash=?"))
+            .bind(create_token_hash(raw))
+            .fetch_optional(server.pool())
+            .await
+            .unwrap();
+    let context = match user_id {
+        Some(id) => e2ee::user_context(server.pool(), &id).await.unwrap(),
+        None => String::new(),
+    };
+    dev.keys.sign(&account::binding_message(
+        &context,
+        &dev.id,
+        &account::token_digest(raw),
+    ))
 }
 
 /// Register an active device with a certificate from the current account key.
@@ -310,7 +331,7 @@ async fn devices_register_approve_decline_and_packages() {
     // Only version 1, published unsigned so later verifiers can check it.
     assert_eq!(
         data["successions"],
-        json!([{"version": 1, "exchange_key": account_keys.exchange, "signing_key": account_keys.signing_key(), "signature": null}])
+        json!([{"version": 1, "exchange_key": account_keys.exchange, "signing_key": account_keys.signing_key(), "signature": null, "back_signature": null}])
     );
     let devices = data["devices"].as_array().unwrap();
     assert_eq!(devices.len(), 2);
@@ -468,6 +489,138 @@ async fn devices_register_approve_decline_and_packages() {
 }
 
 #[tokio::test]
+async fn device_binding_must_prove_key_possession_for_the_session() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let account_keys = Keys::new(7);
+    register_account(&server, &alice, &account_keys).await;
+    let a = alice.auth_header();
+    let b = new_session(&server, &alice).await;
+    let d1 = Dev::new(31);
+    let body = |binding: Option<String>| {
+        let mut body = json!({
+            "name": "laptop",
+            "exchange_key": d1.keys.exchange,
+            "signing_key": d1.keys.signing_key(),
+            "certificate": certificate(&account_keys, &alice.user.id, 1, &d1),
+            "account_version": 1,
+        });
+        if let Some(binding) = binding {
+            body["binding"] = json!(binding);
+        }
+        body
+    };
+    let path = device_path(&d1);
+    // Missing, signed by another key, for another device ID, or for another
+    // session's token: all rejected before anything is bound.
+    assert_eq!(
+        call(&server, &a, Method::PUT, &path, body(None)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let raw_a = a.strip_prefix("Bearer ").unwrap();
+    let wrong_key = Keys::new(99).sign(&account::binding_message(
+        &alice.user.id,
+        &d1.id,
+        &account::token_digest(raw_a),
+    ));
+    assert_eq!(
+        call(&server, &a, Method::PUT, &path, body(Some(wrong_key)))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let other_device = d1.keys.sign(&account::binding_message(
+        &alice.user.id,
+        &Dev::new(32).id,
+        &account::token_digest(raw_a),
+    ));
+    assert_eq!(
+        call(&server, &a, Method::PUT, &path, body(Some(other_device)))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let for_a = binding(&server, &a, &d1).await;
+    assert_eq!(
+        call(&server, &b, Method::PUT, &path, body(Some(for_a.clone())))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, response) = call(&server, &a, Method::PUT, &path, body(Some(for_a.clone()))).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["data"]["current"], true);
+    // A session that only knows the public keys cannot take over the binding.
+    assert_eq!(
+        call(&server, &b, Method::PUT, &path, body(Some(for_a)))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, state) = call(
+        &server,
+        &a,
+        Method::GET,
+        "/api/v1/users/@me/encryption",
+        json!(null),
+    )
+    .await;
+    assert_eq!(state["data"]["devices"][0]["current"], true);
+    // With its own proof, session B may rebind (e.g. after signing in again).
+    let (status, response) = put_device(&server, &b, &d1, "laptop", None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["data"]["current"], true);
+}
+
+#[tokio::test]
+async fn rotation_closes_revoked_gateway_sessions() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let server = TestServer::new().await;
+    let url = server.spawn().await.replace("http://", "ws://");
+    let alice = server.create_user_with_token("alice").await;
+    let (v1, v2) = (Keys::new(7), Keys::new(17));
+    register_account(&server, &alice, &v1).await;
+    let (sa, sb) = (alice.auth_header(), new_session(&server, &alice).await);
+    let (d1, d2) = (Dev::new(31), Dev::new(32));
+    active_device(&server, &sa, &alice, &v1, 1, &d1).await;
+    active_device(&server, &sb, &alice, &v1, 1, &d2).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("{url}/ws"))
+        .await
+        .unwrap();
+    ws.next().await.unwrap().unwrap(); // HELLO
+    ws.send(Message::Text(
+        json!({"op":2,"data":{"token":sb,"intents":["direct_messages"]}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    ws.next().await.unwrap().unwrap(); // READY
+    let rotate = rotation(&alice.user.id, &v1, &v2, 2, &[&d2], &[&d1], &d1).body;
+    let (status, body) = call(
+        &server,
+        &sa,
+        Method::POST,
+        "/api/v1/users/@me/encryption/rotate",
+        rotate,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let code = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Close(Some(frame)) = msg {
+                return u16::from(frame.code);
+            }
+        }
+        0
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, 4004);
+}
+
+#[tokio::test]
 async fn pending_devices_expire_and_device_count_is_capped() {
     let server = TestServer::new().await;
     let alice = server.create_user_with_token("alice").await;
@@ -569,12 +722,18 @@ fn rotation(
         version,
         &new.identity(),
     ));
+    let back_signature = new.sign(&account::back_message(
+        user_context,
+        version,
+        &old.identity(),
+    ));
     Rotation {
         body: json!({
             "revoke": revoke.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
             "account": new.identity(),
             "version": version,
             "signature": signature,
+            "back_signature": back_signature,
             "devices": keep.iter().map(|d| json!({"device_id": d.id, "certificate": certificate(new, user_context, version, d)})).collect::<Vec<_>>(),
             "packages": keep.iter().filter(|d| d.id != caller.id).map(|d| json!({"device_id": d.id, "key_package": key_package()})).collect::<Vec<_>>(),
         }),
@@ -637,6 +796,19 @@ async fn rotation_revokes_devices_sessions_and_pending_requests() {
         StatusCode::BAD_REQUEST
     );
     let mut bad = good.clone();
+    bad.as_object_mut().unwrap().remove("back_signature");
+    assert_eq!(
+        call(&server, &sa, Method::POST, path, bad).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut bad = good.clone();
+    // Signed by the old key instead of the new one.
+    bad["back_signature"] = json!(v1.sign(&account::back_message(&ctx, 2, &v1.identity())));
+    assert_eq!(
+        call(&server, &sa, Method::POST, path, bad).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut bad = good.clone();
     bad["revoke"] = json!([d1.id]);
     assert_eq!(
         call(&server, &sa, Method::POST, path, bad).await.0,
@@ -673,7 +845,13 @@ async fn rotation_revokes_devices_sessions_and_pending_requests() {
     assert_eq!(successions.len(), 2);
     assert_eq!(successions[0]["version"], 1);
     assert!(successions[0]["signature"].is_null());
+    assert!(successions[0]["back_signature"].is_null());
     assert_eq!(successions[1]["version"], 2);
+    verify_b64(
+        &v2.signing_key(),
+        &account::back_message(&ctx, 2, &v1.identity()),
+        successions[1]["back_signature"].as_str().unwrap(),
+    );
     let signature = ed25519_dalek::Signature::from_slice(
         &BASE64
             .decode(successions[1]["signature"].as_str().unwrap().as_bytes())
@@ -842,9 +1020,27 @@ async fn rotation_revokes_devices_sessions_and_pending_requests() {
     assert_eq!(bob_row["devices"], json!([]));
 }
 
-/// A v2 envelope addressed to `recipients` (`(user_context, key_id, exchange)`).
+/// A v2 envelope addressed to `recipients` (`(user_context, key_id, exchange)`),
+/// signing account version 1.
 #[allow(clippy::too_many_arguments)]
 fn envelope_v2(
+    channel: &str,
+    author: &str,
+    device_id: &str,
+    signer: &Keys,
+    recipients: &[(String, String, String)],
+    token: &str,
+    reply: Option<&str>,
+    edit: Option<&str>,
+) -> String {
+    envelope_v2_at(
+        1, channel, author, device_id, signer, recipients, token, reply, edit,
+    )
+}
+/// The 11-item v2 payload with `account_version` as its last item.
+#[allow(clippy::too_many_arguments)]
+fn envelope_v2_at(
+    account_version: i64,
     channel: &str,
     author: &str,
     device_id: &str,
@@ -867,12 +1063,16 @@ fn envelope_v2(
         recipients
             .iter()
             .map(|(user, key_id, key)| json!([user, key_id, key, BASE64.encode(&[4; 60])]))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        account_version
     ]);
+    sign_payload(&p, signer)
+}
+fn sign_payload(p: &Value, signer: &Keys) -> String {
     format!(
         "{}{}",
         e2ee::PREFIX_V2,
-        json!({"payload": p, "signature": signer.sign(&serde_json::to_vec(&p).unwrap())})
+        json!({"payload": p, "signature": signer.sign(&serde_json::to_vec(p).unwrap())})
     )
 }
 fn token() -> String {
@@ -1188,6 +1388,41 @@ async fn v2_envelopes_are_admitted_only_from_active_devices_to_the_exact_set() {
     );
     assert_eq!(send(v1_shaped).await.0, StatusCode::BAD_REQUEST);
 
+    // The payload signs the author's current account version (item 10).
+    assert_eq!(
+        send(envelope_v2_at(
+            2,
+            cid,
+            aid,
+            &da.id,
+            &da.keys,
+            &set,
+            &token(),
+            None,
+            None
+        ))
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let mut ten: Value = serde_json::from_str(
+        envelope_v2(cid, aid, &da.id, &da.keys, &set, &token(), None, None)
+            .strip_prefix(e2ee::PREFIX_V2)
+            .unwrap(),
+    )
+    .unwrap();
+    ten["payload"].as_array_mut().unwrap().pop();
+    assert_eq!(
+        send(sign_payload(&ten["payload"], &da.keys)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut float = ten["payload"].clone();
+    float.as_array_mut().unwrap().push(json!(1.0));
+    assert_eq!(
+        send(sign_payload(&float, &da.keys)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
     // v1 envelopes (account-signed) remain admissible.
     let v1_payload = json!([
         1,
@@ -1232,7 +1467,8 @@ async fn v2_envelopes_are_admitted_only_from_active_devices_to_the_exact_set() {
         account_entry(&bob, &bv1),
         device_entry(&bob, &db1),
     ]);
-    let (status, body) = send(envelope_v2(
+    let (status, body) = send(envelope_v2_at(
+        2,
         cid,
         aid,
         &da2.id,
@@ -1246,7 +1482,8 @@ async fn v2_envelopes_are_admitted_only_from_active_devices_to_the_exact_set() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["message"], account::REVOKED_MESSAGE);
     assert_eq!(
-        send(envelope_v2(
+        send(envelope_v2_at(
+            2,
             cid,
             aid,
             &da.id,
@@ -1260,7 +1497,8 @@ async fn v2_envelopes_are_admitted_only_from_active_devices_to_the_exact_set() {
         .0,
         StatusCode::CONFLICT
     );
-    let (status, body) = send(envelope_v2(
+    let (status, body) = send(envelope_v2_at(
+        2,
         cid,
         aid,
         &da.id,
@@ -1272,10 +1510,37 @@ async fn v2_envelopes_are_admitted_only_from_active_devices_to_the_exact_set() {
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    // The signed account version must be the author's current one.
+    assert_eq!(
+        send(envelope_v2_at(
+            1,
+            cid,
+            aid,
+            &da.id,
+            &da.keys,
+            &new_set,
+            &token(),
+            None,
+            None
+        ))
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
 
     // The database writer enforces the same rules (MCP / internal callers).
     let input = accordserver::models::message::CreateMessage {
-        content: envelope_v2(cid, aid, &da2.id, &da2.keys, &new_set, &token(), None, None),
+        content: envelope_v2_at(
+            2,
+            cid,
+            aid,
+            &da2.id,
+            &da2.keys,
+            &new_set,
+            &token(),
+            None,
+            None,
+        ),
         tts: None,
         embeds: None,
         reply_to: None,
@@ -1296,7 +1561,7 @@ async fn v2_envelopes_are_admitted_only_from_active_devices_to_the_exact_set() {
         &sa,
         Method::POST,
         &format!("/api/v1/channels/{public}/messages"),
-        json!({"content": envelope_v2(&public, aid, &da.id, &da.keys, &new_set, &token(), None, None)}),
+        json!({"content": envelope_v2_at(2, &public, aid, &da.id, &da.keys, &new_set, &token(), None, None)}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1404,7 +1669,16 @@ async fn dart_v2_fixture_verifies_when_present() {
         serde_json::from_str(content.strip_prefix(e2ee::PREFIX_V2).unwrap()).unwrap();
     assert_eq!(envelope.as_object().unwrap().len(), 2);
     let p = envelope["payload"].as_array().unwrap();
-    assert_eq!(p.len(), 10);
+    if p.len() == 10 {
+        // Pre-revision-2 shape (no signed account version); the client side
+        // regenerates the fixture with the 11-item payload.
+        eprintln!(
+            "skipping: {} has a 10-item pre-revision-2 payload",
+            path.display()
+        );
+        return;
+    }
+    assert_eq!(p.len(), 11);
     assert_eq!(p[0], 2);
     assert_eq!(p[1], channel);
     assert_eq!(p[2], author);
@@ -1414,6 +1688,8 @@ async fn dart_v2_fixture_verifies_when_present() {
         .iter()
         .find(|d| d["device_id"] == p[3])
         .expect("sender is one of the author's devices");
+    // The payload signs the author's account version, the sender certificate's.
+    assert_eq!(p[10], sender["account_version"]);
     // Rust re-serialization of the parsed payload must reproduce the signed bytes.
     verify_b64(
         sender["signing_key"].as_str().unwrap(),
@@ -1491,4 +1767,135 @@ async fn dart_v2_fixture_verifies_when_present() {
     e2ee::validate_message(server.pool(), channel, author, content, None, None)
         .await
         .unwrap();
+}
+
+/// Successions for `keys[0]` (version 1) .. `keys[n-1]`, signed both ways.
+fn chain(context: &str, keys: &[&Keys]) -> Vec<Value> {
+    keys.iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let version = i as i64 + 1;
+            let (signature, back) = if i == 0 {
+                (Value::Null, Value::Null)
+            } else {
+                (
+                    json!(keys[i - 1].sign(&account::succession_message(
+                        context,
+                        version,
+                        &k.identity()
+                    ))),
+                    json!(k.sign(&account::back_message(
+                        context,
+                        version,
+                        &keys[i - 1].identity()
+                    ))),
+                )
+            };
+            json!({"version": version, "exchange_key": k.exchange, "signing_key": k.signing_key(),
+                   "signature": signature, "back_signature": back})
+        })
+        .collect()
+}
+
+async fn cached_versions(server: &TestServer, user: &str) -> Vec<i64> {
+    sqlx::query_scalar(&db::q(
+        "SELECT version FROM e2ee_account_versions WHERE user_id=? ORDER BY version",
+    ))
+    .bind(user)
+    .fetch_all(server.pool())
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn federation_cache_authenticates_history_in_both_directions() {
+    let server = TestServer::new().await;
+    let remote = "carol@c.test";
+    sqlx::query(&db::q(
+        "INSERT INTO users(id,username,display_name) VALUES (?,?,?)",
+    ))
+    .bind(remote)
+    .bind(remote)
+    .bind(remote)
+    .execute(server.pool())
+    .await
+    .unwrap();
+    let (k1, k2, k3, k4) = (Keys::new(1), Keys::new(2), Keys::new(3), Keys::new(4));
+    let old_device = Dev::new(61);
+    let device = Dev::new(62);
+    let device_row = |d: &Dev, signer: &Keys, version: i64, revoked: bool| {
+        json!({"device_id": d.id, "exchange_key": d.keys.exchange, "signing_key": d.keys.signing_key(),
+               "certificate": certificate(signer, remote, version, d), "account_version": version,
+               "revoked": revoked})
+    };
+
+    // First sight at version 3 with a broken back-signature on version 2:
+    // versions 2..3 are trusted backwards from the anchor, version 1 is not, so
+    // the v1-certified (revoked) device is skipped.
+    let mut successions = chain(remote, &[&k1, &k2, &k3]);
+    successions[1]["back_signature"] = json!(k2.sign(b"not the back message"));
+    let row = json!({
+        "identity": k3.identity(), "account_version": 3, "successions": successions,
+        "devices": [device_row(&old_device, &k1, 1, true), device_row(&device, &k3, 3, false)],
+    });
+    accordserver::federation::e2ee::cache_account(&server.state, remote, remote, &row)
+        .await
+        .unwrap();
+    assert_eq!(cached_versions(&server, remote).await, vec![2, 3]);
+    let mut conn = server.pool().acquire().await.unwrap();
+    let cached_devices = account::devices(&mut conn, remote).await.unwrap();
+    assert_eq!(cached_devices.len(), 1);
+    assert_eq!(cached_devices[0].device_id, device.id);
+    drop(conn);
+
+    // A later, intact response extends history backwards to version 1.
+    let row = json!({
+        "identity": k3.identity(), "account_version": 3,
+        "successions": chain(remote, &[&k1, &k2, &k3]),
+        "devices": [device_row(&old_device, &k1, 1, true), device_row(&device, &k3, 3, false)],
+    });
+    accordserver::federation::e2ee::cache_account(&server.state, remote, remote, &row)
+        .await
+        .unwrap();
+    assert_eq!(cached_versions(&server, remote).await, vec![1, 2, 3]);
+    // The republished history carries the verified (intact) signatures.
+    let mut conn = server.pool().acquire().await.unwrap();
+    let republished = account::successions(&mut conn, remote).await.unwrap();
+    drop(conn);
+    assert_eq!(
+        serde_json::to_value(&republished).unwrap(),
+        json!(chain(remote, &[&k1, &k2, &k3]))
+    );
+
+    // Forward: version 4 needs both its forward and back signatures.
+    let mut successions = chain(remote, &[&k1, &k2, &k3, &k4]);
+    successions[3]["back_signature"] = json!(k4.sign(b"not the back message"));
+    let bad = json!({"identity": k4.identity(), "account_version": 4, "successions": successions,
+                     "devices": [device_row(&device, &k4, 4, false)]});
+    assert!(
+        accordserver::federation::e2ee::cache_account(&server.state, remote, remote, &bad)
+            .await
+            .is_err()
+    );
+    let mut successions = chain(remote, &[&k1, &k2, &k3, &k4]);
+    successions[3]["signature"] = json!(k4.sign(b"self-signed"));
+    let bad = json!({"identity": k4.identity(), "account_version": 4, "successions": successions,
+                     "devices": [device_row(&device, &k4, 4, false)]});
+    assert!(
+        accordserver::federation::e2ee::cache_account(&server.state, remote, remote, &bad)
+            .await
+            .is_err()
+    );
+    assert_eq!(cached_versions(&server, remote).await, vec![1, 2, 3]);
+    let good = json!({"identity": k4.identity(), "account_version": 4,
+                      "successions": chain(remote, &[&k1, &k2, &k3, &k4]),
+                      "devices": [device_row(&device, &k4, 4, false)]});
+    accordserver::federation::e2ee::cache_account(&server.state, remote, remote, &good)
+        .await
+        .unwrap();
+    assert_eq!(cached_versions(&server, remote).await, vec![1, 2, 3, 4]);
+    assert_eq!(
+        e2ee::identity(server.pool(), remote).await.unwrap(),
+        Some(k4.identity())
+    );
 }
