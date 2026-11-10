@@ -146,7 +146,8 @@ pub struct Succession {
     pub version: i64,
     pub exchange_key: String,
     pub signing_key: String,
-    pub signature: String,
+    /// Null only for version 1, which has no predecessor to sign it.
+    pub signature: Option<String>,
 }
 impl Succession {
     pub fn keys(&self) -> Identity {
@@ -294,13 +295,17 @@ pub async fn all_version_keys(
         .collect())
 }
 
-/// Signed successions for versions >= 2, ascending.
+/// The account's key history, ascending: version 1 (unsigned) followed by
+/// each signed succession. Publishing version 1 lets a verifier that first
+/// sees the account after a rotation still check older device certificates
+/// and v1 history; trust in those older keys rests on the pinned current key,
+/// exactly as first-use trust in v1.
 pub async fn successions(
     conn: &mut AnyConnection,
     user_id: &str,
 ) -> Result<Vec<Succession>, AppError> {
     let rows = sqlx::query(&db::q(
-        "SELECT version,exchange_key,signing_key,signature FROM e2ee_account_versions WHERE user_id=? AND version>=2 AND signature IS NOT NULL ORDER BY version",
+        "SELECT version,exchange_key,signing_key,signature FROM e2ee_account_versions WHERE user_id=? AND (version=1 OR signature IS NOT NULL) ORDER BY version",
     ))
     .bind(user_id)
     .fetch_all(&mut *conn)

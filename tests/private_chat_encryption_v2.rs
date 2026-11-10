@@ -307,7 +307,11 @@ async fn devices_register_approve_decline_and_packages() {
     assert_eq!(data["user_context"], alice.user.id);
     assert_eq!(data["account"]["version"], 1);
     assert_eq!(data["account"]["signing_key"], account_keys.signing_key());
-    assert_eq!(data["successions"], json!([]));
+    // Only version 1, published unsigned so later verifiers can check it.
+    assert_eq!(
+        data["successions"],
+        json!([{"version": 1, "exchange_key": account_keys.exchange, "signing_key": account_keys.signing_key(), "signature": null}])
+    );
     let devices = data["devices"].as_array().unwrap();
     assert_eq!(devices.len(), 2);
     for row in devices {
@@ -666,11 +670,13 @@ async fn rotation_revokes_devices_sessions_and_pending_requests() {
     assert_eq!(data["account"]["version"], 2);
     assert_eq!(data["account"]["signing_key"], v2.signing_key());
     let successions = data["successions"].as_array().unwrap();
-    assert_eq!(successions.len(), 1);
-    assert_eq!(successions[0]["version"], 2);
+    assert_eq!(successions.len(), 2);
+    assert_eq!(successions[0]["version"], 1);
+    assert!(successions[0]["signature"].is_null());
+    assert_eq!(successions[1]["version"], 2);
     let signature = ed25519_dalek::Signature::from_slice(
         &BASE64
-            .decode(successions[0]["signature"].as_str().unwrap().as_bytes())
+            .decode(successions[1]["signature"].as_str().unwrap().as_bytes())
             .unwrap(),
     )
     .unwrap();
@@ -829,7 +835,10 @@ async fn rotation_revokes_devices_sessions_and_pending_requests() {
         .find(|r| r["user_id"] == bob.user.id.as_str())
         .unwrap();
     assert_eq!(bob_row["account_version"], 1);
-    assert_eq!(bob_row["successions"], json!([]));
+    let bob_successions = bob_row["successions"].as_array().unwrap();
+    assert_eq!(bob_successions.len(), 1);
+    assert_eq!(bob_successions[0]["version"], 1);
+    assert!(bob_successions[0]["signature"].is_null());
     assert_eq!(bob_row["devices"], json!([]));
 }
 

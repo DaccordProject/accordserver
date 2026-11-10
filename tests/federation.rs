@@ -846,7 +846,12 @@ async fn cross_server_dm_round_trip() {
         row["identity"],
         serde_json::to_value(&new_identity).unwrap()
     );
-    assert_eq!(row["successions"].as_array().unwrap().len(), 1);
+    // Version 1 (unsigned) is published ahead of the signed succession.
+    let successions = row["successions"].as_array().unwrap();
+    assert_eq!(successions.len(), 2);
+    assert_eq!(successions[0]["version"], 1);
+    assert!(successions[0]["signature"].is_null());
+    assert_eq!(successions[1]["version"], 2);
     assert_eq!(row["devices"][0]["account_version"], 2);
 
     std::env::remove_var("ACCORD_FEDERATION_ALLOW_INSECURE");

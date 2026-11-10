@@ -257,14 +257,21 @@ pub async fn cache_account(
             }
             let mut v = version;
             while let Some(s) = succession(v) {
-                account::insert_version(&mut tx, user_id, v, &s.keys(), Some(&s.signature)).await?;
+                if v == 1 {
+                    account::insert_version(&mut tx, user_id, 1, &s.keys(), None).await?;
+                    break;
+                }
+                let Some(signature) = s.signature.as_deref() else {
+                    break;
+                };
+                account::insert_version(&mut tx, user_id, v, &s.keys(), Some(signature)).await?;
                 let Some(previous) = succession(v - 1) else {
                     break;
                 };
                 if account::verify(
                     &previous.signing_key,
                     &account::succession_message(wire_id, v, &s.keys()),
-                    &s.signature,
+                    signature,
                 )
                 .is_err()
                 {
@@ -290,13 +297,17 @@ pub async fn cache_account(
             let mut previous = cached.keys.clone();
             for v in cached.version + 1..=version {
                 let s = succession(v).ok_or_else(|| bad_remote("missing succession"))?;
+                let signature = s
+                    .signature
+                    .as_deref()
+                    .ok_or_else(|| bad_remote("unsigned succession"))?;
                 account::verify(
                     &previous.signing_key,
                     &account::succession_message(wire_id, v, &s.keys()),
-                    &s.signature,
+                    signature,
                 )
                 .map_err(|_| bad_remote("invalid succession signature"))?;
-                account::insert_version(&mut tx, user_id, v, &s.keys(), Some(&s.signature)).await?;
+                account::insert_version(&mut tx, user_id, v, &s.keys(), Some(signature)).await?;
                 previous = s.keys();
             }
             if version > cached.version {
