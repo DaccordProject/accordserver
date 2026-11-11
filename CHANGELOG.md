@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.5
+
+Private chats gain per-device encryption keys (encryption v2). Each device has
+its own keys, certified by a versioned account key; the existing identity becomes
+account version 1, so pins, fingerprints and history are unchanged. A new device
+registers as pending and is approved from an existing one after both compare a
+16-digit code; the approval delivers the account keyring sealed to the new
+device. Removing a device rotates the account key with forward and back
+signatures, re-certifies the remaining devices, deletes the removed device's
+sessions and closes its gateway connections. New endpoints live under
+`/users/@me/encryption`; the `encryption.device_pending` and
+`encryption.devices_update` gateway events use the `direct_messages` intent.
+v2 envelopes are signed by the sender device and carry its account version;
+v1 envelopes remain admissible, so older clients keep working.
+
+Member presence snapshots are now complete and privacy-filtered, and presence
+federates across servers.
+
+Adds SQLite migration 040 and PostgreSQL migration 025. Requires Daccord client
+0.2.28 for device approval and removal; older clients continue on v1. Federated
+peers should upgrade before users remove devices: older servers keep cached
+identities immutable and refuse an account after its key rotates. See
+`docs/private-chat-encryption.md`.
+
 ## 0.2.4
 
 Arcade now has one ordinary channel per space, with persisted ordering, category
