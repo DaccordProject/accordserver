@@ -3,7 +3,15 @@ name: Build desktop installers
 on:
   push:
     tags: ["v*"]
+  # A manual run builds the installers from the branch it is started on; give
+  # an existing release tag to build that tag instead and attach the installers
+  # and updater manifest to its release (e.g. after a runner outage).
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and attach to (e.g. v0.2.5)"
+        required: false
+        default: ""
 
 env:
   LIVEKIT_VERSION: "1.8.0"
@@ -16,11 +24,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             livekit_asset: ""
             tauri_target_flag: --target aarch64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             target: x86_64-apple-darwin
             livekit_asset: ""
             tauri_target_flag: --target x86_64-apple-darwin
@@ -37,6 +45,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -168,9 +178,10 @@ jobs:
           if-no-files-found: warn
 
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
           files: |
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
@@ -194,7 +205,7 @@ jobs:
   # file from the "latest" release to decide whether a newer version exists.
   manifest:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -207,7 +218,7 @@ jobs:
       - name: Generate latest.json
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -276,5 +287,6 @@ jobs:
       - name: Attach manifest to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: latest.json
           fail_on_unmatched_files: true
