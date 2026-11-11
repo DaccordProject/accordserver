@@ -662,6 +662,276 @@ async fn cross_server_dm_round_trip() {
         edited
     );
 
+    // Encryption v2: each user registers a certified device on its own server.
+    // The home refreshes the remote participant's devices during discovery,
+    // admits a device-signed envelope forwarded by the replica, and the
+    // replica admits the mirrored copy.
+    use accordserver::e2ee::account;
+    let account_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let mut device_keys = std::collections::HashMap::new();
+    for (server, user, seed) in [(&a, &alice, 51u8), (&b, &bob, 52u8)] {
+        let device_key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let device_id = data_encoding::BASE64URL_NOPAD.encode(&[seed; 16]);
+        let exchange = data_encoding::BASE64.encode(&[seed; 32]);
+        let signing = data_encoding::BASE64.encode(device_key.verifying_key().as_bytes());
+        let wire = accordserver::federation::mapping::qualify(
+            &user.user.id,
+            &server.state.federation.as_ref().unwrap().domain,
+        );
+        let certificate = data_encoding::BASE64.encode(
+            &account_key
+                .sign(&account::certificate_message(
+                    &wire, 1, &device_id, &exchange, &signing,
+                ))
+                .to_bytes(),
+        );
+        let binding = data_encoding::BASE64.encode(
+            &device_key
+                .sign(&account::binding_message(
+                    &wire,
+                    &device_id,
+                    &account::token_digest(&user.token),
+                ))
+                .to_bytes(),
+        );
+        let response = server
+            .router()
+            .oneshot(common::authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v1/users/@me/encryption/devices/{device_id}"),
+                &user.auth_header(),
+                &json!({"name":"test","exchange_key":exchange,"signing_key":signing,
+                        "certificate":certificate,"account_version":1,"binding":binding}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        device_keys.insert(wire, (device_id, exchange, device_key));
+    }
+    // Force the home to treat its cache of the replica user as stale.
+    sqlx::query(&accordserver::db::q(
+        "UPDATE e2ee_identities SET refreshed_at=NULL",
+    ))
+    .execute(&home_state.db)
+    .await
+    .unwrap();
+    let keys =
+        accordserver::federation::e2ee::discover(replica_state, &replica_channel, &replica_user.id)
+            .await
+            .unwrap();
+    let mut recipients = Vec::new();
+    for row in keys["participants"].as_array().unwrap() {
+        let wire = row["wire_user_id"].as_str().unwrap();
+        assert_eq!(row["account_version"], 1);
+        let devices = row["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 1, "{row}");
+        assert_eq!(devices[0]["device_id"], device_keys[wire].0.as_str());
+        assert_eq!(devices[0]["revoked"], false);
+        recipients.push(json!([
+            wire,
+            "account",
+            row["identity"]["exchange_key"],
+            data_encoding::BASE64.encode(&[4; 60])
+        ]));
+        recipients.push(json!([
+            wire,
+            devices[0]["device_id"],
+            devices[0]["exchange_key"],
+            data_encoding::BASE64.encode(&[4; 60])
+        ]));
+    }
+    recipients.sort_by(|x, y| (x[0].as_str(), x[1].as_str()).cmp(&(y[0].as_str(), y[1].as_str())));
+    let author = accordserver::e2ee::user_context(replica_pool, &replica_user.id)
+        .await
+        .unwrap();
+    let (device_id, _, device_key) = &device_keys[&author];
+    let v2_payload = json!([
+        2,
+        original["payload"][1],
+        author,
+        device_id,
+        data_encoding::BASE64.encode(uuid::Uuid::new_v4().as_bytes()),
+        null,
+        null,
+        data_encoding::BASE64.encode(&[3; 32]),
+        data_encoding::BASE64.encode(&[5; 80]),
+        recipients,
+        1
+    ]);
+    let v2 = format!(
+        "{}{}",
+        accordserver::e2ee::PREFIX_V2,
+        json!({"payload":v2_payload,"signature":data_encoding::BASE64.encode(&device_key.sign(&serde_json::to_vec(&v2_payload).unwrap()).to_bytes())})
+    );
+    accordserver::e2ee::validate_message(
+        replica_pool,
+        &replica_channel,
+        &replica_user.id,
+        &v2,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = accordserver::federation::dm::forward_dm_message(
+        replica_state,
+        &home_domain,
+        &replica_channel,
+        replica_user,
+        &v2,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(payload["content"], v2);
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(home_state).await,
+        1
+    );
+    let v2_id = payload["id"].as_str().unwrap();
+    assert_eq!(
+        accordserver::db::messages::get_message_row(replica_pool, v2_id)
+            .await
+            .unwrap()
+            .content,
+        v2
+    );
+
+    // A plain rotation on the replica user's own server reaches the home
+    // through the succession chain on the next (stale) refresh.
+    let replica_server = if home_domain == "a.test" { &b } else { &a };
+    let replica_test_user = if home_domain == "a.test" {
+        &bob
+    } else {
+        &alice
+    };
+    let new_account = ed25519_dalek::SigningKey::from_bytes(&[77; 32]);
+    let new_identity = accordserver::e2ee::Identity {
+        exchange_key: data_encoding::BASE64.encode(&[77; 32]),
+        signing_key: data_encoding::BASE64.encode(new_account.verifying_key().as_bytes()),
+    };
+    let old_identity = accordserver::e2ee::Identity {
+        exchange_key: data_encoding::BASE64.encode(&[7; 32]),
+        signing_key: data_encoding::BASE64.encode(account_key.verifying_key().as_bytes()),
+    };
+    let (_, exchange, device_key) = &device_keys[&author];
+    let signing = data_encoding::BASE64.encode(device_key.verifying_key().as_bytes());
+    let sign = |key: &ed25519_dalek::SigningKey, message: Vec<u8>| {
+        data_encoding::BASE64.encode(&key.sign(&message).to_bytes())
+    };
+    let rotate = json!({
+        "revoke": [],
+        "account": new_identity,
+        "version": 2,
+        "signature": sign(&account_key, account::succession_message(&author, 2, &new_identity)),
+        "back_signature": sign(&new_account, account::back_message(&author, 2, &old_identity)),
+        "devices": [{"device_id": device_id, "certificate": sign(&new_account, account::certificate_message(&author, 2, device_id, exchange, &signing))}],
+        "packages": [],
+    });
+    let response = replica_server
+        .router()
+        .oneshot(common::authenticated_json_request(
+            Method::POST,
+            "/api/v1/users/@me/encryption/rotate",
+            &replica_test_user.auth_header(),
+            &rotate,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    sqlx::query(&accordserver::db::q(
+        "UPDATE e2ee_identities SET refreshed_at=NULL",
+    ))
+    .execute(&home_state.db)
+    .await
+    .unwrap();
+    let keys =
+        accordserver::federation::e2ee::discover(replica_state, &replica_channel, &replica_user.id)
+            .await
+            .unwrap();
+    let row = keys["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["wire_user_id"] == author.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(row["account_version"], 2, "{row}");
+    assert_eq!(
+        row["identity"],
+        serde_json::to_value(&new_identity).unwrap()
+    );
+    // Version 1 (unsigned) is published ahead of the signed succession.
+    let successions = row["successions"].as_array().unwrap();
+    assert_eq!(successions.len(), 2);
+    assert_eq!(successions[0]["version"], 1);
+    assert!(successions[0]["signature"].is_null());
+    assert_eq!(successions[1]["version"], 2);
+    assert!(successions[0]["back_signature"].is_null());
+    assert!(successions[1]["back_signature"].is_string());
+    assert_eq!(row["devices"][0]["account_version"], 2);
+
+    // A v2 message signing the new account version is admitted at the home
+    // and mirrored back to the replica.
+    let mut recipients = Vec::new();
+    for row in keys["participants"].as_array().unwrap() {
+        let wire = row["wire_user_id"].as_str().unwrap();
+        recipients.push(json!([
+            wire,
+            "account",
+            row["identity"]["exchange_key"],
+            data_encoding::BASE64.encode(&[4; 60])
+        ]));
+        for d in row["devices"].as_array().unwrap() {
+            recipients.push(json!([
+                wire,
+                d["device_id"],
+                d["exchange_key"],
+                data_encoding::BASE64.encode(&[4; 60])
+            ]));
+        }
+    }
+    recipients.sort_by(|x, y| (x[0].as_str(), x[1].as_str()).cmp(&(y[0].as_str(), y[1].as_str())));
+    let rotated_payload = json!([
+        2,
+        original["payload"][1],
+        author,
+        device_id,
+        data_encoding::BASE64.encode(uuid::Uuid::new_v4().as_bytes()),
+        null,
+        null,
+        data_encoding::BASE64.encode(&[3; 32]),
+        data_encoding::BASE64.encode(&[5; 80]),
+        recipients,
+        2
+    ]);
+    let rotated = format!(
+        "{}{}",
+        accordserver::e2ee::PREFIX_V2,
+        json!({"payload":rotated_payload,"signature":sign(device_key, serde_json::to_vec(&rotated_payload).unwrap())})
+    );
+    let payload = accordserver::federation::dm::forward_dm_message(
+        replica_state,
+        &home_domain,
+        &replica_channel,
+        replica_user,
+        &rotated,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        accordserver::federation::sender::deliver_due_once(home_state).await,
+        1
+    );
+    assert_eq!(
+        accordserver::db::messages::get_message_row(replica_pool, payload["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .content,
+        rotated
+    );
+
     std::env::remove_var("ACCORD_FEDERATION_ALLOW_INSECURE");
 }
 

@@ -223,7 +223,7 @@ pub async fn create_message(
     let cooldown_ms = cooldown_ms.max(0);
     let now = chrono::Utc::now().timestamp_millis();
     let mut tx = pool.begin().await?;
-    if input.content.starts_with(crate::e2ee::PREFIX) {
+    if crate::e2ee::is_encrypted(&input.content) {
         crate::e2ee::lock_chat(&mut tx, channel_id).await?;
     }
     crate::e2ee::reserve_token(&mut tx, author_id, &input.content).await?;
@@ -418,7 +418,7 @@ pub async fn update_message(
     if input
         .content
         .as_ref()
-        .is_some_and(|c| c.starts_with(crate::e2ee::PREFIX))
+        .is_some_and(|c| crate::e2ee::is_encrypted(c))
     {
         crate::e2ee::lock_chat(&mut tx, &existing.channel_id).await?;
     }

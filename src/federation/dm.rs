@@ -488,6 +488,7 @@ async fn serve_send(
     )
     .await?;
 
+    crate::federation::e2ee::refresh_sender(state, &req.actor.id, &req.content).await;
     crate::federation::e2ee::discover(state, &req.channel_id, &req.actor.id).await?;
     let settings = state.settings.load();
     if req.encrypted_files.len() > settings.max_attachments_per_message as usize {
@@ -671,7 +672,7 @@ pub async fn apply_message_create(
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("Federation disabled".into()))?;
     let local_author = mapping::participant_storage_id(&payload.author.id, Some(&fed.domain));
-    if payload.content.starts_with(crate::e2ee::PREFIX) {
+    if crate::e2ee::is_encrypted(&payload.content) {
         payload.author.id = local_author;
     }
     let author_domain = mapping::domain_of(&payload.author.id).unwrap_or(peer);
