@@ -447,7 +447,7 @@ pub async fn update_message(
     if let Some(ref embeds) = input.embeds {
         let embeds_json = serde_json::to_string(embeds).unwrap();
         let sql = format!(
-            "UPDATE messages SET embeds = ?, edited_at = {now_fn}, updated_at = {now_fn} WHERE id = ?"
+            "UPDATE messages SET embeds = ?, updated_at = {now_fn} WHERE id = ?"
         );
         let sql = super::q(&sql);
         sqlx::query(&sql)
