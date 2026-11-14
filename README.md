@@ -219,8 +219,9 @@ All REST endpoints live under `/api/v1`. The gateway WebSocket is at `/ws`.
 
 | Group | Endpoints |
 |---|---|
-| Auth | `POST /auth/register`, `POST /auth/login`, `POST /auth/logout` |
-| Users | `GET/PATCH /users/@me`, `GET /users/{id}`, `GET /users/@me/spaces` |
+| Auth | `POST /auth/register`, `POST /auth/login`, `POST /auth/logout` (register/login accept an optional `device_fingerprint`) |
+| Users | `GET/PATCH /users/@me`, `GET /users/{id}`, `GET /users/@me/spaces`, `PUT /users/@me/device` |
+| Admin | Users, spaces, reports, settings, federation peers, device bans (`/admin/users/{id}/device-bans`, `/admin/device-bans`) |
 | Spaces | CRUD `/spaces`, channels, public join (`POST /spaces/{id}/join`) |
 | Channels | CRUD `/channels/{id}` |
 | Messages | CRUD, bulk delete, pins, typing indicators |
@@ -233,6 +234,9 @@ All REST endpoints live under `/api/v1`. The gateway WebSocket is at `/ws`.
 | Voice | Join/leave, regions, status, backend info |
 | Applications | Bot app CRUD, token reset |
 | Gateway | `GET /gateway`, `GET /gateway/bot` |
+
+Device bans and the rule that a space ban also blocks DMs to that space's
+members are described in [security operations](docs/security-operations.md#device-bans).
 
 Space objects returned by `GET /users/@me/spaces` and `GET /spaces/{id}`
 include `member_count` and `presence_count`. These aggregate fields let clients

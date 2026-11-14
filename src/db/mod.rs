@@ -4,6 +4,7 @@ pub mod audit_log;
 pub mod auth;
 pub mod bans;
 pub mod channels;
+pub mod devices;
 pub mod dm_participants;
 pub mod emojis;
 pub mod experiences;

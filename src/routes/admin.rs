@@ -187,6 +187,99 @@ pub async fn delete_user(
 }
 
 // =========================================================================
+// Device bans
+// =========================================================================
+
+#[derive(Deserialize)]
+pub struct BanDevicesRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DeviceBanListQuery {
+    pub after: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// POST /admin/users/{user_id}/device-bans — ban every device fingerprint
+/// recorded for the user. Does not disable the account itself.
+pub async fn ban_user_devices(
+    state: State<AppState>,
+    Path(user_id): Path<String>,
+    auth: AuthUser,
+    body: Option<Json<BanDevicesRequest>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+    let input = body
+        .map(|Json(b)| b)
+        .unwrap_or(BanDevicesRequest { reason: None });
+
+    if let Some(ref reason) = input.reason {
+        if reason.chars().count() > 512 {
+            return Err(AppError::BadRequest(
+                "reason must be at most 512 characters".to_string(),
+            ));
+        }
+    }
+    if auth.user_id == user_id {
+        return Err(AppError::BadRequest(
+            "you cannot ban your own devices".to_string(),
+        ));
+    }
+    let target = db::users::get_user(&state.db, &user_id).await?;
+    if target.is_admin {
+        return Err(AppError::Forbidden(
+            "cannot ban another administrator's devices".to_string(),
+        ));
+    }
+
+    let bans = db::devices::ban_user_devices(
+        &state.db,
+        &user_id,
+        Some(&target.username),
+        input.reason.as_deref(),
+        &auth.user_id,
+        state.db_is_postgres,
+    )
+    .await?;
+
+    Ok(Json(serde_json::json!({
+        "data": {
+            "banned": bans.len(),
+            "bans": bans.iter().map(|b| b.to_json()).collect::<Vec<_>>(),
+        }
+    })))
+}
+
+/// GET /admin/device-bans — newest first, paginated with `after=<id>`.
+pub async fn list_device_bans(
+    state: State<AppState>,
+    auth: AuthUser,
+    Query(params): Query<DeviceBanListQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_server_admin(&auth)?;
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
+    let bans = db::devices::list_device_bans(&state.db, params.after.as_deref(), limit).await?;
+    Ok(Json(serde_json::json!({
+        "data": bans.iter().map(|b| b.to_json()).collect::<Vec<_>>()
+    })))
+}
+
+/// DELETE /admin/device-bans/{ban_id}
+pub async fn delete_device_ban(
+    state: State<AppState>,
+    Path(ban_id): Path<String>,
+    auth: AuthUser,
+) -> Result<axum::http::StatusCode, AppError> {
+    require_server_admin(&auth)?;
+    if !db::devices::delete_device_ban(&state.db, &ban_id).await? {
+        return Err(AppError::NotFound("device ban not found".to_string()));
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// =========================================================================
 // Password Reset
 // =========================================================================
 

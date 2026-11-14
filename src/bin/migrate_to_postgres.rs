@@ -353,6 +353,22 @@ const TABLES: &[TableDef] = &[
             "created_at",
         ],
     },
+    TableDef {
+        name: "user_devices",
+        columns: &["user_id", "fingerprint", "first_seen", "last_seen"],
+    },
+    TableDef {
+        name: "device_bans",
+        columns: &[
+            "id",
+            "fingerprint",
+            "user_id",
+            "username",
+            "reason",
+            "banned_by",
+            "created_at",
+        ],
+    },
 ];
 
 struct TableDef {

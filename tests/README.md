@@ -37,6 +37,8 @@ cargo test -- --nocapture
 | `tests/ws.rs` | Gateway HELLO, heartbeat_interval, invalid IDENTIFY, timeout, close |
 | `tests/bootstrap_gateway.rs` | Bootstrap administrator HTTP login, READY with no memberships, admin API access, heartbeats, and initial-password rotation |
 | `tests/e2e.rs` | Authenticated API: users, spaces, channels, messages, public spaces, space-level invites, gateway auth flows |
+| `tests/device_bans.rs` | Device fingerprint recording, banned-device register/login/check-in refusal, admin device-ban API |
+| `tests/dm_ban_separation.rs` | Space bans and blocks refusing DM opens and 1:1 DM sends |
 | `tests/common/mod.rs` | Shared test infrastructure (`TestServer`, `TestUser`, request helpers) |
 
 ## Infrastructure
