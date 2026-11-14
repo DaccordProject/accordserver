@@ -17,6 +17,12 @@ use crate::storage;
 /// coarser set of options can't fail the ban itself.
 const MAX_DELETE_MESSAGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 
+/// Upper bound on a ban's reason, in characters — the same cap Discord puts on
+/// one. The reason is echoed back in the ban list, in the `ban.create` gateway
+/// event and in federated copies, so an unbounded string is copied once per
+/// viewer of every one of those.
+const MAX_BAN_REASON_CHARS: usize = 512;
+
 #[derive(Deserialize)]
 pub struct CreateBanBody {
     pub reason: Option<String>,
@@ -75,7 +81,25 @@ pub async fn create_ban(
     require_permission(&state.db, &space_id, &auth, "ban_members").await?;
     require_hierarchy(&state.db, &space_id, &auth, &user_id).await?;
     let body = body.map(|Json(b)| b);
-    let reason = body.as_ref().and_then(|b| b.reason.clone());
+    // Trim first, then reject over-long reasons instead of silently truncating
+    // them: a moderator who pasted a long log expects the whole thing, and a
+    // silent cut would leave them with a ban reason they never wrote. An
+    // all-whitespace reason is no reason at all, so it is stored as absent
+    // rather than as a blank box in every moderation UI.
+    let reason = body
+        .as_ref()
+        .and_then(|b| b.reason.as_deref())
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string);
+    if let Some(ref reason) = reason {
+        if reason.chars().count() > MAX_BAN_REASON_CHARS {
+            return Err(AppError::BadRequest(format!(
+                "ban reason must not exceed {} characters",
+                MAX_BAN_REASON_CHARS
+            )));
+        }
+    }
     let delete_message_seconds = body
         .as_ref()
         .and_then(|b| b.delete_message_seconds)

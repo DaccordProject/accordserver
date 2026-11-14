@@ -98,7 +98,11 @@ fn validate_report(body: &CreateReportBody) -> Result<&'static str, AppError> {
         ));
     }
     if let Some(ref desc) = body.description {
-        if desc.len() > 4000 {
+        // Count characters, not UTF-8 bytes: the error message promises
+        // characters, and a 1,500-character CJK or emoji description is far
+        // under 4,000 characters but over 4,000 bytes, so a byte check would
+        // reject a report that is well within the documented limit.
+        if desc.chars().count() > 4000 {
             return Err(AppError::BadRequest(
                 "description must not exceed 4000 characters".to_string(),
             ));

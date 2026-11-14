@@ -2915,6 +2915,121 @@ async fn test_report_description_at_limit_accepted() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// The description limit counts characters, not UTF-8 bytes. 4,000 CJK
+/// characters is 12,000 bytes, and used to be rejected even though the error
+/// message promises characters.
+#[tokio::test]
+async fn test_report_description_multibyte_at_limit_accepted() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+    let channel_id = server.create_channel(&space_id, "general").await;
+
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &alice.auth_header(),
+        &json!({ "content": "message to report" }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    let body = parse_body(response).await;
+    let msg_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // 4,000 CJK characters = 12,000 bytes. Under the character limit → accepted.
+    let max_desc = "报".repeat(4000);
+    assert_eq!(max_desc.len(), 12000);
+    let req = authenticated_json_request(
+        Method::POST,
+        &format!("/api/v1/spaces/{space_id}/reports"),
+        &alice.auth_header(),
+        &json!({
+            "target_type": "message",
+            "target_id": msg_id,
+            "category": "other",
+            "description": max_desc
+        }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// A ban reason is bounded, like automod's, because it is copied into every
+/// ban-list response, the `ban.create` gateway event and federated peers.
+#[tokio::test]
+async fn test_ban_reason_too_long_rejected() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let charlie = server.create_user_with_token("charlie").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+
+    // 513 characters, one over the cap → 400 instead of an unbounded row.
+    let long_reason = "x".repeat(513);
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", charlie.user.id),
+        &alice.auth_header(),
+        &json!({ "reason": long_reason }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// The cap is on characters, so a multi-byte reason at exactly 512 characters
+/// is accepted and stored verbatim.
+#[tokio::test]
+async fn test_ban_reason_at_limit_accepted() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let charlie = server.create_user_with_token("charlie").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+
+    let max_reason = "禁".repeat(512);
+    assert_eq!(max_reason.chars().count(), 512);
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", charlie.user.id),
+        &alice.auth_header(),
+        &json!({ "reason": max_reason }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["reason"].as_str(), Some(max_reason.as_str()));
+}
+
+/// Surrounding whitespace is trimmed off a ban reason, and a reason that is
+/// only whitespace is stored as absent rather than as a blank moderation note.
+#[tokio::test]
+async fn test_ban_reason_is_trimmed() {
+    let server = TestServer::new().await;
+    let alice = server.create_user_with_token("alice").await;
+    let space_id = server.create_space(&alice.user.id, "Alice's Space").await;
+
+    let charlie = server.create_user_with_token("charlie").await;
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", charlie.user.id),
+        &alice.auth_header(),
+        &json!({ "reason": "  spam bot  " }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert_eq!(body["data"]["reason"].as_str(), Some("spam bot"));
+
+    let dave = server.create_user_with_token("dave").await;
+    let req = authenticated_json_request(
+        Method::PUT,
+        &format!("/api/v1/spaces/{space_id}/bans/{}", dave.user.id),
+        &alice.auth_header(),
+        &json!({ "reason": "   " }),
+    );
+    let response = server.router().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_body(response).await;
+    assert!(body["data"]["reason"].is_null());
+}
+
 #[tokio::test]
 async fn test_register_display_name_too_long_rejected() {
     let server = TestServer::new().await;
