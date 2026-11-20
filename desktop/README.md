@@ -22,7 +22,7 @@ Generated on first launch:
 |---|---|
 | macOS | `~/Library/Application Support/gg.daccord.Accord/` |
 | Linux | `$XDG_DATA_HOME/accord/` (default: `~/.local/share/accord/`) |
-| Windows | `%APPDATA%\Accord\Accord\` |
+| Windows | `%APPDATA%\daccord\Accord\data\` (roaming AppData) |
 
 Contents:
 
@@ -37,6 +37,26 @@ Contents:
 
 Delete the data dir to fully reset; keep it across reinstalls to preserve
 state.
+
+## Creating your administrator
+
+Signing up through a client never makes you an instance administrator, and the
+default **General** space is owned by a hidden System account. To get
+administrator access, run the bundled server once with `--bootstrap-admin` and
+this app's data folder. The tray app can keep running. The bundled server is at:
+
+| Installed from | Server program |
+|---|---|
+| Linux `.deb` | `/usr/bin/accordserver` |
+| Linux `.AppImage` | `usr/bin/accordserver` inside the AppImage (extract with `--appimage-extract usr/bin/accordserver`) |
+| macOS `.dmg` | `/Applications/Accord.app/Contents/MacOS/accordserver` |
+| Windows `-setup.exe` (per-user) | `%LOCALAPPDATA%\Accord\accordserver.exe` |
+| Windows `.msi` | `C:\Program Files\Accord\accordserver.exe` |
+
+Step-by-step commands for each platform are in
+[security operations](../docs/security-operations.md#desktop-app). If you only
+want a space for you and your friends, you don't need administrator access:
+create your own space and you own it.
 
 ## First-run UX
 

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 ///
 /// macOS:   ~/Library/Application Support/gg.daccord.Accord/
 /// Linux:   $XDG_DATA_HOME/accord/  (typically ~/.local/share/accord/)
-/// Windows: %APPDATA%\Accord\Accord\
+/// Windows: %APPDATA%\daccord\Accord\data\  (directories 5: roaming AppData\<org>\<app>\data)
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub data_dir: PathBuf,

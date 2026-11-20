@@ -78,7 +78,7 @@ If you'd rather run Accord like any other desktop app — no terminal, no Docker
 | Linux | `.deb`, `.AppImage` | System tray |
 | Windows | `.msi`, `.exe` (NSIS) | Notification area |
 
-After install, click the tray icon → **Open in browser** to see the server at `http://localhost:39099`. Data lives in the platform user data directory (see [`desktop/README.md`](desktop/README.md)).
+After install, click the tray icon → **Open in browser** to see the server at `http://localhost:39099`. Data lives in the platform user data directory (see [`desktop/README.md`](desktop/README.md)). To become the server's administrator, see [Creating your administrator](desktop/README.md#creating-your-administrator).
 
 Builds are currently **unsigned**, so on first launch you'll need to click through Gatekeeper (macOS: right-click → Open) or SmartScreen (Windows: More info → Run anyway). To let friends connect from outside your LAN you'll need to port-forward TCP `39099`, TCP `7880`/`7881`, and UDP `50000-60000`.
 
@@ -158,7 +158,7 @@ docker compose up -d
 docker compose -f docker-compose.postgres.yml up -d
 ```
 
-Provision the administrator locally using the instructions in [security operations](docs/security-operations.md). Public registration always creates ordinary users. Existing operators should also read the credential rotation and legacy plugin retirement instructions there.
+Public registration always creates ordinary users, and the default General space is owned by a hidden System account. To manage the server or customise General, create an administrator locally with `--bootstrap-admin`; [security operations](docs/security-operations.md#initial-administrator) has step-by-step instructions for Docker, the desktop app and plain binaries. If you only want a space for you and your friends, sign up and create your own space instead: you own it and need no administrator access. Existing operators should also read the credential rotation and legacy plugin retirement instructions there.
 
 **Important notes:**
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` only take effect when PostgreSQL initializes a **fresh data directory**. If the volume already has data, changing these values does nothing. To reset: stop the stack, delete the postgres volume, and start again.
