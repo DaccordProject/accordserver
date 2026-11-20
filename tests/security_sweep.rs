@@ -406,6 +406,17 @@ async fn guest_tokens_are_scoped_and_stop_working_when_guest_access_is_disabled(
         server.router().oneshot(req).await.unwrap().status(),
         StatusCode::OK
     );
+    // A guest has no users row to own a space; refuse instead of failing the FK.
+    let req = authenticated_json_request(
+        Method::POST,
+        "/api/v1/spaces",
+        &auth,
+        &json!({"name":"guest-owned"}),
+    );
+    assert_eq!(
+        server.router().oneshot(req).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
     let req = authenticated_json_request(
         Method::PATCH,
         &format!("/api/v1/spaces/{space}"),
