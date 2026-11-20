@@ -26,11 +26,11 @@ The model helper installs only the image model and ONNX Runtime.
 
 Set the three environment variables printed by the helper and restart
 `accordserver`. It installs approximately 12.2 MB of model weights and downloads
-an approximately 7.8 MB compressed CPU runtime archive. These sizes do not describe
+an approximately 121 MB NuGet package, of which it keeps the 21 MB Linux CPU runtime. These sizes do not describe
 RAM consumption. The Rust `ort` binding is pinned to its ONNX Runtime 1.22 API.
 
-For macOS, Windows, or Linux ARM64, install the appropriate CPU archive from
-[ONNX Runtime 1.22.0](https://github.com/microsoft/onnxruntime/releases/tag/v1.22.0)
+For macOS, Windows, or Linux ARM64, use the matching `runtimes/<platform>/native` library from Microsoft's
+[Microsoft.ML.OnnxRuntime 1.22.0](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/1.22.0) package (a zip file)
 and the [NudeNet 320n model](https://github.com/notAI-tech/NudeNet/tree/v3).
 Set `ACCORD_AUTOMOD_RUNTIME_PATH` to the extracted `.dylib`, `.dll`, or `.so` and
 `ACCORD_AUTOMOD_MODEL_PATH` to the ONNX file. Those platforms require their own
