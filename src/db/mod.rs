@@ -70,11 +70,39 @@ pub fn q(sql: &str) -> String {
 ///
 /// The `Any` driver maps SQLite `INTEGER` columns to `BIGINT`, which cannot be
 /// decoded directly as Rust `bool`.  This helper tries `bool` first (works for
-/// Postgres) and falls back to reading an `i64` (works for SQLite).
+/// Postgres), then `i64` (SQLite), then text.  SQLite does not enforce column
+/// types, so a hand-edited database can hold `'true'` or `'1'` in an
+/// `INTEGER` column; text `1`/`true` (trimmed, case-insensitive) reads as
+/// true.  NULL, other text and anything else read as false rather than
+/// panicking.
 pub fn get_bool(row: &sqlx::any::AnyRow, col: &str) -> bool {
     use sqlx::Row;
-    row.try_get::<bool, _>(col)
-        .unwrap_or_else(|_| row.get::<i64, _>(col) != 0)
+    if let Ok(v) = row.try_get::<bool, _>(col) {
+        return v;
+    }
+    if let Ok(v) = row.try_get::<i64, _>(col) {
+        return v != 0;
+    }
+    match row.try_get::<Option<String>, _>(col) {
+        Ok(None) => false,
+        Ok(Some(text)) => {
+            let text = text.trim();
+            if text == "1" || text.eq_ignore_ascii_case("true") {
+                true
+            } else {
+                if text != "0" && !text.eq_ignore_ascii_case("false") {
+                    tracing::warn!(
+                        "unrecognised boolean {text:?} in column {col}; reading as false"
+                    );
+                }
+                false
+            }
+        }
+        Err(e) => {
+            tracing::warn!("could not read boolean column {col}: {e}; reading as false");
+            false
+        }
+    }
 }
 
 /// Read a float column from an `AnyRow`.
@@ -360,4 +388,50 @@ pub async fn create_pool(database_url: &str) -> Result<AnyPool, sqlx::Error> {
     }
 
     Ok(pool)
+}
+
+#[cfg(test)]
+mod get_bool_tests {
+    use super::get_bool;
+
+    #[tokio::test]
+    async fn reads_integer_text_and_garbage_without_panicking() {
+        sqlx::any::install_default_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Same declaration as users.is_admin. SQLite keeps text that does not
+        // look numeric as TEXT, as when someone hand-edits the database.
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER DEFAULT 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cases: [(&str, bool); 9] = [
+            ("1", true),
+            ("0", false),
+            ("'true'", true),
+            ("' TRUE '", true),
+            ("'false'", false),
+            ("'yes please'", false),
+            ("''", false),
+            ("NULL", false),
+            ("X'00ff'", false),
+        ];
+        for (i, (literal, _)) in cases.iter().enumerate() {
+            sqlx::query(&format!("INSERT INTO t (id, v) VALUES ({i}, {literal})"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let rows = sqlx::query("SELECT v FROM t ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for (row, (literal, expected)) in rows.iter().zip(cases) {
+            assert_eq!(get_bool(row, "v"), expected, "value {literal}");
+        }
+        assert!(!get_bool(&rows[0], "missing_column"));
+    }
 }
