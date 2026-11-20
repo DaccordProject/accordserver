@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.6
+
+Boolean columns read from a hand-edited SQLite database no longer crash the
+server. `users.is_admin` set to the text `true` used to panic whenever that
+account signed in; text `1`/`true` (case-insensitive) now reads as true, and
+any other value reads as false with a warning. Use the number 1 when editing by
+hand, since some checks still compare numerically.
+
+Guest tokens are refused with 403 when creating a space, instead of failing the
+owner foreign key with a generic error.
+
+`docs/security-operations.md` now walks non-technical operators through becoming
+an administrator: why registration never grants it, creating your own space
+instead, `--bootstrap-admin` for the desktop app, Docker Compose and plain
+binaries, promoting an everyday account, and checks after editing the database
+by hand. The desktop app's Windows data folder is documented correctly as
+`%APPDATA%\daccord\Accord\data`.
+
+The Docker image and `scripts/setup-automod.sh` now fetch ONNX Runtime 1.22.0
+from Microsoft's official `Microsoft.ML.OnnxRuntime` NuGet package, pinned by
+SHA-256, because the GitHub release downloads are no longer available. The
+installed paths are unchanged.
+
+No migrations.
+
 ## 0.2.5
 
 Private chats gain per-device encryption keys (encryption v2). Each device has

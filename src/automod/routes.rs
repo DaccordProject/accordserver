@@ -231,12 +231,15 @@ pub async fn content(
     {
         return Err(AppError::NotFound("held attachment not found".into()));
     }
+    // ServeFile reports I/O failures as responses; its error type is Infallible.
     let mut response =
-        tower_http::services::ServeFile::new(super::private_path(&state, &upload.id))
+        match tower_http::services::ServeFile::new(super::private_path(&state, &upload.id))
             .oneshot(req)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))?
-            .map(axum::body::Body::new);
+        {
+            Ok(response) => response.map(axum::body::Body::new),
+            Err(never) => match never {},
+        };
     // Held originals are evidence: never cached, never rendered inline, and
     // always inert regardless of what the bytes actually are.
     for (header, value) in [

@@ -9,7 +9,7 @@ Accord is a chat/voice server backend for a Godot game client. It's a Rust web s
 ## Build & Run Commands
 
 - **Build:** `cargo build`
-- **Run:** `cargo run` (listens on port 3000 by default)
+- **Run:** `cargo run` (listens on port 39099 by default)
 - **Check (fast compile check):** `cargo check`
 - **Run tests:** `cargo test`
 - **Run a single test:** `cargo test test_name`
@@ -19,7 +19,7 @@ Accord is a chat/voice server backend for a Godot game client. It's a Rust web s
 ## Environment Variables
 
 ### General
-- `PORT` — server port (default: `3000`)
+- `PORT` — server port (default: `39099`)
 - `DATABASE_URL` — SQLite connection string (default: `sqlite:data/accord.db?mode=rwc`). The `data/` subdirectory is created automatically at startup. This keeps database files separate from the application binary. In Docker, the Dockerfile default is `sqlite:/app/data/accord.db?mode=rwc`; mount a volume at `/app/data` to persist across container restarts.
 - `RUST_LOG` — tracing filter (default: `accordserver=debug,tower_http=debug`)
 
@@ -112,6 +112,8 @@ Voice flow: client sends VOICE_STATE_UPDATE (opcode 9) → server updates voice 
 SQLite with WAL journal mode. Migrations in `migrations/` run automatically at startup. ~20 tables including: users, spaces, channels, messages, members, member_roles, roles, permission_overwrites, bans, invites, emojis, emoji_roles, reactions, attachments, pinned_messages, applications, bot_tokens, user_tokens, dm_participants. IDs are TEXT (snowflake-generated). Timestamps stored as TEXT via SQLite's `datetime()`. The `users` table has a nullable `password_hash` column (Argon2id) for registered users; bot users and legacy seeded users have `NULL`.
 
 New migrations should be added as numbered SQL files (e.g., `migrations/005_add_something.sql`).
+
+Boolean columns are `INTEGER` 0/1 in SQLite and `BOOLEAN` in PostgreSQL. Read them with `db::get_bool`, which also accepts hand-edited text (`'1'`/`'true'`, case-insensitive) and returns false instead of panicking on anything else. Registration never grants `users.is_admin`; the first instance administrator is created locally with `--bootstrap-admin` (see `docs/security-operations.md`).
 
 ## Tests
 

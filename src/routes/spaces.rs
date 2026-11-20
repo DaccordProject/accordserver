@@ -51,6 +51,10 @@ pub async fn create_space(
     auth: AuthUser,
     Json(input): Json<CreateSpace>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // A guest's synthetic user id has no users row, so it cannot own a space.
+    if auth.is_guest {
+        return Err(AppError::Forbidden("guests cannot create spaces".into()));
+    }
     // Input validation
     let name = input.name.trim();
     if name.is_empty() || name.len() > 100 {

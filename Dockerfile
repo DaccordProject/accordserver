@@ -26,16 +26,19 @@ RUN cargo build --locked --release && cp target/release/accordserver /app/accord
 # Match ort's pinned 1.22 API. Keep download tools out of the final image.
 # The published image currently targets Linux amd64.
 FROM debian:bookworm-slim AS automod-runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
+# Microsoft's official Microsoft.ML.OnnxRuntime NuGet package carries the same
+# CPU build; the microsoft/onnxruntime GitHub release downloads are gone.
 RUN test "$(dpkg --print-architecture)" = amd64 \
     && curl --fail --location --silent --show-error \
-      https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz \
-      -o /tmp/runtime.tgz \
-    && echo "8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3  /tmp/runtime.tgz" | sha256sum --check \
-    && mkdir -p /opt/onnxruntime \
-    && tar -xzf /tmp/runtime.tgz --strip-components=1 -C /opt/onnxruntime \
-    && rm /tmp/runtime.tgz
+      https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.22.0/microsoft.ml.onnxruntime.1.22.0.nupkg \
+      -o /tmp/runtime.nupkg \
+    && echo "d571e63a2329baacb713f441e65ad75284de354db6e1ac435fe4bebbb417986a  /tmp/runtime.nupkg" | sha256sum --check \
+    && mkdir -p /opt/onnxruntime/lib \
+    && unzip -q -j /tmp/runtime.nupkg 'runtimes/linux-x64/native/*' -d /opt/onnxruntime/lib \
+    && unzip -q -j /tmp/runtime.nupkg LICENSE ThirdPartyNotices.txt -d /opt/onnxruntime \
+    && rm /tmp/runtime.nupkg
 
 # Runtime stage
 FROM debian:bookworm-slim
